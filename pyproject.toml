@@ -1,0 +1,91 @@
+[project]
+name = "voice-agent"
+version = "0.0.0"
+description = "A conversational AI voice agent, built from an empty page one chapter at a time: VAD -> STT -> LLM -> TTS, streaming, with latency as a first-class feature."
+readme = "README.md"
+authors = [
+    { name = "Dmitrijs Rutko", email = "dmitrijs.rutko@gmail.com" },
+]
+license = { text = "MIT" }
+requires-python = ">=3.12"
+
+# Chapter 0 is deliberately dependency-free. Every runtime dependency added
+# later must be justified in that chapter's CHANGELOG entry: what it does,
+# and why it beats the alternative we did not take.
+dependencies = [
+    "anthropic>=1.4.0",
+    "elevenlabs>=2.66.0",
+    "fastapi>=0.141.1",
+    "openai>=3.8.0",
+    "python-dotenv>=1.2.3",
+    "uvicorn[standard]>=0.52.4",
+    "websockets>=17.1",
+]
+
+[project.scripts]
+voice-agent = "voice_agent.cli:main"
+verify = "voice_agent.verify:main"
+
+[build-system]
+requires = ["uv_build>=0.10.6,<0.11.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "mypy>=1.13.0",
+    "pytest>=8.3.0",
+    "pytest-asyncio>=1.0.0",
+    "pytest-cov>=6.0.0",
+    "ruff>=0.8.0",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "SIM",  # simplify
+    "C4",   # comprehensions
+    "PTH",  # use pathlib
+    "ASYNC",# async correctness (blocking calls in async defs)
+    "RUF",  # ruff-specific
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["voice_agent", "tests"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src", "tests"]
+warn_unreachable = true
+enable_error_code = ["redundant-expr", "truthy-bool", "ignore-without-code"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-q --strict-markers --strict-config"
+markers = [
+    "audio: requires real audio hardware (mic/speakers); skipped in CI",
+    "network: makes a real network call to a provider; skipped by default",
+    "latency: measures wall-clock latency; results are advisory, not asserted hard",
+]
+
+[tool.coverage.run]
+branch = true
+source = ["src/voice_agent"]
+
+[tool.coverage.report]
+show_missing = true
+exclude_lines = ["pragma: no cover", "if TYPE_CHECKING:", "raise NotImplementedError"]

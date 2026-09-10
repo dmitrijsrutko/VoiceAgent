@@ -1,0 +1,333 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>voice-agent</title>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1c1c1a; --muted: #6b6b66; --line: #e3e2dd;
+    --user: #1c1c1a; --user-fg: #fbfbfa; --agent: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #16161a; --fg: #eceae6; --muted: #8a8a84; --line: #2b2b31;
+      --user: #eceae6; --user-fg: #16161a; --agent: #1f1f25;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font: 15px/1.55 ui-sans-serif, -apple-system, "Segoe UI", system-ui, sans-serif;
+    display: flex; flex-direction: column; height: 100dvh;
+  }
+  header {
+    padding: 10px 16px; border-bottom: 1px solid var(--line);
+    display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap;
+    font-size: 12px; color: var(--muted);
+  }
+  header strong { color: var(--fg); font-size: 13px; }
+  /* min-height:0 is load-bearing: a flex item defaults to min-height:auto,
+     so without it #log grows to fit its content and the page scrolls off the
+     bottom instead of the log scrolling inside itself. */
+  #log { flex: 1; min-height: 0; overflow-y: auto; padding: 20px 16px; }
+  .wrap { max-width: 700px; margin: 0 auto; display: flex; flex-direction: column; gap: 12px; }
+  .msg { max-width: 82%; padding: 9px 13px; border-radius: 14px; white-space: pre-wrap; word-wrap: break-word; }
+  .user { align-self: flex-end; background: var(--user); color: var(--user-fg); border-bottom-right-radius: 4px; }
+  .agent { align-self: flex-start; background: var(--agent); border: 1px solid var(--line); border-bottom-left-radius: 4px; }
+  .note { align-self: center; color: var(--muted); font-size: 13px; text-align: center; }
+  .error { align-self: center; color: #c0392b; font-size: 13px; text-align: center; }
+  .cursor::after { content: "▍"; opacity: .5; }
+  form { border-top: 1px solid var(--line); padding: 12px 16px; }
+  .row { max-width: 700px; margin: 0 auto; display: flex; gap: 8px; }
+  input {
+    flex: 1; padding: 10px 13px; font: inherit; color: inherit;
+    background: var(--agent); border: 1px solid var(--line); border-radius: 10px;
+  }
+  input:focus { outline: 2px solid var(--fg); outline-offset: -1px; }
+  button {
+    padding: 10px 18px; font: inherit; font-weight: 600; cursor: pointer;
+    background: var(--user); color: var(--user-fg); border: 0; border-radius: 10px;
+  }
+  button:disabled, input:disabled { opacity: .45; cursor: not-allowed; }
+  .chip {
+    padding: 4px 10px; font-size: 12px; font-weight: 600; border-radius: 999px;
+    background: transparent; color: var(--fg); border: 1px solid var(--line);
+  }
+  .chip.on { background: #c0392b; color: #fff; border-color: #c0392b; }
+  .msg.volatile { opacity: .55; font-style: italic; }
+</style>
+</head>
+<body>
+  <header>
+    <strong>voice-agent</strong>
+    <span id="meta">connecting…</span>
+    <span id="status"></span>
+    <span style="margin-left:auto;"></span>
+    <button type="button" id="listen" class="chip" disabled>🎤 listen</button>
+    <label style="cursor:pointer;"><input type="checkbox" id="mute"> mute</label>
+  </header>
+
+  <div id="log"><div class="wrap" id="wrap">
+    <div class="note">Type, or press <strong>listen</strong> and talk — the agent answers out loud.<br>Say or type <code>exit</code> to end the conversation.</div>
+  </div></div>
+
+  <form id="form">
+    <div class="row">
+      <input id="input" autocomplete="off" placeholder="Ask something…" autofocus>
+      <button id="send" type="submit">Send</button>
+    </div>
+  </form>
+
+<script>
+const key = location.pathname.split("/").pop();
+const wrap = document.getElementById("wrap");
+const log = document.getElementById("log");
+const form = document.getElementById("form");
+const input = document.getElementById("input");
+const send = document.getElementById("send");
+const meta = document.getElementById("meta");
+const status = document.getElementById("status");
+const mute = document.getElementById("mute");
+const listen = document.getElementById("listen");
+
+let bubble = null;
+let live = null;           // the user bubble being transcribed into, if any
+let listening = false;
+let speaking = false;      // half-duplex gate: don't let the agent hear itself
+let mic = null;            // { context, node, stream } once built
+let sampleRate = 16000;
+let pendingAudio = null;   // metadata from the `audio` frame, awaiting its bytes
+let player = null;         // the clip currently playing
+
+function add(text, cls) {
+  const el = document.createElement("div");
+  el.className = cls;
+  el.textContent = text;
+  wrap.appendChild(el);
+  log.scrollTop = log.scrollHeight;
+  return el;
+}
+
+function setEnabled(on) {
+  input.disabled = !on;
+  send.disabled = !on;
+  if (on) input.focus();
+}
+
+function ms(v) { return v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }
+
+function note(el, text) {
+  const tag = document.createElement("span");
+  tag.style.cssText = "display:block; font-size:11px; opacity:.5; margin-top:4px;";
+  tag.textContent = text;
+  el.appendChild(tag);
+}
+
+function setSpeaking(active) {
+  // Transition-guarded, and the only place `speaking` is assigned. A clip that
+  // replaces another fires no `onended` for the one it replaced, so a naive
+  // "tell the server on every play" leaks a hold the server never gets back —
+  // and a stuck hold means the microphone is muted forever with nothing said.
+  if (speaking === active) return;
+  speaking = active;
+  if (ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "playback", active }));
+  }
+  paintListening();
+}
+
+function play(bytes, mediaType) {
+  // Autoplay is allowed here because sending the message was a user gesture.
+  // If a browser disagrees, surface a click-to-play rather than failing silently.
+  const url = URL.createObjectURL(new Blob([bytes], { type: mediaType }));
+  if (player) {
+    player.onended = player.onerror = null;   // this one is being replaced
+    player.pause();
+    URL.revokeObjectURL(player.src);
+  }
+  player = new Audio(url);
+  const done = () => { setSpeaking(false); URL.revokeObjectURL(url); };
+  player.onended = done;
+  player.onerror = done;
+  setSpeaking(true);
+  player.play().catch(() => { done(); status.textContent = "· click anywhere to enable audio"; });
+}
+
+// An AudioWorklet needs a module URL; a Blob keeps this page a single file
+// with no build step. It converts float samples to the PCM16 the recognizer
+// wants and posts them in ~100 ms chunks rather than 128-sample blocks.
+const WORKLET = URL.createObjectURL(new Blob([`
+class Capture extends AudioWorkletProcessor {
+  constructor() { super(); this.buf = new Int16Array(1600); this.n = 0; }
+  process(inputs) {
+    const ch = inputs[0][0];
+    if (!ch) return true;
+    for (let i = 0; i < ch.length; i++) {
+      const s = Math.max(-1, Math.min(1, ch[i]));
+      this.buf[this.n++] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      if (this.n === this.buf.length) { this.port.postMessage(this.buf.slice()); this.n = 0; }
+    }
+    return true;
+  }
+}
+registerProcessor("capture", Capture);
+`], { type: "application/javascript" }));
+
+async function warmUpMicPermission() {
+  // Ask on page load so the prompt is out of the way and the first press of
+  // "listen" is instant. The tracks are stopped immediately: the grant is
+  // remembered, so re-acquiring later costs nothing and the recording
+  // indicator does not sit lit for the whole session.
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    stream.getTracks().forEach((t) => t.stop());
+    listen.disabled = false;
+  } catch (err) {
+    listen.title = "microphone blocked: " + err.name;
+    status.textContent = "· microphone unavailable";
+  }
+}
+
+async function buildMic(sampleRate) {
+  // Capture at the recognizer's own rate so nothing resamples anywhere.
+  const stream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true,
+             channelCount: 1, sampleRate },
+  });
+  const context = new AudioContext({ sampleRate });
+  await context.audioWorklet.addModule(WORKLET);
+  const node = new AudioWorkletNode(context, "capture");
+  node.port.onmessage = (e) => {
+    // Half-duplex: while the agent is talking, its own voice is reaching this
+    // microphone. Drop those frames rather than transcribing the agent.
+    if (listening && !speaking && ws.readyState === WebSocket.OPEN) ws.send(e.data.buffer);
+  };
+  context.createMediaStreamSource(stream).connect(node);
+  return { context, node, stream };
+}
+
+const proto = location.protocol === "https:" ? "wss:" : "ws:";
+const ws = new WebSocket(`${proto}//${location.host}/ws/${key}`);
+ws.binaryType = "arraybuffer";
+
+ws.onmessage = (event) => {
+  if (event.data instanceof ArrayBuffer) {
+    // The binary frame always follows the `audio` frame that describes it.
+    if (pendingAudio && !mute.checked) play(event.data, pendingAudio.media_type);
+    pendingAudio = null;
+    return;
+  }
+
+  const msg = JSON.parse(event.data);
+
+  if (msg.type === "ready") {
+    const voice = msg.voice ? `${msg.voice.provider} ${msg.voice.voice.slice(0, 10)}` : "silent";
+    const ears = msg.ears ? `🎤 ${msg.ears.provider} ${msg.ears.sample_rate / 1000}kHz` : "🎤 deaf";
+    meta.textContent = `${msg.provider} · ${msg.model} · 🔊 ${voice} · ${ears} · ${msg.session.slice(0, 8)}…`;
+    sampleRate = msg.ears ? msg.ears.sample_rate : 16000;
+    if (msg.ears) warmUpMicPermission();
+    for (const m of msg.history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
+    if (msg.ended) { add("This conversation has ended.", "note"); setEnabled(false); }
+    else setEnabled(true);
+
+  } else if (msg.type === "reply_start") {
+    bubble = add("", "msg agent cursor");
+
+  } else if (msg.type === "delta") {
+    if (bubble) { bubble.textContent += msg.text; log.scrollTop = log.scrollHeight; }
+
+  } else if (msg.type === "reply_end") {
+    if (bubble) {
+      bubble.classList.remove("cursor");
+      note(bubble, `💭 thought for ${ms(msg.ttft_ms)} · ${msg.chars} chars in ${ms(msg.generation_ms)}`);
+    }
+    setEnabled(true);
+
+  } else if (msg.type === "audio") {
+    // Announced before its bytes, so the wait for batched synthesis is visible.
+    pendingAudio = msg;
+    if (bubble) {
+      // The clip's own length matters as much as the time taken to make it: a
+      // 31-second answer is a product problem no latency work can fix.
+      const length = msg.seconds ? `${msg.seconds.toFixed(1)} s of speech · ` : "";
+      note(bubble, `🔊 ${length}${(msg.bytes / 1024).toFixed(0)} kB · synthesized in ${ms(msg.synthesis_ms)} · audio at ${ms(msg.total_ms)}`);
+    }
+    bubble = null;
+
+  } else if (msg.type === "transcript") {
+    if (!msg.text.trim() && !msg.final) return;
+    if (!live) live = add("", "msg user volatile");
+    live.textContent = msg.text;
+    if (msg.final) {
+      live.classList.remove("volatile");
+      note(live, `🎙 committed ${ms(msg.endpoint_ms)} after your last recognised word`);
+      live = null;
+    }
+    log.scrollTop = log.scrollHeight;
+
+  } else if (msg.type === "listening") {
+    listening = msg.active;
+    paintListening();
+    if (msg.reason) add(msg.reason + " — press listen to resume", "note");
+
+  } else if (msg.type === "listen_error") {
+    listening = false;
+    paintListening();
+    add(msg.message, "error");
+
+  } else if (msg.type === "audio_error") {
+    if (bubble) note(bubble, `🔇 ${msg.message}`);
+    bubble = null;
+
+  } else if (msg.type === "error") {
+    if (bubble) { bubble.remove(); bubble = null; }
+    add(msg.message, "error");
+    setEnabled(true);
+
+  } else if (msg.type === "ended") {
+    add("Conversation ended. Reload to start a new one.", "note");
+    setEnabled(false);
+  }
+};
+
+ws.onclose = () => { status.textContent = "· disconnected"; setEnabled(false); };
+ws.onerror = () => { status.textContent = "· connection error"; };
+
+function paintListening() {
+  listen.classList.toggle("on", listening);
+  listen.textContent = listening ? "⏹ stop" : "🎤 listen";
+  status.textContent = !listening ? "" : speaking ? "· muted while speaking" : "· listening";
+}
+
+listen.onclick = async () => {
+  if (listening) {
+    ws.send(JSON.stringify({ type: "listen_stop" }));
+    return;
+  }
+  listen.disabled = true;
+  try {
+    if (!mic) mic = await buildMic(sampleRate);
+    await mic.context.resume();
+    ws.send(JSON.stringify({ type: "listen_start" }));
+  } catch (err) {
+    add("microphone failed: " + err.message, "error");
+  } finally {
+    listen.disabled = false;
+  }
+};
+
+form.onsubmit = (event) => {
+  event.preventDefault();
+  const text = input.value.trim();
+  if (!text || ws.readyState !== WebSocket.OPEN) return;
+  add(text, "msg user");
+  ws.send(JSON.stringify({ type: "user_message", text }));
+  input.value = "";
+  setEnabled(false);
+};
+
+setEnabled(false);
+</script>
+</body>
+</html>
