@@ -17,12 +17,12 @@ def store() -> SessionStore:
 
 @pytest.fixture
 def client(llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, store: SessionStore) -> TestClient:
-    return TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store))
+    return TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
 
 
 @pytest.fixture
 def silent_client(llm: FakeLLM, store: SessionStore) -> TestClient:
-    return TestClient(create_app(llm=llm, store=store, voice=False, ears=False))
+    return TestClient(create_app(llm=llm, store=store, voice=False, ears=False, greeting=""))
 
 
 def start(client: TestClient) -> str:
@@ -147,7 +147,7 @@ def test_exit_ends_the_conversation_and_it_stays_ended(
 
 
 def test_a_failed_turn_rolls_back_the_user_message(store: SessionStore) -> None:
-    app = create_app(llm=FakeLLM(fail=True), store=store, voice=False, ears=False)
+    app = create_app(llm=FakeLLM(fail=True), store=store, voice=False, ears=False, greeting="")
     client = TestClient(app)
     key = start(client)
 
@@ -232,7 +232,9 @@ def test_the_reply_is_spoken_as_a_binary_frame_after_its_text(
 def test_a_failed_synthesis_keeps_the_reply_and_degrades_to_text(
     store: SessionStore, llm: FakeLLM
 ) -> None:
-    client = TestClient(create_app(llm=llm, tts=FakeTTS(fail=True), store=store, ears=False))
+    client = TestClient(
+        create_app(llm=llm, tts=FakeTTS(fail=True), store=store, ears=False, greeting="")
+    )
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
@@ -298,7 +300,9 @@ def test_an_empty_reply_reports_its_whole_duration_as_time_to_first_token(
 ) -> None:
     """Nothing streamed means the user waited and got nothing — reporting that
     as zero of everything would hide exactly the failure worth seeing."""
-    client = TestClient(create_app(llm=FakeLLM(replies=[""]), tts=tts, store=store, ears=False))
+    client = TestClient(
+        create_app(llm=FakeLLM(replies=[""]), tts=tts, store=store, ears=False, greeting="")
+    )
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:

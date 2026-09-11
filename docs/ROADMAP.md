@@ -236,6 +236,13 @@ Every turn of iteration costs money and quota, and the pipeline has three
 metered vendors in it. That is a design constraint on the *project*, not just
 the product.
 
+**This is not theoretical — it happened.** A month's 10,000 credits went in
+about three days of building Chapters 2 to 4, and the single largest consumer
+was not the agent talking but a keep-alive that streamed silence to a
+duration-metered recognizer five times a second. Two lessons: anything that
+sends audio on a timer is a spend decision, and a project whose inner loop
+depends on a metered vendor will stop dead in the middle of a chapter.
+
 **The free tiers do not survive a debugging session.** ElevenLabs' free plan is
 10,000 credits per month; at 0.5 credits per character on Flash that is ~20,000
 characters, or roughly 150–200 spoken replies of the length this agent
@@ -324,10 +331,12 @@ The source material is broadly sound. Points where I would qualify it:
   endpointing must avoid cutting off a thinking pause (favor false negatives);
   barge-in must yield fast (favor false positives). One shared threshold is a
   guaranteed compromise at both ends.
-- **Cache-warming on hosted APIs is worth less than it reads.** With a
-  breakpoint-based cache, the growing transcript tail is re-prefilled anyway.
-  Do it for history; do not expect the incremental-transcript trick to pay off
-  outside a self-hosted engine.
+- **Cache-warming on hosted APIs is worth less than it reads** — and Chapter 4
+  measured how much less. On DeepSeek it is ~60-90 ms on a conversation's first
+  turn and **~10 ms after**, because the provider's cache is already 80-87%
+  warm from the previous turn's own call. TTFT is dominated by a ~716 ms
+  network-and-queue floor that no prefill trick touches. Do it for history if it
+  is free; do not build a chapter around it expecting latency.
 - **"First audio within 700 ms" and "≤ 800 ms end to end" are the same claim**
   measured from different points. Pick one definition, write it into the eval
   harness, and never quote the other.

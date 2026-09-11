@@ -250,9 +250,12 @@ async def test_repeated_drops_eventually_stop_and_say_so() -> None:
     assert mic.listening is False
 
 
-async def test_silence_is_sent_when_the_browser_goes_quiet() -> None:
+async def test_silence_is_sent_when_the_browser_goes_quiet(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The root cause: while a reply plays, the browser sends nothing, and
     ~15 s of that ends the recognizer's session. The gap gets filled."""
+    monkeypatch.setattr(server, "KEEPALIVE_GAP_SECONDS", 0.1)
     channel = RecordingChannel()
 
     class Counting:

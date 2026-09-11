@@ -20,6 +20,7 @@ wheels/
 htmlcov/
 
 # Runtime data, not source
+.cache/
 recordings/
 sessions/
 traces/

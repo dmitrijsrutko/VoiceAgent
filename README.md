@@ -62,6 +62,17 @@ for the full log and the reasoning behind each step.
   enter through the same door, and nothing downstream knows which was used.
   Half-duplex on purpose — the mic mutes while the agent speaks, and removing
   that is the barge-in chapter.
+- **Chapter 4 — acting before the turn ends.** Partial transcripts feed a
+  LocalAgreement filter; text the recognizer has said twice is treated as
+  settled, and the reasoning engine is prefilled on it while you are still
+  talking. Measured honestly: warming saves ~60-90 ms on a conversation's first
+  turn and ~10 ms after, because the provider's cache is already 80-87% warm
+  from the previous turn. The stable prefix is the point — it settles the whole
+  turn 0.3-1.0 s before the recognizer commits, which is what speculative
+  generation will spend.
+  The agent also opens with a greeting, synthesised once at startup — which
+  absorbs the synthesis engine's cold start (3.1 s on a process's first call)
+  rather than paying it on your first question.
 
 ## Requirements
 

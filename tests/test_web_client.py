@@ -8,6 +8,8 @@ actually happened, not a substitute for running the page.
 """
 
 import re
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -76,6 +78,23 @@ def script() -> str:
     return body.group(1)
 
 
+def code_only(script: str) -> str:
+    """Drop the literal text inside template strings, keeping `${...}` parts.
+
+    Prose in a template literal is data, not code: `already cached (${pct}%)`
+    contains no call to a function named `cached`. Without this the checker
+    reports on the wording of the UI, and a checker that fires on prose is one
+    that gets ignored. The worklet source lives in a template literal too, so
+    it is exempt from this analysis and covered by the capture-pipeline test.
+    """
+    return re.sub(
+        r"`[^`]*`",
+        lambda m: " ".join(re.findall(r"\$\{([^{}]*)\}", m.group(0))),
+        script,
+        flags=re.DOTALL,
+    )
+
+
 def defined_names(script: str) -> set[str]:
     patterns = (
         r"function\s+([A-Za-z_$][\w$]*)",
@@ -84,13 +103,20 @@ def defined_names(script: str) -> set[str]:
         # class methods, which are not `function name(...)`
         r"\n\s{2,}([A-Za-z_$][\w$]*)\s*\([^)]*\)\s*\{",
     )
-    return {name for pattern in patterns for name in re.findall(pattern, script)}
+    script = code_only(script)
+    names = {name for pattern in patterns for name in re.findall(pattern, script)}
+    # Parameters count as defined: a callback passed in and invoked by name is
+    # not a missing function, and flagging it would train us to ignore this.
+    # Matching too much is harmless — it only ever adds to the "defined" set.
+    for params in re.findall(r"\(([^()]*)\)\s*(?:=>|\{)", script):
+        names.update(re.findall(r"[A-Za-z_$][\w$]*", params))
+    return names
 
 
 def called_names(script: str) -> set[str]:
     # An identifier followed by "(", not preceded by a dot (a method call) or
     # by another word character.
-    return set(re.findall(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(", script))
+    return set(re.findall(r"(?<![.\w$])([A-Za-z_$][\w$]*)\s*\(", code_only(script)))
 
 
 def test_every_function_the_page_calls_is_defined(script: str) -> None:
@@ -144,3 +170,75 @@ def test_speaking_is_assigned_in_exactly_one_place(script: str) -> None:
 
     assigned = len(assignments) - len(declarations)
     assert assigned == 1, f"speaking is assigned in {assigned} places outside its declaration"
+
+
+def body_of(script: str, signature: str) -> str:
+    body = script[script.index(signature) :]
+    return body[: body.index("\n}")]
+
+
+def test_nothing_scrolls_the_log_outside_the_helper(script: str) -> None:
+    """Telemetry is the last thing appended to a turn, so an append that does
+    not scroll is one nobody ever sees — which is exactly how the `🔊 …` line
+    ended up permanently below the fold."""
+    helper = body_of(script, "function stick(")
+
+    assert script.count("log.scrollTop =") == helper.count("log.scrollTop ="), (
+        "something scrolls the log outside stick(); it will fight the helper"
+    )
+
+
+@pytest.mark.parametrize("appender", ["function add(", "function note("])
+def test_both_appenders_scroll(script: str, appender: str) -> None:
+    assert "stick(" in body_of(script, appender), f"{appender.strip()} appends without scrolling"
+
+
+def test_the_reader_is_not_yanked_back_down(script: str) -> None:
+    """Scrolled up reading earlier turns, a hard scroll-to-bottom on every
+    fragment would be worse than the bug it fixes."""
+    helper = body_of(script, "function stick(")
+    callback = re.search(r"function stick\((\w+)\)", script)
+    assert callback, "stick() takes no callback, so it cannot enforce the ordering"
+
+    assert "clientHeight" in helper, "stick() does not check whether we were at the bottom"
+    assert helper.index("clientHeight") < helper.index(f"{callback.group(1)}()"), (
+        "the check must happen before the mutation, since the mutation moves the bottom"
+    )
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="node is not installed")
+def test_the_client_javascript_parses(script: str, tmp_path: Path) -> None:
+    """The static checks above read the script as text and cannot see a syntax
+    error. `node --check` can, and costs nothing where node exists."""
+    source = tmp_path / "client.js"
+    source.write_text(script, encoding="utf-8")
+
+    result = subprocess.run(
+        ["node", "--check", str(source)], capture_output=True, text=True, check=False
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def without_comments(source: str) -> str:
+    """Drop `//` comments. A checker that reads its own explanations as code
+    reports the prose rather than the program — this file has now done that
+    twice, once on a template literal and once on a comment."""
+    return re.sub(r"//[^\n]*", "", source)
+
+
+def test_the_autoplay_fallback_does_not_revoke_the_clip_it_will_replay(script: str) -> None:
+    """The greeting arrives before any user gesture, so browsers refuse to play
+    it. The fallback holds the clip until the first click — which it cannot do
+    if it has already revoked the object URL, as the first version did."""
+    body = body_of(script, "function play(")
+    fallback = without_comments(body[body.index(".play().catch(") :])
+
+    assert "done()" not in fallback, "the fallback revokes the URL it intends to replay"
+    assert "pointerdown" in fallback, "nothing waits for the gesture that unblocks audio"
+
+
+def test_the_cached_token_percentage_cannot_divide_by_zero(script: str) -> None:
+    """A provider that reports no usage yields a zero prompt-token count, and
+    `NaN%` on screen is how you would find out."""
+    assert "const pct = msg.warm_prompt_tokens" in script, "the division is unguarded"

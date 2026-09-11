@@ -20,7 +20,9 @@ import contextlib
 import json
 import logging
 import time
+from base64 import b64decode, b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -30,13 +32,16 @@ from voice_agent.config import load_settings, load_system_prompt
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ProviderError, SessionNotFoundError, VoiceAgentError
 from voice_agent.llm import LLM, create_llm
+from voice_agent.llm.base import Warmth
 from voice_agent.sessions import SessionStore
 from voice_agent.stt import STT, create_stt
-from voice_agent.tts import TTS, create_tts
+from voice_agent.stt.agreement import StablePrefix
+from voice_agent.tts import TTS, AudioClip, create_tts
 
 logger = logging.getLogger(__name__)
 
 PAGE_PATH = Path(__file__).parent / "web" / "index.html"
+GREETING_CACHE = Path(".cache")
 
 IDLE_TIMEOUT_SECONDS = 30.0
 """How long with no *speech* before listening stops. Not "no audio": the
@@ -57,15 +62,23 @@ never fired, would otherwise stop the microphone forever *and* silently, since
 a suspended timer announces nothing. This converts the worst failure mode
 observed in this project into a one-minute hiccup."""
 
-KEEPALIVE_SECONDS = 0.2
-"""How long the recognizer may go without audio before we send it silence.
+KEEPALIVE_GAP_SECONDS = 10.0
+"""How long the recognizer may go without audio before we top it up.
 
-Measured against the real service: ElevenLabs Scribe closes a realtime session
-after roughly 15 seconds with no audio — and closes it *normally*, code 1000,
-so the stream simply ends rather than raising. The browser stops sending while
-a reply plays, so any answer longer than ~15 s silently killed the ears. The
-microphone is metered by audio duration either way, so filling the gap costs
-what an open microphone would have cost anyway."""
+Measured against the real service: Scribe closes a realtime session after
+roughly 15 seconds with no audio — and closes it *normally*, code 1000, so the
+stream simply ends rather than raising. The browser stops sending while a reply
+plays, so any answer longer than ~15 s silently killed the ears.
+
+The first version filled *every* gap, sending silence five times a second. That
+is continuous real-time audio to a service metered by audio duration, and it
+quietly consumed a month's quota. Topping up shortly before the deadline
+instead costs about 2% of that. If the assumption behind the interval is ever
+wrong, the session simply ends and the reconnect below catches it — the failure
+mode is a hiccup, not silence."""
+
+KEEPALIVE_BURST_SECONDS = 0.2
+"""How much silence one top-up sends."""
 
 MAX_RECONNECTS = 3
 """If the recognizer drops us anyway, reconnect rather than going quietly deaf.
@@ -73,6 +86,28 @@ Silent failure is the worst outcome available here: the page still says
 "listening" and the user keeps talking to nothing."""
 
 WATCHDOG_TICK_SECONDS = 1.0
+
+WARM_MIN_NEW_WORDS = 48
+"""How much the agreed prefix must grow before warming again.
+
+Measured on a real 22-word turn, warming on every growth fired **seven** calls
+and the provider's cached-token count never moved off 1024: the utterance is
+far too short to complete another 64-token cache block, so warms two through
+seven were billed prefill that cached nothing. One block is roughly 48 words of
+speech, so that is the threshold — long utterances still warm more than once,
+short ones warm exactly once and keep the earliest, longest lead."""
+
+WARM_ON_STABLE = True
+"""Whether to prefill the reasoning engine on agreed-stable transcript text
+while the user is still speaking.
+
+Honest about its worth: measured against DeepSeek, this saves ~60-90 ms on the
+*first* turn of a conversation and ~10 ms on every turn after, because the
+provider's cache is already 80-87% warm from the previous turn's own call. It
+is kept because the machinery — agreeing a stable prefix and acting on it
+before the turn ends — is the part that matters, and pointing it at a real
+generation instead of a discarded one is worth 1.0-1.7 s. This is that change
+with the payoff switched off."""
 
 EXIT_COMMANDS = frozenset({"exit", "quit", "bye", "goodbye"})
 """Typing or saying any of these ends the conversation. Matched on the whole
@@ -99,6 +134,43 @@ def serialize(messages: Sequence[Message]) -> list[dict[str, str]]:
     return [{"role": m.role, "content": m.content} for m in messages]
 
 
+class Warmings:
+    """What the warming calls for the current turn found.
+
+    Reported once, on the committed transcript, rather than per warm: the
+    interesting question is how much of the prompt was already paid for by the
+    time the turn ended, not the shape of each individual call.
+    """
+
+    def __init__(self) -> None:
+        self.count = 0
+        self.last: Warmth | None = None
+        self.finished_at: float | None = None
+
+    def record(self, warmth: Warmth) -> None:
+        self.count += 1
+        self.last = warmth
+        self.finished_at = time.perf_counter()
+
+    def report(self) -> dict[str, object]:
+        if self.last is None:
+            return {"warms": self.count}
+        return {
+            "warms": self.count,
+            "warm_prompt_tokens": self.last.prompt_tokens,
+            "warm_cached_tokens": self.last.cached_tokens,
+            # How far ahead of the turn ending the last warm landed. A warm
+            # that does not land before the turn ends is cancelled and never
+            # recorded, so everything reported here arrived in time to help.
+            "warm_lead_ms": elapsed_ms(self.finished_at) if self.finished_at else 0,
+        }
+
+    def reset(self) -> None:
+        self.count = 0
+        self.last = None
+        self.finished_at = None
+
+
 class Channel:
     """Serializes writes to one WebSocket.
 
@@ -122,6 +194,114 @@ class Channel:
             await self._websocket.send_bytes(data)
 
 
+class Greeting:
+    """The agent's opening line, synthesised once for the life of the process.
+
+    Cached rather than re-synthesised per visitor because it never changes:
+    that is zero synthesis cost and zero wait on every conversation after the
+    first, and it is the cheapest optimisation available in a voice pipeline.
+    """
+
+    def __init__(self, text: str, speaker: TTS | None, cache_dir: Path | None = None) -> None:
+        self.text = text.strip()
+        self._speaker = speaker
+        # Resolved now rather than bound as a default argument, so that a test
+        # can point it somewhere disposable instead of at the working tree.
+        self._cache_dir = GREETING_CACHE if cache_dir is None else cache_dir
+        self._clip: AudioClip | None = None
+        self._synthesis_ms = 0
+        self._attempted = False
+
+    @property
+    def _cache_file(self) -> Path:
+        """Keyed by everything that changes the audio, so editing the greeting
+        or switching voice produces a different file rather than a stale one."""
+        assert self._speaker is not None
+        key = f"{self._speaker.provider}:{self._speaker.voice}:{self.text}"
+        return self._cache_dir / f"greeting-{sha256(key.encode()).hexdigest()[:16]}.json"
+
+    def _load(self) -> AudioClip | None:
+        try:
+            saved = json.loads(self._cache_file.read_text())
+            return AudioClip(
+                data=b64decode(saved["audio"]),
+                media_type=saved["media_type"],
+                seconds=saved["seconds"],
+            )
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def _save(self, clip: AudioClip) -> None:
+        try:
+            self._cache_dir.mkdir(parents=True, exist_ok=True)
+            self._cache_file.write_text(
+                json.dumps(
+                    {
+                        "media_type": clip.media_type,
+                        "seconds": clip.seconds,
+                        "audio": b64encode(clip.data).decode(),
+                    }
+                )
+            )
+        except OSError as exc:  # a cache that cannot be written is not an error
+            logger.info("could not cache the greeting: %s", exc)
+
+    async def prepare(self) -> None:
+        if not self.text or self._speaker is None or self._clip is not None:
+            return
+        if self._attempted:
+            # Tried once and failed. Retrying per visitor makes every page load
+            # wait on a request already known to fail — which is exactly what
+            # an exhausted quota looks like — for a greeting that will be text
+            # either way. A restart is the retry.
+            return
+        self._attempted = True
+        # Across restarts, not just within one process: the greeting is a fixed
+        # string, and re-synthesising it on every `uv run voice-agent` bills for
+        # bytes we already have. On a free plan that is a meaningful fraction of
+        # a month's quota spent on a sentence that never changes.
+        self._clip = self._load()
+        if self._clip is not None:
+            return
+        started = time.perf_counter()
+        try:
+            self._clip = await self._speaker.synthesize(self.text)
+        except VoiceAgentError as exc:
+            # An agent that cannot greet must still be able to converse.
+            logger.warning("could not prepare the greeting: %s", exc)
+            return
+        self._synthesis_ms = elapsed_ms(started)
+        self._save(self._clip)
+        logger.info("greeting synthesised in %d ms and cached", self._synthesis_ms)
+
+    async def deliver(self, channel: Channel, conversation: Conversation) -> None:
+        """Greet a conversation that has not started yet."""
+        if not self.text:
+            return
+        await self.prepare()  # only does anything if startup could not
+        # Checked *after* the await, and with nothing awaited between here and
+        # the append: two tabs opening the same link would otherwise both pass
+        # an earlier check, both wait, and both greet.
+        if conversation.messages or conversation.ended:
+            return
+        conversation.add_assistant(self.text)
+        await channel.send_json({"type": "greeting", "text": self.text})
+        if self._clip is None:
+            return
+        await channel.send_audio(
+            {
+                "type": "audio",
+                "media_type": self._clip.media_type,
+                "bytes": len(self._clip),
+                "seconds": self._clip.seconds,
+                "synthesis_ms": self._synthesis_ms,
+                "total_ms": 0,
+                "cached": True,
+            },
+            self._clip.data,
+        )
+
+
 class Mic:
     """One listening session: audio frames in, transcripts out.
 
@@ -141,12 +321,19 @@ class Mic:
         stt: STT,
         channel: Channel,
         on_final: Callable[[str], Awaitable[None]],
+        on_stable: Callable[[str], Awaitable[None]] | None = None,
+        on_session: Callable[[], None] | None = None,
+        extra_report: Callable[[], dict[str, object]] | None = None,
         idle_timeout: float | None = None,
         session_cap: float | None = None,
     ) -> None:
         self._stt = stt
         self._channel = channel
         self._on_final = on_final
+        self._on_stable = on_stable
+        self._on_session = on_session
+        self._extra_report = extra_report
+        self._agreement = StablePrefix()
         self.idle_timeout = IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout
         self.session_cap = SESSION_CAP_SECONDS if session_cap is None else session_cap
         self._frames: asyncio.Queue[bytes | None] | None = None
@@ -190,12 +377,12 @@ class Mic:
         stays a diagnosis rather than being papered over by the silence this
         sends on the browser's behalf.
         """
-        silence = b"\x00" * int(self._stt.sample_rate * 2 * KEEPALIVE_SECONDS)
+        silence = b"\x00" * int(self._stt.sample_rate * 2 * KEEPALIVE_BURST_SECONDS)
         while True:
-            await asyncio.sleep(KEEPALIVE_SECONDS)
+            await asyncio.sleep(KEEPALIVE_BURST_SECONDS)
             if self._frames is None:
                 continue
-            if time.perf_counter() - self._last_frame_at >= KEEPALIVE_SECONDS:
+            if time.perf_counter() - self._last_frame_at >= KEEPALIVE_GAP_SECONDS:
                 self._last_frame_at = time.perf_counter()
                 self._frames.put_nowait(silence)
 
@@ -346,6 +533,16 @@ class Mic:
             )
 
     async def _consume(self) -> None:
+        # Every recognizer session starts from nothing. Agreement was only
+        # being cleared on a commit, so a session that ended without one — the
+        # user stopping mid-sentence, or a reconnect — carried its settled
+        # words into the next utterance. There they wedge agreement completely
+        # (nothing can extend a prefix the user is not saying) and are then
+        # reported as "4 words settled early, prefix did not hold" against
+        # words nobody repeated.
+        self._agreement.reset()
+        if self._on_session is not None:
+            self._on_session()
         heard_at = time.perf_counter()
         async for transcript in self._stt.stream(self._audio()):
             self._heard_speech_at = time.perf_counter()
@@ -355,6 +552,11 @@ class Mic:
                 await self._channel.send_json(
                     {"type": "transcript", "text": transcript.text, "final": False}
                 )
+                # The recognizer will rewrite this text; agreement decides which
+                # of it is safe to act on before the turn is over.
+                stable = self._agreement.update(transcript.text)
+                if stable and self._on_stable is not None:
+                    await self._on_stable(stable)
                 continue
 
             if not transcript.text.strip():
@@ -362,10 +564,22 @@ class Mic:
                 # session, or a stretch of noise. Reporting it would put an
                 # empty bubble and a meaningless endpointing figure on screen.
                 heard_at = time.perf_counter()
+                self._agreement.reset()
                 continue
+
+            if self._agreement.contradictions:
+                # Should be zero: agreement is a bet that the recognizer will
+                # not unsay something it has already said twice. If this ever
+                # fires, the bet is not safe on this recognizer and everything
+                # built on it needs rethinking.
+                logger.warning(
+                    "agreement contradicted itself %d time(s) this turn",
+                    self._agreement.contradictions,
+                )
 
             await self._channel.send_json(
                 {
+                    **(self._extra_report() if self._extra_report else {}),
                     "type": "transcript",
                     "text": transcript.text,
                     "final": True,
@@ -378,8 +592,14 @@ class Mic:
                     # utterance. Delegating endpointing to the STT vendor
                     # also delegates the ability to measure it.
                     "endpoint_ms": elapsed_ms(heard_at),
+                    # Was the text we called stable really how the turn began?
+                    # The honest test of whether agreement — and everything
+                    # built on it — was worth trusting.
+                    "prefix_held": self._agreement.holds_for(transcript.text),
+                    "stable_words": len(self._agreement.text.split()),
                 }
             )
+            self._agreement.reset()
             heard_at = time.perf_counter()
             await self._on_final(transcript.text)
 
@@ -391,6 +611,7 @@ def create_app(
     stt: STT | None = None,
     voice: bool = True,
     ears: bool = True,
+    greeting: str | None = None,
 ) -> FastAPI:
     """`voice=False` / `ears=False` run the agent silent or deaf, which is also
     what VOICE_AGENT_TTS=none and VOICE_AGENT_STT=none do. Neither capability
@@ -405,8 +626,18 @@ def create_app(
     if listener is None and ears:
         listener = create_stt(settings.ears_provider, settings.vad_silence)
     system_prompt = load_system_prompt()
+    opening = Greeting(settings.greeting if greeting is None else greeting, speaker)
 
-    app = FastAPI(title="voice-agent")
+    @contextlib.asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Synthesised once, at startup, before anyone is waiting on it. The
+        # first synthesis in a process took 3.1 s against 250-290 ms for every
+        # one after, and paying that on someone's first question is the worst
+        # possible moment for it.
+        await opening.prepare()
+        yield
+
+    app = FastAPI(title="voice-agent", lifespan=lifespan)
 
     @app.get("/")
     async def new_conversation() -> RedirectResponse:
@@ -436,12 +667,76 @@ def create_app(
         turn_lock = asyncio.Lock()
 
         mic: Mic | None = None
+        warming: asyncio.Task[None] | None = None
+        warms = Warmings()
+        warmed_words = 0
+
+        def forget_warming() -> None:
+            """Discard everything known about warming the current utterance.
+
+            Called both when a turn commits and when a recognizer session
+            starts. The second matters as much as the first: a session that
+            ends without a commit — the user stopping mid-sentence, or a
+            reconnect — otherwise leaves its word count behind, and the
+            throttle then reads the next utterance as a continuation of one
+            nobody finished and declines to warm it at all.
+
+            A warm still in flight when the turn ends can no longer help it, and
+            left alone it lands in the *next* turn's books — reporting an
+            impossible lead ("7.6 s before the turn ended" on a two-second
+            utterance) and, because the growth counter was never reset either,
+            blocking that turn's own warm. Both were visible in a real session
+            before they were understood.
+            """
+            nonlocal warming, warmed_words
+            if warming is not None and not warming.done():
+                # Cancelling is what keeps it out of the next turn's books.
+                # A guard inside the task cannot help: once `warm()` returns
+                # there is no await before it records, so there is no point at
+                # which a late check could run.
+                warming.cancel()
+            warming = None
+            warmed_words = 0
+            warms.reset()
+
+        async def warm_on(stable: str) -> None:
+            """Prefill on the agreed prefix, without blocking the transcript.
+
+            Fire-and-forget on purpose: a warm that arrives late is worthless
+            but a warm that delays a partial is actively harmful, and at most
+            one is in flight because a second would only re-prefill what the
+            first is already caching.
+            """
+            nonlocal warming, warmed_words
+            if not WARM_ON_STABLE or (warming is not None and not warming.done()):
+                return
+            words = len(stable.split())
+            # `warmed_words` alone decides this: 0 means nothing has been warmed
+            # for this turn yet. Consulting the warm *count* as well would make
+            # the per-turn reset redundant, and a reset nothing depends on is a
+            # reset that quietly stops happening.
+            if warmed_words and words - warmed_words < WARM_MIN_NEW_WORDS:
+                return
+            warmed_words = words
+
+            async def run() -> None:
+                try:
+                    warms.record(
+                        await engine.warm(
+                            system_prompt, [*conversation.messages, Message("user", stable)]
+                        )
+                    )
+                except VoiceAgentError as exc:
+                    logger.info("warm failed, which costs only the warm: %s", exc)
+
+            warming = asyncio.create_task(run())
 
         async def take_turn(text: str) -> None:
             # A spoken turn and a typed one are the same turn. The lock is not
             # decoration: a committed transcript arrives on the microphone task,
             # not the receive loop, so without it a fast second utterance could
             # start a turn while the first is still streaming.
+            forget_warming()  # the turn just reported them; the next starts fresh
             async with turn_lock:
                 with mic.busy() if mic is not None else contextlib.nullcontext():
                     seconds = await run_turn(
@@ -451,7 +746,14 @@ def create_app(
                     mic.expect_silence(seconds)
 
         if listener is not None:
-            mic = Mic(listener, channel, take_turn)
+            mic = Mic(
+                listener,
+                channel,
+                take_turn,
+                on_stable=warm_on,
+                on_session=forget_warming,
+                extra_report=warms.report,
+            )
 
         await channel.send_json(
             {
@@ -471,6 +773,8 @@ def create_app(
                 "ended": conversation.ended,
             }
         )
+
+        await opening.deliver(channel, conversation)
 
         try:
             while not conversation.ended:

@@ -14,6 +14,190 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 4 — Acting before the turn ends: agreed-stable text, and prefill
+
+The agent starts using what you are saying before you finish saying it. Every
+partial transcript feeds a **LocalAgreement** filter; text the recognizer has
+produced unchanged twice in a row is treated as settled, and the reasoning
+engine is prefilled on it while the user is still talking.
+
+The headline number is deliberately unflattering, and was measured before the
+chapter was written rather than after: **prefill warming saves ~60-90 ms on the
+first turn of a conversation and ~10 ms on every turn after.** It was built
+anyway, for a reason the "Design decisions" section makes plain — the stable
+prefix, not the warming, is the deliverable.
+
+**What changed**
+
+- `stt/agreement.py`: `StablePrefix`, LocalAgreement over successive partials.
+  Two details come from the recognizer's real behaviour rather than the
+  literature, and both were found by capturing a live trace before writing any
+  code:
+  - **Comparison is normalised, the original spelling is emitted.** Partials
+    revise punctuation and capitalisation as often as words — three of seven
+    transitions in a seven-second utterance were `'Prize Problems'` ->
+    `'Prize problems'` and `'cryptography.'` -> `'cryptography,'`. Raw
+    comparison does not stall permanently, but it loses a round at every
+    respelling: about a second each, at this recognizer's one-partial-per-second
+    cadence.
+  - **The prefix is append-only.** A cache prefix that rewrites its own middle
+    is not a prefix. Words keep the spelling they had when they settled, and
+    agreement that contradicts settled text is counted rather than applied.
+- `llm/base.py`: `Warmth` (prompt tokens, cached tokens) and `warm()` on the
+  `LLM` protocol — prefill this prompt, discard the output.
+- `llm/openai_compatible.py`: warming for DeepSeek and OpenAI, reading
+  `prompt_cache_hit_tokens` or `prompt_tokens_details.cached_tokens` — the same
+  idea under two names, neither in the SDK's shared type.
+- `llm/anthropic_provider.py`: warming, plus `cache_control` on the system
+  prompt in **both** `warm()` and `stream()`. Anthropic caches only what is
+  explicitly marked, so warming without a matching breakpoint on the real call
+  would be the cost with none of the benefit.
+- `server.py`: `Mic` runs agreement over partials and reports, on the commit,
+  how many words settled early and **whether the agreed prefix actually held**.
+  Warming is fire-and-forget with at most one in flight.
+- `config.py`, `server.py`: **a greeting**, synthesised once at startup and
+  cached for the life of the process. It is the opening line the roadmap asks
+  for, and it moves the synthesis engine's cold start off the user's first real
+  question — measured at 3.1 s for a process's first synthesis against 250-290 ms
+  for every one after. Delivered in 5-8 ms on every visit; the first real turn
+  then synthesises in 318 ms rather than seconds. Set `VOICE_AGENT_GREETING` to
+  change it, or to empty to open in silence.
+- `web/index.html`: both numbers are on screen —
+  `🎙 … · 22 words settled early` and
+  `🔥 warmed 1× · 896/1151 tokens already cached (78%) · last one 5.6 s before
+  the turn ended`.
+
+**Design decisions**
+
+- **Built despite the measurement, and the measurement is in the entry.** The
+  provider's cache is already 80-87% warm from the previous turn's own call, so
+  warming adds almost nothing. What it does add is the machinery: agreeing a
+  stable prefix and acting on it before the turn is over. Pointing that same
+  signal at a *real* generation instead of a discarded one is worth an estimated
+  1.0-1.7 s. This chapter is that change with the payoff switched off, which
+  makes the next one a small, measured delta rather than a leap.
+- **Only agreed text is ever warmed.** Prefilling a hypothesis caches a prompt
+  the real call will not match — the spend with none of the benefit — and, once
+  the same signal drives real generation, it becomes acting on words the user
+  never said. Tested with a partial reading `"send it to Bob"` revised to
+  `"Rob"`.
+- **Warming is throttled to one cache block of growth (~48 words).** The first
+  live run fired **seven** warms for one 22-word turn and the cached-token count
+  never moved off 1024: the utterance is far too short to complete another
+  64-token block, so six of the seven were billed prefill that cached nothing.
+  Long utterances still warm more than once; short ones warm once and keep the
+  earliest, longest lead.
+- **A failing warm costs only the warm.** It is an optimisation, and it is
+  logged at info and swallowed. It must never be able to break a turn. Tested.
+- **The greeting is cached, not re-synthesised per visitor.** It never changes,
+  so the second visitor onward gets it for no synthesis cost and no wait. The
+  roadmap lists this as the cheapest optimisation available in a voice pipeline
+  and it is: zero latency *and* zero spend.
+- **The greeting joins the conversation history.** Otherwise the agent does not
+  know it has already said hello and greets again on the next turn. Tested.
+- **A greeting that cannot be synthesised is still said in text.** An agent that
+  cannot greet aloud must still be able to converse.
+- **Browsers block audio before any user gesture**, and the greeting arrives
+  before there has been one. The page now holds the clip and plays it on the
+  first click rather than silently dropping it.
+- **`prefix_held` is reported on every turn.** Agreement is a bet that the
+  recognizer will not change its mind. The bet is cheap to check against the
+  committed transcript, and a chapter that acts on predicted text without
+  reporting how often the prediction was wrong is not measuring the thing that
+  matters.
+
+**Latency impact**
+
+Measured against real DeepSeek before the chapter was written:
+
+| | median TTFT |
+| --- | --- |
+| Cold prompt, no warming | 770 ms |
+| Same prompt, warmed | 708 ms |
+| **Difference** | **62 ms**, inside a 527-1228 ms cold-run spread |
+
+And the reason it is so small — TTFT is almost all fixed cost:
+
+| Context | Median TTFT | Prefill cost |
+| --- | --- | --- |
+| 71 tokens | 716 ms | — |
+| 1,128 tokens | 803 ms | +88 ms |
+| 3,690 tokens | 1,004 ms | +288 ms |
+| 11,027 tokens | 1,105 ms | +390 ms |
+
+There is a **~716 ms floor** — network round trip and queueing — that warming
+cannot touch, and prefill at this project's context size is only ~88 ms of it.
+Worse, across five consecutive turns of a real conversation with **no warming
+at all**, the cache was already 87%, 84%, 80% and 87% warm from turn two
+onward. So warming's real marginal contribution is the ~150 uncached tokens,
+and block granularity caps that at ~128: **≈10 ms.**
+
+The head start is the part worth keeping. The last two partials of an utterance
+are usually identical, so agreement settles the whole turn **0.3-1.0 s before
+the recognizer commits** — dead air in which something more useful than a
+discarded token could be happening.
+
+**Deliberately not done**
+
+- No speculative generation. The stable prefix starts a throwaway call, not a
+  real one, so the 1.0-1.7 s is left on the table on purpose.
+- No semantic turn detection, which is still the largest single term.
+- No cancellation machinery, no discarded-token accounting, and no side-effect
+  boundary — all of which speculation needs and none of which warming does.
+- No A/B harness in the repo: the numbers above came from throwaway scripts, so
+  a future regression in warming would not be caught automatically.
+
+**Verification**
+
+- `uv run verify` green: ruff, ruff format, mypy strict, 141 tests.
+- Agreement is tested against a **verbatim live trace** — eight real partials
+  from a seven-second utterance — not invented input. Covered: the whole
+  utterance settling by the last partial, the prefix only ever growing, the
+  settled text matching what was committed, nothing settling until said twice,
+  a revised word never settling, and normalisation never being behind raw
+  comparison and being ahead at exactly the three measured respellings.
+- Server tests: only agreed text is warmed, the turn still sends the *committed*
+  text rather than the warmed prefix, `prefix_held` is reported and is `False`
+  when agreement was wrong, and a failing warm leaves the turn intact.
+- **Verified live end to end**: real Scribe partials through real agreement into
+  a real DeepSeek warm — 22 words settled early, `prefix_held=True`, one warm
+  at 78% cached landing 5.6 s before the turn ended.
+- **The Anthropic path is unverified live** (no key available), and this chapter
+  changed its `stream()` as well as adding `warm()` — the system prompt is now
+  marked as a cache breakpoint, without which warming would prefill a prompt the
+  real call could not read back. Two specific risks go with that: Anthropic has
+  a minimum cacheable prefix, below which marking one silently does nothing;
+  and `max_tokens=1` on a model whose thinking is on by default may be rejected.
+  A rejected warm is logged and swallowed, so the failure mode is "warming does
+  not work on Anthropic" rather than a broken turn — but it has not been seen
+  to work either.
+
+**Fixes**
+
+- A warm still in flight when its turn commits is cancelled, so it can no longer
+  be credited to the next turn — which was reporting impossible leads like
+  "7.6 s before the turn ended" on a two-second utterance, and made the warm
+  line vanish from the turn that actually paid for it.
+- Every turn warms again; the growth throttle no longer carries over from the
+  previous turn.
+- The first synthesis of a process no longer lands on the user's first question.
+- Agreement and warming state reset when a recognizer *session* starts, not only
+  when a turn commits. A session ending without one — stopping mid-sentence, or
+  a reconnect — used to carry its settled words forward, where they wedged
+  agreement entirely and were then reported as words that "settled early" on an
+  utterance nobody said them in.
+- The autoplay fallback no longer revokes the clip it is waiting to replay, so
+  a greeting blocked before the first click can actually be heard after it.
+- A greeting that fails to synthesise is not retried for every visitor, which
+  on an exhausted quota added a doomed round trip to every page load.
+- Two tabs opening the same link greet once. Preparation is awaited, so a check
+  made before it is stale by the time the greeting is appended.
+- The recognizer keep-alive tops up every 10 s instead of five times a second.
+  It was streaming continuous real-time audio to a service metered by audio
+  duration, and it consumed most of a month's quota on silence.
+- The greeting is cached to disk, so restarting the server no longer
+  re-synthesises a sentence that never changes.
+
 ## Chapter 3 — Ears: the agent listens, and turn detection is borrowed
 
 The agent hears. Press **listen**, talk, pause — the transcript appears live,
@@ -27,11 +211,10 @@ conversation, Chapter 2's synthesis, `exit`, the failure rollback — all
 unchanged, all working identically for both.
 
 The interesting decision is **who decides the turn ended**. Scribe's realtime
-endpoint has VAD endpointing built in: connect with `commit_strategy=vad` and
-`vad_silence_threshold_secs=0.7` and it emits a committed transcript after a
-pause. That is this chapter's turn detection in its entirety — zero VAD code —
-and it is the right naive step. It also has a cost that only became visible
-once it ran, recorded under "Latency impact" below.
+endpoint has VAD endpointing built in: connect with `commit_strategy=vad` and a
+silence threshold and it emits a committed transcript after a pause. That is
+this chapter's turn detection in its entirety — zero VAD code — and it is the
+right naive step. Its costs only became visible once it ran.
 
 **What changed**
 
@@ -53,6 +236,7 @@ once it ran, recorded under "Latency impact" below.
   - `Mic` owns one listening session: a queue in, transcripts out. A queue
     rather than handing the recognizer the socket, because the recognizer
     consumes audio at its own pace while the receive loop must stay free.
+    It also expires the session, keeps it alive, and reconnects it (below).
   - `run_turn` was split out of the old `handle_message`, so a spoken turn and
     a typed one enter through the same door.
   - A turn lock, which is not decoration: a committed transcript arrives on the
@@ -64,20 +248,50 @@ once it ran, recorded under "Latency impact" below.
   ~100 ms chunks. The `AudioContext` is opened at the recognizer's own sample
   rate (advertised in the `ready` frame) so nothing resamples anywhere. Plus a
   listen toggle, live volatile/committed rendering, and the half-duplex gate.
-- `cli.py`: `--stt {elevenlabs,none}`.
+- `prompts/system_prompt.md`: a language rule. The agent answers in the
+  language of what the user *just said*, not of what it said last, and treats a
+  greeting as no evidence at all — "Hallo"/"Hi"/"Ciao" are shared between
+  languages and a transcribed one is a recognizer's spelling guess.
+- `cli.py`: `--stt {elevenlabs,none}` and `--vad-silence`.
 
 **Design decisions**
 
 - **Endpointing delegated to the STT vendor.** Simplest possible thing that
-  works, and it works well. The cost, now that it has run: a second backend
+  works, and it works well. The costs, now that it has run: a second backend
   must supply its own endpointing, the semantic-turn-detection chapter has to
   take this back out rather than swap it, and — unexpectedly — *the ability to
-  measure endpointing goes with it* (below).
-- **A toggle, not always-on.** Continuous streaming bills a metered API for
-  silence; on a free plan that is how a quota disappears overnight. Permission
-  is requested on page load and the tracks immediately stopped, so the grant is
-  remembered, the first press of listen is instant, and the recording indicator
-  does not sit lit for the whole session.
+  measure endpointing goes with it* (see Latency impact).
+- **The pause that ends a turn is 1.5 s**, the service's own default, tunable
+  via `--vad-silence`. 0.7 s was tried first on the theory that 1.5 s is an
+  eternity in conversation. It is, and it is still better: at 0.7 s the agent
+  committed `"Or rather..."` and `"Not Ethereum, but rather..."` as finished
+  turns and answered the fragments. Being interrupted mid-thought reads as the
+  agent not listening; waiting a beat merely reads as slow. No fixed value wins
+  this trade, which is the whole argument for semantic turn detection.
+- **A toggle, not always-on, and listening expires.** Continuous streaming
+  bills a metered API for silence; on a free plan that is how a quota
+  disappears overnight. Permission is requested on page load and the tracks
+  immediately stopped, so the grant is remembered and the recording indicator
+  does not sit lit all session. A session ends after 30 s with no speech, or
+  5 minutes regardless. "No speech" means *no partial transcripts* — the
+  microphone streams silence continuously, so frames never stop arriving.
+- **Expiry is suspended by named holds, and the hard cap is not pausable.** Two
+  things suspend it — the turn, and the browser playing the reply — and they
+  overlap, so a boolean lets one clear the other. A counter fixes that and then
+  sticks above zero forever if a client miscounts. A set is idempotent. Holds
+  also expire after 60 s, and the cap is checked before them: a cap a stuck
+  hold can defeat is not a cap.
+- **The server derives the playback window from the clip it sent**, rather than
+  trusting the browser to report when playback ends. A clip carries its own
+  duration (constant-bitrate MP3, so duration follows from size) and the idle
+  clock starts after it. The browser's playback messages remain a second signal
+  for pause and mute, but nothing load-bearing depends on them.
+- **The recognizer's session is kept alive with silence.** Measured against the
+  real service: Scribe closes a realtime session after ~15 s with no audio, and
+  closes it *normally* — code 1000, so the stream just ends and nothing raises.
+  The browser stops sending while a reply plays, so any answer longer than ~15 s
+  silently killed the ears. `Mic` now fills any gap, and a stream that ends
+  while we still hold the microphone is a reconnect, not an ending.
 - **Half-duplex: the browser stops sending audio while the agent speaks.** Free,
   total, and impossible to get subtly wrong. Browser echo cancellation would
   mostly work, but with no barge-in logic yet there is nothing useful to do
@@ -92,11 +306,17 @@ once it ran, recorded under "Latency impact" below.
 - **Ears are not load-bearing.** `--stt none` is a first-class mode, and a
   recognizer that fails mid-session reports the failure and leaves typing
   working. Tested.
+- **Failures must never be silent.** Three separate reports in this chapter were
+  the same shape: the agent stopped hearing and said nothing, so the page still
+  read "listening" while the user talked to nobody. Every path that stops or
+  degrades listening now announces itself, and expiry distinguishes "no speech
+  for 30s" from "the browser sent no audio" — only one of those is the user's
+  doing.
 
 **Latency impact**
 
 Full live loop, nothing faked — a 1.65 s spoken question through Scribe,
-DeepSeek and ElevenLabs:
+DeepSeek and ElevenLabs, at the original 0.7 s threshold:
 
 | Stage | Measured |
 | --- | --- |
@@ -104,8 +324,10 @@ DeepSeek and ElevenLabs:
 | LLM first token | 782 ms |
 | Full reply text (118 chars) | 1,111 ms |
 | Synthesis | 512 ms |
-| Turn start → first audio | 1,600 ms |
 | **End of speech → first audio** | **~2.9 s** |
+
+Raising the threshold to 1.5 s adds ~0.8 s to the largest term, putting first
+audio near **3.7 s**. Endpointing is now well over half the round trip.
 
 **The instrumentation was wrong and the live run caught it.** The server
 reported `endpoint_ms=509`; the true figure, timed externally from the moment
@@ -113,13 +335,12 @@ the audio actually stopped, was **1,322 ms** — 2.6× larger. The server measur
 from the last *partial transcript*, because without its own VAD it cannot see
 when the user stopped talking; everything the recognizer spends lagging behind
 the audio is invisible to it. The metric is now labelled for what it actually
-measures ("committed 509 ms after your last recognised word") and the gap is
-documented at the point of measurement.
+measures, and the gap is documented at the point of measurement.
 
 That is the real lesson of delegating endpointing: **handing the decision to
-the vendor also hands over the ability to measure it.** The roadmap says
-endpointing is the largest term in a naive cascade, and at 1.3 s of the 2.9 s
-total it is — but the project cannot currently see that number from the inside.
+the vendor also hands over the ability to measure it.** Endpointing is the
+largest term in a naive cascade, and here it is — but the project cannot
+currently see that number from the inside.
 
 **Deliberately not done**
 
@@ -134,306 +355,45 @@ total it is — but the project cannot currently see that number from the inside
 
 **Verification**
 
-- `uv run verify` green: ruff, ruff format, mypy strict (30 files), 63 tests.
-- Ten new listening tests with only the recognizer faked: volatile-then-committed
+- `uv run verify` green: ruff, ruff format, mypy strict, 109 tests.
+- Listening tests with only the recognizer faked: volatile-then-committed
   sequencing, a committed transcript starting a turn by itself and arriving at
   the reasoning engine as an ordinary user message, volatile text *never*
-  reaching it, an empty commit starting no turn, a spoken `exit` ending the
-  conversation, stop-on-request, audio before listening starts being dropped
-  rather than buffered, a failing recognizer leaving typing working, a deaf
-  agent saying so, and the capture rate being advertised.
+  reaching it, a blank commit reported not at all, a spoken `exit` ending the
+  conversation, audio before listening starts being dropped rather than
+  buffered, a failing recognizer leaving typing working, and a deaf agent
+  saying so.
+- Expiry rules are tested against `Mic` directly rather than through a socket,
+  with a deadline on every wait. Through the socket a broken expiry means "the
+  frame never arrives", which hangs the suite instead of failing a test — the
+  first version of these took 62 seconds and *passed*, rescued by a 60 s safety
+  net.
+- **Every absence-based assertion here was verified to fail with the code it
+  protects removed.** Three of them initially passed without it. A negative
+  assertion that has never been seen to fail is not evidence of anything.
 - **Verified live against the real Scribe realtime API**, end to end through the
-  actual server with a real WebSocket client playing the browser's part —
-  same 100 ms PCM16 frames, same rate, same half-duplex rules. Volatile
-  transcripts revised themselves in flight (`'What is the tallest-'` →
-  `'What is the tallest building in Riga?'`), the commit fired on the pause,
-  DeepSeek answered, ElevenLabs spoke it, and 113 kB of audio came back down
-  the socket.
+  actual server with a real WebSocket client playing the browser's part. A full
+  turn: volatile transcripts revised themselves in flight
+  (`'What is the tallest-'` → `'What is the tallest building in Riga?'`), the
+  commit fired on the pause, DeepSeek answered, ElevenLabs spoke it. Separately,
+  a session that goes silent for 40 seconds and then speaks again is still
+  heard — the same script against the unfixed service shows the close at 18.6 s.
 - Scribe's realtime protocol was confirmed by connecting before any code was
-  written — session config, `partial_transcript` / `committed_transcript`
-  payloads, and the `input_audio_chunk` send shape all came from a live socket
-  and the installed SDK's types rather than from documentation.
+  written — session config, payload shapes, and the send shape all came from a
+  live socket and the installed SDK's types rather than from documentation.
 
-**Follow-up within this chapter: the recognizer hangs up on a quiet session**
+**Fixes**
 
-Reported as "listening stops after 31 sec, I continue speaking, nobody
-listens" — and this time with **no message at all**, which is what made it
-different from every previous version of this complaint.
 
-Measured against the real service rather than reasoned about: **Scribe closes a
-realtime session after roughly 15 seconds with no audio, and closes it
-*normally* — code 1000.** A normal close does not raise; iterating the socket
-simply stops. So `stream()` returned, the transcript loop ended, `_run`
-returned, and nothing happened: no exception, no error frame, `listening` still
-true, the page still saying "listening", and the user's audio going into a
-queue with nobody at the other end. The browser stops sending while a reply
-plays, so **any answer longer than ~15 seconds killed the ears** — a 31.7 s
-monologue guaranteed it.
-
-Two fixes, one for the cause and one for the class of failure:
-
-- **The gap gets filled with silence.** `Mic` now feeds the recognizer a frame
-  of silence whenever the browser has sent nothing for 200 ms, so a session
-  never goes quiet enough to be hung up on. Injected frames are counted
-  separately from real ones, so "the browser sent no audio" stays a diagnosis
-  rather than being papered over by the silence sent on the browser's behalf.
-  This is metered audio, but a microphone that stayed open would have cost the
-  same.
-- **A stream that ends while we still hold the microphone is a reconnect, not
-  an ending.** Up to three times, each announced to the page; after that,
-  listening stops with a reason. The rule underneath: *silent* failure is the
-  worst outcome available in this system, and it has now been the cause of
-  three separate reports.
-
-Writing the reconnect surfaced a latent deadlock: `_run` now calls `stop()`,
-and `stop()` awaited `self._task` — which *is* `_run`. It waited on itself for
-five seconds and then cancelled the coroutine that was trying to announce why
-listening had ended. Found by a test, not by reading.
-
-**Verified live end to end**: a real Scribe session, a real server, a browser
-stand-in that speaks, goes silent for 40 seconds, then speaks again. The second
-utterance was transcribed. The same script against the unfixed service confirms
-the close at ~18 s. The earlier run of it also demonstrated the new expiry
-wording doing its job — it reported *"the browser sent no audio"*, not "no
-speech", correctly declining to blame the user.
-
-**Follow-up within this chapter: the agent blamed the user for its own monologue**
-
-A reply came back as **491 kB — 31 seconds of speech** — and the session then
-died with *"listening stopped — no speech for 30s"*, while the user was in fact
-talking. The browser mutes its microphone for the whole of a reply, so the user
-could not be heard during it; the timeout then reported that as their silence.
-
-The previous follow-up had a mechanism for exactly this: the browser reports
-when playback ends and the server holds expiry open meanwhile. **The cause
-could not be determined from the evidence** — "the playback message never
-arrived" and "audio frames stopped flowing" produce an identical timeline — and
-that ambiguity is itself the defect. The fix is therefore not another patch to
-the same mechanism but the removal of its dependency:
-
-- **A clip now carries its own duration**, computed by the adapter that knows
-  its format (constant-bitrate MP3, so duration follows from size).
-- **The server pushes its idle clock past the end of the audio it just sent**
-  (`Mic.expect_silence`). It no longer needs the browser to tell it that the
-  agent is talking — it already knows, because it did the talking. The
-  browser's playback messages remain as a second signal for pause and mute, but
-  nothing load-bearing depends on them now.
-- **The expiry message distinguishes two failures that wore the same words**:
-  "no speech for 30s" when audio was arriving and was quiet, and "the browser
-  sent no audio" when nothing was arriving at all. Only one of those is the
-  user's doing, and telling them apart is what makes the next report of this
-  diagnosable instead of a guess.
-
-The reply's length is now shown alongside its size — `🔊 31.4 s of speech ·
-491 kB · synthesized in 941 ms` — because a 31-second answer is a product
-problem that no amount of latency work will fix, and it was invisible.
-
-Both mechanisms were sabotage-checked: removing `expect_silence` or collapsing
-the two expiry reasons fails a test in under a second.
-
-**Follow-up within this chapter: the browser client had no tests, and it showed**
-
-Fixing the playback-hold leak broke the page completely. The edit replaced a
-span of the client identified by its start and end text — and the span between
-`tellPlayback` and the WebSocket setup contained not just those two functions
-but **the entire microphone block**: the AudioWorklet, `warmUpMicPermission`
-and `buildMic`. The `ready` handler still called `warmUpMicPermission()`, threw
-a `ReferenceError` on the first message from the server, and never reached
-`setEnabled(true)`. Every control on the page stayed disabled.
-
-**`uv run verify` passed.** Ninety-odd tests, mypy strict, and none of it
-touches a line of JavaScript — and the browser client is now a third of this
-chapter's surface area: audio capture, format conversion, the half-duplex gate,
-playback lifecycle, and transcript rendering all live there and have no
-server-side counterpart to notice their absence.
-
-Added `tests/test_web_client.py`: static checks on the page for the failures
-that have actually occurred, not a substitute for running it.
-
-- **Every function the script calls must be defined.** This is the one that
-  matters; deleting a definition while leaving its call sites is invisible to
-  everything else. Verified by re-deleting the block: it reports
-  `called but never defined: ['buildMic', 'warmUpMicPermission']`.
-- Every element `getElementById` reaches for must exist in the markup.
-- The capture pipeline's six required pieces are present.
-- `!speaking` is still in the microphone send path — without it the agent
-  transcribes its own voice.
-- `speaking` is assigned in exactly one place outside its declaration, which is
-  the invariant the leaked-hold fix depends on.
-
-Two notes on method. The first two versions of the "every function is defined"
-check failed on `async` and on `let speaking = false` — false positives in the
-test, not the page; a checker whose failures are mostly noise gets ignored,
-which is worse than not having one. And one of the fixes for that *silently did
-not apply*, because `ruff format` had reflowed the set it was matching against
-— the same class of mistake as the original bug. Edits to source now assert
-that they changed something.
-
-**Follow-up within this chapter: the agent went deaf silently, and spoke German**
-
-A second real conversation surfaced two more defects, one of them the worst
-failure mode this project has produced.
-
-**1. A leaked playback hold muted the microphone permanently, with no message.**
-`player.pause()` fires no `onended`, so when one clip replaced another the
-browser sent *two* holds and *one* release. The previous follow-up had made the
-hold a counter, so it stuck at 1 and never returned to zero. From there:
-the idle timer never fired, the watchdog skipped **every** check while held so
-the 5-minute cap could not save it either, and the browser's own `speaking`
-flag stayed true so it stopped sending microphone frames. The agent was deaf
-for the rest of the session and said nothing about it — the observable
-behaviour was simply that talking stopped working.
-
-Three fixes, deliberately layered, because the previous single-mechanism fix is
-what failed:
-
-- **Holds are now named, not counted** (`hold("playback", …)`,
-  `hold("turn", …)`). A set is idempotent, so a client that miscounts cannot
-  wedge the server. The counter was chosen last round because two holds
-  overlap; that was right, and unforgiving.
-- **The hard cap is checked before the hold and is not pausable.** A cap that a
-  stuck hold can defeat is not a cap, and a stuck hold is exactly what it most
-  needs to catch.
-- **A hold expires after 60 s** (`MAX_HOLD_SECONDS`). Nothing legitimate holds
-  that long — the longest reply so far was 18 s of audio — so a hold lost to a
-  closed tab or a missed browser event becomes a one-minute hiccup instead of a
-  permanent silent failure.
-- The browser side is transition-guarded, and `speaking` is now assigned in
-  exactly one place.
-
-**These tests hung instead of failing.** Written through the WebSocket, a
-broken expiry means "the frame never arrives", which blocks the suite rather
-than failing a test — the first run took 62 seconds and *passed*, because the
-60 s safety net eventually rescued it. They now drive `Mic` directly with a
-deadline on every wait, and all three fail in under a second when the mechanism
-they cover is removed. **A timing test that can hang is not a test; it is a
-timeout with an opinion.**
-
-**2. The agent answered in German for eleven turns.** The conversation opened
-with `"Hallo."` — a word shared by English and German, and a *guess* by a
-recognizer with no language hint. DeepSeek replied in German, and every
-subsequent turn carried its own German replies in context, so it stayed there
-even as the user wrote in English, and eventually claimed it had been answering
-in English when it had not.
-
-`prompts/system_prompt.md` had **no language rule at all**. It now says: answer
-in the language of what the user *just said*, not of what you said last; a
-greeting is not evidence, because "Hallo"/"Hi"/"Ciao"/"Salut" are shared and a
-transcribed one is a spelling guess; and if you have already answered in the
-wrong language, just switch without explaining. That the model's own prior
-turns can anchor it against the user's actual language is a prompt-design
-failure, not a model one — and worth noting that a *text* chat would have
-recovered on the second turn. Speech made it sticky, because there was no
-typed word to contradict the guess.
-
-**Follow-up within this chapter: 0.7 s was the wrong number**
-
-The pause that ends a turn is now **1.5 s**, Scribe's own default, up from the
-0.7 s this chapter shipped with. Configurable via `VOICE_AGENT_VAD_SILENCE` /
-`--vad-silence`, because no fixed value is right.
-
-0.7 s was chosen on the reasoning that 1.5 s "is an eternity in conversation".
-It is. It is also better. In a real conversation 0.7 s committed
-`"Or rather..."` and `"Not Ethereum, but rather..."` as finished turns, and the
-agent dutifully answered the fragments — *"Go ahead, take your time"* is the
-agent replying to half a sentence. Being interrupted mid-thought reads as the
-agent not listening; waiting an extra beat merely reads as slow.
-
-**This makes the latency worse, and that is the honest trade.** Endpointing was
-already the largest single term in the round trip — 1.3 s of a 2.9 s
-end-to-end — and this adds ~0.8 s to it, putting first audio somewhere near
-3.7 s after the user stops speaking. Two chapters of measurement now agree on
-the same conclusion from opposite directions: the number cannot be tuned into
-correctness, because "checking my balance" and a mid-sentence pause are
-indistinguishable by duration alone. Semantic turn detection is not a
-refinement to schedule eventually; it is the only thing that resolves this, and
-it is now the most valuable unbuilt chapter.
-
-**Follow-up within this chapter: three bugs a real conversation found**
-
-A seven-round spoken conversation about the Riemann hypothesis ended itself.
-Three separate defects, all invisible to the tests that existed.
-
-1. **Playback time was billed to the user's idle budget.** The previous
-   follow-up paused the expiry timer "while a turn is in progress" — but a turn
-   ends when the audio *bytes are sent*, not when they finish playing. The last
-   reply was 235 kB of MP3, which at 128 kbps is **15 seconds of speech**. The
-   browser is muted for all of it (half-duplex), so no transcript can arrive;
-   15 s of the agent talking plus ~15 s of the user listening and thinking hit
-   the 30 s window exactly. Fixed by having the browser report playback start
-   and end — only it knows when a clip actually finishes — and by making the
-   hold a **counter rather than a flag**, because the turn's hold and the
-   playback's hold overlap and a boolean lets the turn's exit clear the
-   playback's.
-
-   The lesson is narrower than "test more": the previous fix was verified
-   against a *short* reply. Every test clip was a few hundred bytes, so the
-   playback window was always shorter than the idle window and the bug could
-   not appear. The regression test now uses a clip long enough to matter.
-
-2. **An orderly shutdown was reported as a failure.** At the end of every
-   listening session the user saw `elevenlabs transcription failed: sent 1000
-   (OK); no close frame received`. When the audio ends the adapter commits,
-   waits, and closes — and ElevenLabs never answers the close frame, so the
-   library raises. Now suppressed when the close was ours.
-
-   **This one resisted testing twice.** A test against the `websockets`
-   library's own server passed with the fix removed, because a compliant server
-   politely completes the handshake and the bug cannot occur. A second attempt
-   passed too, because the check had been written in two places and only one
-   was sabotaged — which is itself a finding: the inner handler was redundant
-   and has been deleted. The test now drives the branch through a stub peer
-   that never answers a close, reproduces the user's exact error string, and
-   was confirmed to fail without the fix.
-
-3. **The chat log stopped scrolling.** `#log` is a flex child with
-   `overflow-y: auto` but no `min-height: 0`, so it defaulted to
-   `min-height: auto`, grew to fit its content instead of scrolling, and pushed
-   the conversation off the bottom of the page. One line, and a comment saying
-   why it is load-bearing.
-
-Also: a committed transcript with no words in it is no longer reported at all.
-A session's closing flush produces exactly that, and it was putting an empty
-bubble and a meaningless endpointing figure on screen.
-
-**On the sabotage checks.** Three of this chapter's regression tests passed
-with the code they exist to protect removed. All three are now verified to fail
-without it. A negative or absence-based assertion is worth nothing until it has
-been seen to fail, and this chapter is the evidence: the ratio was three out of
-three.
-
-**Follow-up within this chapter: listening expires**
-
-An open microphone is a metered resource — Scribe bills for streamed silence,
-and a backgrounded tab keeps the AudioWorklet running — so a listening session
-now closes itself.
-
-- **30 s with no speech**, and a **5 minute** hard cap regardless of activity.
-  The cap catches what the idle timer cannot: a room producing continuous
-  partials (a television, a nearby conversation). Scribe enforces its own
-  session limit anyway; better to hit ours, with an explanation.
-- **"Inactivity" means no *speech*, not no *audio*.** The microphone streams
-  silence continuously, so frames never stop arriving. The signal that nobody
-  is talking is the absence of partial transcripts.
-- **The watchdog pauses while a turn is in progress.** During the agent's own
-  reply the browser stops sending audio (half-duplex), so no transcript *can*
-  arrive; an unpaused timer would blame the user for the agent talking. The
-  moment the turn ends counts as fresh activity — the user has just been given
-  something to respond to and should get the full window to do it.
-- Server-side rather than in the browser: that is where the cost is incurred,
-  it is authoritative, and it still protects a backgrounded tab.
-- `Mic` now announces its own state changes, so an expiry and an explicit stop
-  reach the browser through exactly one path and the page can explain why
-  listening stopped.
-
-**A vacuous test, caught by sabotage.** The first version of the
-"agent talking doesn't count against the user" test passed *with the pause
-disabled*. An expiry that fires mid-turn cannot announce itself until the turn
-releases the microphone, so a test reading only the frames up to `reply_end`
-never sees it. The test now asserts *after* the turn — that the session is
-still listening — and was verified to fail when `Mic.busy` is removed. A
-negative assertion that has never been seen to fail is not evidence of
-anything.
+- A recognizer session that ends on its own is reconnected, not silently ignored.
+- A leaked playback hold no longer mutes the microphone permanently and silently.
+- Blank committed transcripts are not reported at all.
+- An orderly close of the recognizer socket is no longer reported as a failure.
+- `stop()` no longer deadlocks when called from the task it waits on.
+- The chat log scrolls again (`min-height: 0` on a flex child), and the
+  telemetry line at the end of each turn is now scrolled into view.
+- The browser client gained static tests and a `node --check` pass, after an
+  edit deleted the entire microphone block and every Python test still passed.
 
 ## Chapter 2 — Giving it a voice: the agent speaks, batched
 
@@ -481,7 +441,22 @@ the budget is not currently met by a wide margin.
   `Blob` and plays. A mute toggle, a click-to-play fallback if the browser
   refuses autoplay, and each reply is annotated with its clip size and
   synthesis time so the batched wait is visible in the UI, not just in a log.
-- `cli.py`: `--tts {elevenlabs,openai,none}` and `--voice`.
+- `cli.py`: `--tts {elevenlabs,openai,none}`, `--voice`, `--list-voices`.
+- **Every reply is annotated with what each stage spent**, which turned out to
+  be the most useful thing in the chapter:
+
+  ```
+  💭 thought for 853 ms · 153 chars in 422 ms
+  🔊 31.4 s of speech · 491 kB · synthesized in 524 ms · audio at 1.8 s
+  ```
+
+  The reasoning figure is split at the first token on purpose: `ttft_ms` is
+  dead air the user experiences and is what §7 budgets, while `generation_ms`
+  is throughput that streaming already hides behind text appearing on screen.
+  A single "reply took N ms" would blur the one that matters into the one that
+  does not. `total_ms` is send-to-first-audio — the number the whole project is
+  judged on. The clip's own length is shown too: a 31-second answer is a
+  product problem no latency work can fix, and it was invisible.
 - **Renamed `providers/` to `llm/`** (refactor of Chapter 1). The name was
   fine while there was one kind of provider; with a second kind it had to say
   which one it meant. No behavior changed.
@@ -579,76 +554,14 @@ individually. Three observations worth carrying forward:
   Its wire usage was written against the installed SDK's inspected signatures
   and is unit-tested at the interface.
 
-**Follow-up within this chapter: the reasoning stage reports itself too**
+**Fixes**
 
-Chapter 2 made the synthesis cost visible in the UI and that turned out to be
-the most useful thing in it — so the reasoning stage now does the same. Each
-reply carries two annotations:
-
-```
-💭 thought for 853 ms · 153 chars in 422 ms
-🔊 155 kB · synthesized in 524 ms · audio at 1.8 s
-```
-
-- `reply_end` gained `ttft_ms`, `generation_ms` and `chars`; the `audio` frame
-  gained `total_ms`.
-- **The reasoning number is split at the first token on purpose.** The two
-  halves mean different things: `ttft_ms` is dead air the user actually
-  experiences and is the number §7 budgets, while `generation_ms` is throughput
-  that streaming already hides behind text appearing on screen. A single
-  "reply took N ms" would blur the one that matters into the one that does not.
-- **`total_ms` is send-to-first-audio** — the number the whole project is
-  judged on, and previously the only one that had to be reconstructed by hand
-  from a stopwatch script rather than read off the screen.
-- An empty reply reports its whole duration as time-to-first-token rather than
-  as zero of everything, so a turn where the user waited and got nothing looks
-  like a failure instead of an instant success. Tested.
-- Fixed a fixture bug found while testing that: the fake reasoning engine
-  streamed one blank fragment for an empty reply instead of streaming nothing.
-
-Measured live on two real turns (DeepSeek + ElevenLabs) after the change:
-853/909 ms to first token, 524/505 ms synthesis, **1.8 s and 1.9 s to first
-audio** — consistent with the earlier one-off measurement, and now readable
-without instrumenting anything by hand.
-
-**Follow-up within this chapter: the default voice was wrong**
-
-The first live attempt failed with `402 paid_plan_required` — "Free users
-cannot use library voices via the API". The interesting part is not the fix but
-what the diagnosis showed:
-
-- The project's key is a **scoped** key lacking `voices_read` and `user_read`,
-  so the standard advice — list `/v1/voices` and pick one with
-  `category == "premade"` — **cannot run at all**. Diagnosis had to go through
-  the synthesis endpoint itself, probing candidate ids two characters at a time.
-- **Rachel (`21m00Tcm4TlvDq8ikWAM`) is blocked on a free account**, despite being
-  the most widely cited "safe stock voice" — and so is **Aria
-  (`9BWtsMINqrJLrRacOk9x`)**, which is ElevenLabs' own current in-app default.
-  Verified working on the same key: Sarah, Brian, George, Laura, Bill, Adam.
-- So the real defect was not the id but the *assumption*: which voices a plan
-  can use is not stable and is not inferable from documentation. The default is
-  now `EXAVITQu4vr4xnSDxMaL` (Sarah), chosen because it was empirically
-  verified, with the full probe result recorded in the source and a test
-  asserting the default never drifts back to Rachel or Aria.
-- Added `explain()`, which turns an ElevenLabs `ApiError` into one actionable
-  line. The SDK's exception stringifies the entire HTTP response — every
-  header, the trace id, the CORS policy — and that was being rendered verbatim
-  in the browser. It now says what happened *and* what to do: which stock voice
-  to try, or that the key is missing a permission that must be enabled in the
-  dashboard.
-- Once the key was granted `voices_read`, `/v1/voices` confirmed the diagnosis
-  authoritatively: the account sees 21 `premade` voices, Sarah among them, and
-  neither Rachel nor Aria is in that set. The empirical probe and the catalogue
-  agree.
-- **Added `list_voices()` to the `TTS` protocol and `--list-voices` to the
-  CLI**, so this question never has to be answered by probing again. It is not
-  a convenience: a wrong voice id fails at *synthesis* time with a payment
-  error rather than at startup, so a backend has to be able to say what an
-  account may actually use. ElevenLabs answers it with an API call and marks
-  Voice Library and cloned voices `usable=False` — listing everything the API
-  returns would reproduce the original bug in a new place. OpenAI answers it
-  from a fixed table with no call at all, and that asymmetry is precisely why
-  the method belongs on the backend rather than in one shared helper.
+- The default voice is one verified usable on a free plan. Which voices count
+  as "stock" is neither stable nor inferable from documentation — Rachel and
+  Aria are both blocked on a free account despite being the most widely
+  recommended ids, and `--list-voices` now answers the question properly.
+- ElevenLabs errors are translated into one actionable line instead of the
+  SDK's stringified HTTP response, headers and all.
 
 ## Chapter 1 — A talking loop with no voice: text in, reasoning out
 

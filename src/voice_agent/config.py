@@ -9,6 +9,15 @@ from voice_agent.errors import ConfigError
 DEFAULT_PROVIDER = "deepseek"
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
 DEFAULT_EARS_PROVIDER = "elevenlabs"
+
+DEFAULT_GREETING = "Hi, I'm a voice agent. What can I help you with?"
+"""What the agent says when a conversation opens. Set VOICE_AGENT_GREETING to
+change it, or to empty to open in silence.
+
+It earns its place twice. It is the greeting the roadmap asks for — the moment
+that sets expectations about what this thing is — and it moves the synthesis
+engine's cold start off the user's first real question. Measured: the first
+synthesis of a process took 3.1 s against 250-290 ms for every one after."""
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
@@ -31,6 +40,7 @@ class Settings:
     voice: str | None
     ears_provider: str
     vad_silence: float | None
+    greeting: str
     host: str
     port: int
 
@@ -43,6 +53,7 @@ def load_settings() -> Settings:
         voice=os.environ.get("VOICE_AGENT_VOICE") or None,
         ears_provider=os.environ.get("VOICE_AGENT_STT", DEFAULT_EARS_PROVIDER),
         vad_silence=_optional_float(os.environ.get("VOICE_AGENT_VAD_SILENCE")),
+        greeting=os.environ.get("VOICE_AGENT_GREETING", DEFAULT_GREETING),
         host=os.environ.get("VOICE_AGENT_HOST", DEFAULT_HOST),
         port=int(os.environ.get("VOICE_AGENT_PORT", DEFAULT_PORT)),
     )

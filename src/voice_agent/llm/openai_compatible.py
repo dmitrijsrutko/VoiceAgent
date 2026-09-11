@@ -15,7 +15,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Warmth
 
 
 @dataclass(frozen=True, slots=True)
@@ -87,3 +87,29 @@ class OpenAICompatibleLLM:
                     yield delta
         except OpenAIError as exc:
             raise ProviderError(f"{self.provider} request failed: {exc}") from exc
+
+    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
+        try:
+            # One token, not zero: the API's minimum. The reply is discarded;
+            # the point is the prefix the provider now holds in cache.
+            completion = await self._client.chat.completions.create(
+                model=self.model,
+                messages=to_openai_messages(system, messages),
+                max_tokens=1,
+                stream=False,
+            )
+        except OpenAIError as exc:
+            raise ProviderError(f"{self.provider} warm failed: {exc}") from exc
+
+        usage = completion.usage
+        if usage is None:
+            return Warmth(prompt_tokens=0, cached_tokens=0)
+        # DeepSeek reports `prompt_cache_hit_tokens`; OpenAI nests the same
+        # idea under `prompt_tokens_details.cached_tokens`. Neither is in the
+        # SDK's shared type, so both are read defensively.
+        extra = usage.model_dump()
+        cached = extra.get("prompt_cache_hit_tokens")
+        if cached is None:
+            details = extra.get("prompt_tokens_details") or {}
+            cached = details.get("cached_tokens", 0)
+        return Warmth(prompt_tokens=usage.prompt_tokens, cached_tokens=int(cached or 0))

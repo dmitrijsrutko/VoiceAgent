@@ -1,0 +1,213 @@
+"""The agent's opening line, and the cold start it exists to absorb."""
+
+import asyncio
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+
+from tests.conftest import FakeLLM, FakeTTS
+from voice_agent import server
+from voice_agent.server import create_app
+from voice_agent.sessions import SessionStore
+
+HELLO = "Hi, I'm a voice agent."
+
+
+class SilentChannel:
+    """A Channel that swallows everything; these tests are about state."""
+
+    async def send_json(self, payload: dict[str, object]) -> None: ...
+
+    async def send_audio(self, announcement: dict[str, object], data: bytes) -> None: ...
+
+
+@pytest.fixture(autouse=True)
+def disposable_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The greeting cache is on disk by design; tests must not share one, and
+    must not write into the working tree."""
+    monkeypatch.setattr(server, "GREETING_CACHE", tmp_path / "cache")
+
+
+@pytest.fixture
+def store() -> SessionStore:
+    return SessionStore()
+
+
+def open_conversation(client: TestClient) -> str:
+    return client.get("/", follow_redirects=False).headers["location"].removeprefix("/c/")
+
+
+def build(store: SessionStore, tts: FakeTTS | None = None, text: str = HELLO) -> TestClient:
+    app = create_app(llm=FakeLLM(), tts=tts or FakeTTS(), store=store, ears=False, greeting=text)
+    return TestClient(app)
+
+
+def test_a_new_conversation_is_greeted_in_text_and_speech(store: SessionStore) -> None:
+    tts = FakeTTS()
+    client = build(store, tts)
+
+    with client, client.websocket_connect(f"/ws/{open_conversation(client)}") as socket:
+        socket.receive_json()  # ready
+        greeting = socket.receive_json()
+        audio = socket.receive_json()
+        clip = socket.receive_bytes()
+
+    assert greeting == {"type": "greeting", "text": HELLO}
+    assert audio["cached"] is True
+    assert clip == b"ID3" + HELLO.encode()
+    assert tts.spoken == [HELLO]
+
+
+def test_the_greeting_is_synthesised_once_for_the_whole_process(store: SessionStore) -> None:
+    """It never changes, so re-synthesising it per visitor would be paying the
+    same cost repeatedly for the same bytes."""
+    tts = FakeTTS()
+    client = build(store, tts)
+
+    with client:
+        for _ in range(3):
+            with client.websocket_connect(f"/ws/{open_conversation(client)}") as socket:
+                socket.receive_json()
+                assert socket.receive_json()["type"] == "greeting"
+                socket.receive_json()
+                socket.receive_bytes()
+
+    assert tts.spoken == [HELLO], "the greeting was synthesised more than once"
+
+
+def test_the_greeting_becomes_part_of_the_conversation(store: SessionStore) -> None:
+    """Otherwise the agent does not know it has already said hello, and greets
+    again on the next turn."""
+    client = build(store)
+
+    with client:
+        key = open_conversation(client)
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            for _ in range(3):
+                socket.receive_json()
+            socket.receive_bytes()
+
+    assert [(m.role, m.content) for m in store.get(key).messages] == [("assistant", HELLO)]
+
+
+def test_reconnecting_does_not_greet_again(store: SessionStore) -> None:
+    client = build(store)
+
+    with client:
+        key = open_conversation(client)
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            for _ in range(3):
+                socket.receive_json()
+            socket.receive_bytes()
+
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            ready = socket.receive_json()
+            socket.send_json({"type": "user_message", "text": "hello"})
+            following = socket.receive_json()
+
+    assert [m["content"] for m in ready["history"]] == [HELLO]
+    assert following["type"] == "reply_start", "it greeted a second time"
+
+
+def test_an_empty_greeting_opens_in_silence(store: SessionStore) -> None:
+    tts = FakeTTS()
+    client = build(store, tts, text="")
+
+    with client:
+        key = open_conversation(client)
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            socket.receive_json()
+            socket.send_json({"type": "user_message", "text": "hello"})
+            assert socket.receive_json()["type"] == "reply_start"
+
+    assert tts.spoken == ["Sure thing. "], "only the reply should have been spoken"
+    assert store.get(key).messages[0].role == "user", "something greeted anyway"
+
+
+def test_a_greeting_that_cannot_be_synthesised_is_still_said_in_text(
+    store: SessionStore,
+) -> None:
+    """An agent that cannot greet aloud must still be able to converse."""
+    client = build(store, FakeTTS(fail=True))
+
+    with client:
+        key = open_conversation(client)
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            socket.receive_json()
+            assert socket.receive_json() == {"type": "greeting", "text": HELLO}
+            socket.send_json({"type": "user_message", "text": "hello"})
+            assert socket.receive_json()["type"] == "reply_start"
+
+    assert store.get(key).messages[0].content == HELLO
+
+
+def test_a_silent_agent_greets_in_text(store: SessionStore) -> None:
+    client = TestClient(
+        create_app(llm=FakeLLM(), store=store, voice=False, ears=False, greeting=HELLO)
+    )
+
+    with client, client.websocket_connect(f"/ws/{open_conversation(client)}") as socket:
+        socket.receive_json()
+        assert socket.receive_json() == {"type": "greeting", "text": HELLO}
+
+
+async def test_the_greeting_survives_a_restart(tmp_path: Path) -> None:
+    """A fixed sentence re-synthesised on every `uv run voice-agent` bills for
+    bytes we already have. On a free plan that is a meaningful slice of a
+    month's quota spent on words that never change."""
+    from voice_agent.server import Greeting
+
+    first, second = FakeTTS(), FakeTTS()
+    await Greeting(HELLO, first, cache_dir=tmp_path).prepare()
+    await Greeting(HELLO, second, cache_dir=tmp_path).prepare()
+
+    assert first.spoken == [HELLO]
+    assert second.spoken == [], "the second process re-synthesised what was already on disk"
+
+
+def test_changing_the_greeting_does_not_serve_the_old_one(tmp_path: Path) -> None:
+    from voice_agent.server import Greeting
+
+    speaker = FakeTTS()
+    original = Greeting("first version", speaker, cache_dir=tmp_path)
+    changed = Greeting("second version", speaker, cache_dir=tmp_path)
+
+    assert original._cache_file != changed._cache_file
+
+
+async def test_a_failed_greeting_is_not_retried_for_every_visitor(tmp_path: Path) -> None:
+    """An exhausted quota makes every attempt fail. Retrying per page load adds
+    a doomed round trip to each one, for a greeting that will be text anyway."""
+    from voice_agent.server import Greeting
+
+    speaker = FakeTTS(fail=True)
+    opening = Greeting(HELLO, speaker, cache_dir=tmp_path)
+
+    for _ in range(3):
+        await opening.prepare()
+
+    assert speaker.spoken == [HELLO], f"tried {len(speaker.spoken)} times"
+
+
+async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None:
+    """Preparation is awaited, so a check made before it is stale by the time
+    the greeting is appended. Two tabs on one link would both greet."""
+    from voice_agent.conversation import Conversation
+    from voice_agent.server import Greeting
+
+    class SlowTTS(FakeTTS):
+        async def synthesize(self, text: str) -> object:
+            await asyncio.sleep(0.05)  # long enough for the other tab to arrive
+            return await super().synthesize(text)
+
+    opening = Greeting(HELLO, SlowTTS(), cache_dir=tmp_path)
+    conversation = Conversation(id="shared")
+    channel = SilentChannel()
+
+    await asyncio.gather(
+        opening.deliver(channel, conversation),  # type: ignore[arg-type]
+        opening.deliver(channel, conversation),  # type: ignore[arg-type]
+    )
+
+    assert [m.content for m in conversation.messages] == [HELLO]

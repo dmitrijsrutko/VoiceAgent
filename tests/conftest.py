@@ -7,6 +7,7 @@ import pytest
 
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
+from voice_agent.llm.base import Warmth
 from voice_agent.stt.base import Transcript
 from voice_agent.tts.base import AudioClip, Voice
 
@@ -28,7 +29,16 @@ class FakeLLM:
         self.fail = fail
         self.delay = delay
         self.seen: list[list[Message]] = []
+        self.warmed: list[list[Message]] = []
         self.systems: list[str] = []
+
+    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
+        """Records what it was asked to warm. `warmed` is the point of it: the
+        assertion that only *stable* text is ever prefilled is made here."""
+        self.warmed.append(list(messages))
+        if self.fail:
+            raise ProviderError("provider exploded")
+        return Warmth(prompt_tokens=1200, cached_tokens=1024)
 
     async def stream(self, system: str, messages: Sequence[Message]) -> AsyncIterator[str]:
         self.systems.append(system)
@@ -98,14 +108,17 @@ class FakeSTT:
             ]
         )
         self.heard: list[bytes] = []
+        # Shared across `stream()` calls, so a session that restarts — the user
+        # pressing listen again, or a reconnect — continues the script rather
+        # than replaying it. A recognizer does not rewind when its socket does.
+        self._remaining = iter(self.script)
 
     async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
         if self.fail:
             raise ProviderError("recognizer exploded")
-        remaining = iter(self.script)
         async for chunk in audio:
             self.heard.append(chunk)
-            transcript = next(remaining, None)
+            transcript = next(self._remaining, None)
             if transcript is not None:
                 yield transcript
 

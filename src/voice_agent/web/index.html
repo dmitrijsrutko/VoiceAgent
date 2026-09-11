@@ -100,12 +100,23 @@ let sampleRate = 16000;
 let pendingAudio = null;   // metadata from the `audio` frame, awaiting its bytes
 let player = null;         // the clip currently playing
 
+const NEAR_BOTTOM_PX = 48;
+
+function stick(mutate) {
+  // Whether we were at the bottom has to be read *before* the change, since
+  // the change is what moves the bottom. And only then: yanking someone back
+  // down while they are scrolled up reading earlier turns is worse than the
+  // problem this solves.
+  const following = log.scrollHeight - log.scrollTop - log.clientHeight < NEAR_BOTTOM_PX;
+  mutate();
+  if (following) log.scrollTop = log.scrollHeight;
+}
+
 function add(text, cls) {
   const el = document.createElement("div");
   el.className = cls;
   el.textContent = text;
-  wrap.appendChild(el);
-  log.scrollTop = log.scrollHeight;
+  stick(() => wrap.appendChild(el));
   return el;
 }
 
@@ -118,10 +129,12 @@ function setEnabled(on) {
 function ms(v) { return v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }
 
 function note(el, text) {
+  // Telemetry is always the *last* thing appended to a turn, so a note that
+  // does not scroll is a note nobody ever sees.
   const tag = document.createElement("span");
   tag.style.cssText = "display:block; font-size:11px; opacity:.5; margin-top:4px;";
   tag.textContent = text;
-  el.appendChild(tag);
+  stick(() => el.appendChild(tag));
 }
 
 function setSpeaking(active) {
@@ -151,7 +164,18 @@ function play(bytes, mediaType) {
   player.onended = done;
   player.onerror = done;
   setSpeaking(true);
-  player.play().catch(() => { done(); status.textContent = "· click anywhere to enable audio"; });
+  player.play().catch(() => {
+    // Deliberately not done(): that revokes the object URL, and this clip has
+    // not played yet. Release the half-duplex gate only, and keep the bytes
+    // alive until the user's first gesture lets them through.
+    setSpeaking(false);
+    status.textContent = "· click anywhere to hear the agent";
+    document.addEventListener("pointerdown", () => {
+      status.textContent = "";
+      setSpeaking(true);
+      player.play().catch(() => setSpeaking(false));
+    }, { once: true });
+  });
 }
 
 // An AudioWorklet needs a module URL; a Blob keeps this page a single file
@@ -231,11 +255,14 @@ ws.onmessage = (event) => {
     if (msg.ended) { add("This conversation has ended.", "note"); setEnabled(false); }
     else setEnabled(true);
 
+  } else if (msg.type === "greeting") {
+    bubble = add(msg.text, "msg agent");
+
   } else if (msg.type === "reply_start") {
     bubble = add("", "msg agent cursor");
 
   } else if (msg.type === "delta") {
-    if (bubble) { bubble.textContent += msg.text; log.scrollTop = log.scrollHeight; }
+    if (bubble) stick(() => { bubble.textContent += msg.text; });
 
   } else if (msg.type === "reply_end") {
     if (bubble) {
@@ -251,6 +278,14 @@ ws.onmessage = (event) => {
       // The clip's own length matters as much as the time taken to make it: a
       // 31-second answer is a product problem no latency work can fix.
       const length = msg.seconds ? `${msg.seconds.toFixed(1)} s of speech · ` : "";
+      if (msg.cached) {
+        const origin = msg.synthesis_ms
+          ? `synthesized at startup in ${ms(msg.synthesis_ms)}`
+          : "reused from an earlier run";
+        note(bubble, `🔊 ${length}${(msg.bytes / 1024).toFixed(0)} kB · ${origin} · no wait for you`);
+        bubble = null;
+        return;
+      }
       note(bubble, `🔊 ${length}${(msg.bytes / 1024).toFixed(0)} kB · synthesized in ${ms(msg.synthesis_ms)} · audio at ${ms(msg.total_ms)}`);
     }
     bubble = null;
@@ -258,13 +293,25 @@ ws.onmessage = (event) => {
   } else if (msg.type === "transcript") {
     if (!msg.text.trim() && !msg.final) return;
     if (!live) live = add("", "msg user volatile");
-    live.textContent = msg.text;
+    stick(() => { live.textContent = msg.text; });
     if (msg.final) {
       live.classList.remove("volatile");
-      note(live, `🎙 committed ${ms(msg.endpoint_ms)} after your last recognised word`);
+      let line = `🎙 committed ${ms(msg.endpoint_ms)} after your last recognised word`;
+      if (msg.stable_words) {
+        // How much of the turn was settled before it ended, and whether that
+        // guess held. A false `prefix_held` means agreement acted on words you
+        // never said, which is the only way this can be wrong.
+        line += ` · ${msg.stable_words} words settled early${msg.prefix_held ? "" : " ⚠ prefix did not hold"}`;
+      }
+      note(live, line);
+      if (msg.warms) {
+        const pct = msg.warm_prompt_tokens
+          ? Math.round(100 * msg.warm_cached_tokens / msg.warm_prompt_tokens)
+          : 0;
+        note(live, `🔥 warmed ${msg.warms}× · ${msg.warm_cached_tokens}/${msg.warm_prompt_tokens} tokens already cached (${pct}%) · last one ${ms(msg.warm_lead_ms)} before the turn ended`);
+      }
       live = null;
     }
-    log.scrollTop = log.scrollHeight;
 
   } else if (msg.type === "listening") {
     listening = msg.active;

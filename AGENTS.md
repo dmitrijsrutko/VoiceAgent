@@ -226,7 +226,27 @@ not attempt.
 **Verification**
 - What was run and what was observed — `uv run verify` plus whatever real
   exercise proved it actually works (§6).
+
+**Fixes**
+- One line per bug found after the chapter shipped. Never more (see below).
 ```
+
+**Keep the entry proportionate to the change.** A chapter entry is for the
+chapter. Bug fixes and small corrections found afterwards belong in a
+`**Fixes**` list at the end of that chapter's entry — **one line each, never
+more**:
+
+```markdown
+**Fixes**
+
+- Listening no longer expires while the agent's own reply is playing.
+- The default voice is one verified usable on a free plan.
+```
+
+Promote a fix out of that list only when it genuinely changed a *design
+decision* or a *measured number* — in which case it edits the relevant section
+above rather than becoming prose of its own. Four paragraphs about a one-line
+bug pushes the chapter itself off the page, and the chapter is the point.
 
 Write **why**, not just what. The diff already shows what changed. An entry
 that reads like a git log is a failed entry.
