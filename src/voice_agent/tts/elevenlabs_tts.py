@@ -1,11 +1,15 @@
 """ElevenLabs speech synthesis."""
 
+from collections.abc import AsyncIterator
+from typing import Literal
+
+import httpx
 from elevenlabs.client import AsyncElevenLabs
 from elevenlabs.core import ApiError
 
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.tts.base import AudioClip, Voice
+from voice_agent.tts.base import Voice, whole_samples
 
 HINTS = {
     "paid_plan_required": (
@@ -53,10 +57,9 @@ DEFAULT_MODEL = "eleven_flash_v2_5"
 one. This is a voice agent: a reply that sounds slightly better but lands half
 a second later is the worse trade."""
 
-OUTPUT_FORMAT = "mp3_44100_128"
-MEDIA_TYPE = "audio/mpeg"
-BITS_PER_SECOND = 128_000
-"""Constant-bitrate MP3, so the clip's duration follows from its size."""
+OUTPUT_FORMAT: Literal["pcm_24000"] = "pcm_24000"
+"""Raw PCM at `tts.base.SAMPLE_RATE`. Asserted equal to it in the tests, since
+the two drifting apart would pitch the voice rather than fail."""
 
 
 class ElevenLabsTTS:
@@ -71,24 +74,28 @@ class ElevenLabsTTS:
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncElevenLabs(api_key=require_env("ELEVENLABS_API_KEY"))
 
-    async def synthesize(self, text: str) -> AudioClip:
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
+        # The `/stream` endpoint rather than `convert`: both answer in chunked
+        # HTTP, but `convert` renders before it starts sending.
+        chunks = self._client.text_to_speech.stream(
+            voice_id=self.voice,
+            model_id=self.model,
+            text=text,
+            output_format=OUTPUT_FORMAT,
+        )
+        # The request is made lazily, on first iteration, and a failure can
+        # arrive at any chunk — so the whole loop is the guarded region.
         try:
-            # `convert` yields chunks even for a batched request — the response
-            # is chunked HTTP. Joining them here is what makes this batched:
-            # nothing downstream sees a fragment until the clip is whole.
-            chunks = [
-                chunk
-                async for chunk in self._client.text_to_speech.convert(
-                    voice_id=self.voice,
-                    model_id=self.model,
-                    text=text,
-                    output_format=OUTPUT_FORMAT,
-                )
-            ]
+            async for chunk in whole_samples(chunks):
+                yield chunk
         except ApiError as exc:
             raise ProviderError(explain(exc)) from exc
-        data = b"".join(chunks)
-        return AudioClip(data=data, media_type=MEDIA_TYPE, seconds=len(data) * 8 / BITS_PER_SECOND)
+        except httpx.HTTPError as exc:
+            # The SDK wraps HTTP *statuses* in ApiError but passes transport
+            # failures through raw — a dropped connection mid-reply, or no
+            # network at all. Unmapped, they are not a VoiceAgentError, so the
+            # turn cannot degrade to text and the whole connection dies instead.
+            raise ProviderError(f"elevenlabs synthesis interrupted: {exc!r}") from exc
 
     async def list_voices(self) -> list[Voice]:
         try:

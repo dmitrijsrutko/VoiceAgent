@@ -14,6 +14,357 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Instrumentation — how many chunks, fragments and tokens a turn was
+
+Every turn already reported its timings and its size in characters and bytes.
+What it did not say is how the stream was cut up or what it cost in the unit
+providers bill: a long answer's `🔊` line gave 7,340 kB but not that it was
+~7,200 WebSocket frames, and the `💭` line gave 2,328 characters but no tokens.
+Those are the numbers Chapter 7's text chunking and any cost work will reason
+in, so they are on screen before that work starts.
+
+**What changed**
+
+- `llm/base.py`: `Usage` — prompt, cached and output tokens as the provider
+  reports them. `stream()` takes one optionally and the adapter fills it in as
+  the stream ends. DeepSeek and OpenAI need `stream_options={"include_usage":
+  True}` to report anything while streaming; Anthropic's comes from the final
+  message, where the prompt is `input_tokens` plus cache reads plus cache writes.
+  The cached-token reading shared with warming moved into one helper.
+- `speculation.py`: a guess carries its own `Usage`, and a turn that adopts it
+  reports that — the turn itself made no call to count.
+- `server.py`: `reply_end` adds `fragments`, `output_tokens`, `prompt_tokens`
+  and `cached_tokens`; `audio_end` adds `chunks`.
+- The page: `💭 thought for 526 ms · 2328 chars · 512 tokens in 498 fragments ·
+  2.9 s`, a `📥 1390 prompt tokens · 1152 cached (83%)` line, and `🔊 … kB in
+  7168 chunks`. The numbers here show the format, not a measurement.
+
+**Design decisions**
+
+- **Fragments and tokens are both shown, because they are not the same thing.**
+  A fragment is one provider event, which for DeepSeek was one token every time
+  (140 of 140, live) and for Anthropic is routinely several. The fake engine in
+  the tests reports twice as many tokens as fragments so that reporting one as
+  the other fails.
+- **A `Usage` passed in, not a value yielded at the end.** `stream()` stays an
+  iterator of text, so the speculation replay and the turn loop are unchanged;
+  a mutable record per call is also safe with a guess and a warm running at once,
+  where an attribute on the shared adapter would not be.
+- **Tokens absent rather than zero** when a provider reports none — "0 tokens"
+  on screen would read as a measurement.
+- **No tokens-per-second.** A turn that adopted a guess reads fragments that were
+  generated before it started, so its generation time is not the provider's;
+  the rate would be confidently wrong on exactly the turns that matter.
+
+**Latency impact**
+
+- None measurable: one extra final chunk from the provider, and four integer
+  fields per message.
+
+**Verification**
+
+- `uv run verify` green: 194 tests.
+- Live, DeepSeek and ElevenLabs: a 3-token reply reported 3 fragments, 1,171
+  prompt tokens and 1,024 cached; a 140-token reply 140 fragments; the server's
+  `chunks` (1,844) matched the binary frames the client counted.
+- Sabotages caught: not requesting stream usage, reading usage only from chunks
+  that carry text (the usage chunk has none), dropping Anthropic's cache writes
+  from the prompt, an adopted guess losing its usage, reporting fragments as
+  tokens, and not counting chunks. One sabotage was void — swapping `continue`
+  for `break` on the text-less chunk changes nothing, since usage is read first.
+- Anthropic's usage path is exercised against a fake stream only; no Anthropic
+  key was used.
+
+## Refactor — The browser client, split into modules it can test
+
+Chapter 1 put the page's script inline in `index.html`: no framework, no build
+step, one file. That was right for a chat box. By Chapter 6 the script was ~400
+lines doing five jobs — the socket protocol, the chat log, microphone capture
+with its worklet embedded as a string, the streaming player, and the autoplay
+and half-duplex rules — sharing a dozen mutable globals. The cost was specific:
+**none of it could be executed under test.** `test_web_client.py` checked the
+player by searching its source for strings like `Math.max(now, s.next)`, so the
+scheduling arithmetic, the gap counter and the gate had never actually run in
+the suite, and the checker had twice read comments and template literals as
+code. Chapters 7, 8 and barge-in all add browser logic; this was the point to
+stop that pile from growing in a file nothing can import.
+
+No behaviour changes: message formats, on-screen text and every rule the
+Chapter 6 review fixed are the same. This is a move, not a rewrite.
+
+**What changed**
+
+- `web/`: `index.html` is markup and styles only, loading `app.js` as a module.
+  `player.js` owns playback and takes the page as callbacks (`makeContext`,
+  `makeNode`, `isMuted`, `onSpeaking`, `onWaiting`, `onFinished`, `onError`),
+  so it has no DOM or socket in it. `playback-worklet.js` holds the audio-thread
+  side, with its queue and message handling exported so node can run them.
+  `mic.js`, `ui.js`, `protocol.js` hold their own jobs; `capture-worklet.js` is
+  a real file loaded by URL instead of a Blob. `app.js` wires them and owns the
+  state they share — including `speaking`, still assigned in exactly one place.
+- `server.py`: serves `web/` at `/static`, with `Cache-Control: no-cache` so
+  a reload can never link a fresh module against a stale cached neighbour.
+- `tests/web/*.test.mjs`: 26 executed tests under `node --test`, run from
+  pytest. The player is wired to the real worklet logic through a fake port that
+  passes messages by structured clone with transfer, as a browser does.
+- `tests/test_web_client.py`: the text-matching checks the node tests replace
+  are gone. What stays is structural: every module parses; every name a module
+  calls is defined in it or imported — checked per module, since a name defined
+  in a sibling is still a ReferenceError; every import is actually exported;
+  element ids exist in the markup; the mic send path keeps its gate; and the
+  wiring order in `onsubmit`, which is not the player's to test.
+
+**Design decisions**
+
+- **Native ES modules, not TypeScript and a bundler.** Modules give imports,
+  scope and executability with nothing to install and nothing to build. A
+  toolchain would be the project's first non-Python dependency, and would
+  justify itself with types and components this page does not yet need.
+- **Node's built-in test runner, not a browser test framework.** It ships with
+  node, which the suite already used for `node --check`. It cannot test audio or
+  the DOM, which is why the logic worth testing was moved behind callbacks
+  rather than the tests being given a fake browser.
+- **The player takes the page as callbacks.** The alternative — a module that
+  imports `ui.js` and touches `document` — can only be tested with a DOM
+  emulator. Callbacks keep the rules (when the gate opens, what counts as a
+  gap, what a gesture drops) in plain code.
+- **The structural checks stay.** An executed test of `player.js` cannot see
+  `app.js` calling a function nobody defines; that exact failure once shipped
+  with every Python test green.
+
+**Latency impact**
+
+- None intended. The page now makes six module requests instead of zero,
+  locally and once per load, before any audio; not measured.
+
+**Deliberately not done**
+
+- No executed tests for `app.js`, `mic.js` or `ui.js`: they are DOM and device
+  wiring. `app.js` was exercised once by a scratch script with fake browser
+  globals — greeting waits for a gesture, sending drops it, a reply plays at
+  24 kHz and releases the gate with its gap report — but that is not in the
+  suite.
+- No linting or formatting for JavaScript; the project has no JS tooling and
+  this step does not add any.
+
+**Verification**
+
+- `uv run verify` green: ruff, ruff format, mypy strict, 190 tests — one of which
+  runs the 26 node tests.
+- **Sabotages, all caught — but not on the first run either time.** Deleting a
+  function from `app.js` passed because the call checker read all modules as one
+  text and found the same name exported by `ui.js`; it now checks each module
+  against its own definitions and imports. Against the worklet player, trusting
+  a report for a replaced stream passed because a wired test cannot produce the
+  race; a test now delivers the late report directly.
+- Served for real: all six modules return 200 as `text/javascript`, and the page
+  loads the entry module.
+- **Driven in headless Chrome against the live server** over the DevTools
+  protocol: every module and both worklets load from `/static`, a typed message
+  goes out, and a real 126.7-second ElevenLabs reply streams in as 5,942 frames
+  and plays with the gate closed for 126.73 s and zero gaps. That run found a
+  bug no test had: the player counted a chunk's samples after posting them, and
+  a transferred array reads as empty, so every reply's gate reopened 40 ms in.
+  The fake port now transfers for real, and the bug fails four tests.
+
+**Fixes**
+
+- A typed message is sent before any audio setup, so a browser that refuses the 24 kHz output context loses the voice, not the words.
+- Page tests skip on node older than 22 with a reason saying so, rather than failing as if a module were broken; README lists node as optional.
+
+## Chapter 6 — Streaming synthesis: the voice starts while it is still being made
+
+Chapter 2 made synthesis batched on purpose — the whole reply in, one MP3 out —
+and measured the cost as a wait that grew with the answer: 144 ms for a
+sentence, 1.3 s for a 40-second reply, all of it sitting between the text
+appearing and the first sound. Chapter 5 cut time-to-first-*token* and said out
+loud that first *audio* still waited. This chapter removes the synthesis half
+of that wait: audio now comes back as a stream of raw PCM frames, and the
+browser plays each one the moment it arrives. The provider's first byte lands
+in 130-166 ms regardless of how long the reply is.
+
+It streams the *output* only. The whole reply text still goes in at once, after
+`reply_end`, so the wait for the reasoning engine to finish writing is untouched
+— on a long answer that is now the larger half. Feeding the synthesizer text
+while it is still being generated is Chapter 7, and it is a different problem:
+where to cut text without damaging prosody. Keeping the two apart meant this
+chapter's hard part — transport and playback — was debugged on its own.
+
+**What changed**
+
+- `tts/base.py`: the `TTS` protocol is now `stream(text) -> AsyncIterator[bytes]`,
+  PCM s16le mono at 24 kHz, every chunk holding whole samples. `AudioClip` and
+  `synthesize` are gone — this *replaces* Chapter 2's batched interface rather
+  than adding a mode beside it. `whole_samples` re-cuts a provider stream so no
+  chunk splits a sample; `pcm_seconds` derives duration from size.
+- `tts/elevenlabs_tts.py`: the `/stream` endpoint at `pcm_24000`, errors mapped
+  on iteration since that is where the request actually happens.
+  `tts/openai_tts.py`: `with_streaming_response` with `response_format="pcm"`.
+- `server.py`: speech is `audio_start` → N binary frames → `audio_end`, replacing
+  the `audio` announcement plus one binary frame. `audio_end` reports
+  `synthesis_first_byte_ms` (the provider), `synthesis_ms` (the whole stream),
+  and `first_audio_ms` — send to first chunk, which replaces `total_ms` as the
+  number the project is judged on. `ready` announces the voice's sample rate.
+  The greeting is cached as PCM and delivered through the same three-part shape.
+  A blank reply is no longer sent to the synthesizer.
+- The page: the `<audio>` element is replaced by an AudioWorklet that plays a
+  queue of PCM as one continuous output, on an `AudioContext` running at the
+  stream's rate. If the queue runs dry mid-reply that is a **gap**, counted on
+  the audio thread, shown (`⚠ N gaps · T of silence mid-reply`) and logged by
+  the server. The telemetry line is now
+  `🔊 <length> of speech · <size> kB · audio at <first_audio> · first byte after
+  <synthesis_first_byte> · synthesized in <synthesis>`.
+
+**Design decisions**
+
+- **Raw PCM, not MP3 chunks or Opus.** Both backends produce 24 kHz s16le
+  natively, the browser needs no decoder, every chunk is playable the instant it
+  lands, and duration is arithmetic. MP3 through MediaSource buffers before it
+  plays and splits frames across chunks; Opus needs WebCodecs and a container.
+  The price is ~384 kbps against 128 — nothing on localhost, and a real question
+  for the telephony chapter, which will want μ-law or Opus anyway.
+- **An AudioWorklet queue, not one `AudioBufferSourceNode` per chunk.** Shipped
+  the other way first — no cross-thread protocol, a gap is one comparison — and
+  it passed every test, every seam check and a live 58-second reply. Then a
+  100-second reply was listened to: clicky and pitch-warped at the start,
+  recovering towards the end. Every scheduled source node is work on every
+  128-frame render quantum until it plays, and a whole reply is scheduled
+  within two seconds. Timed by offline rendering in Chrome:
+
+  | Reply | Chunks | Per-quantum cost, one node per chunk |
+  | --- | --- | --- |
+  | 20 s | 940 | 84 µs |
+  | 58 s | 2,700 | 332 µs |
+  | 98 s | 4,600 | 783 µs |
+  | 192 s | 9,000 | 2,677 µs |
+
+  Those are averages against a 5,333 µs budget that the device callback, the
+  resampler and the OS share; the spikes around them are what missed deadlines,
+  and the load fell as nodes played out — the recovery that was heard. With the
+  worklet queue, each second of rendering timed separately: steady-state cost is
+  flat at a 1.1-1.6 µs median (2-3 µs max) with 0, 4,600 or 20,000 chunks
+  queued. The one length-dependent cost is taking the messages in — ~180-200 µs
+  per quantum averaged over the first second for 20,000 chunks, once. The output
+  was bit-identical to the source over 20 s of 1,024-byte chunks, the queue
+  counts real underruns rather than late arrivals, and it already drops a stream
+  instantly, which barge-in will want. An earlier headless "no overload" check
+  had measured throughput against a fake audio device that never misses a
+  deadline — the wrong question.
+- **Queue operations are amortized O(1).** Appending is an array push, a render
+  quantum copies 128 samples from at most a couple of chunks, and played chunks
+  are released. Consumed slots are compacted away only once they are half the
+  array: the first version compacted every 256 chunks, which re-copied
+  everything still queued — and since a reply arrives far faster than it plays,
+  that is nearly all of it. A test counts the copies: 768,229 slots to play
+  20,000 chunks before, at most 20,000 now. Honestly, no timing showed the
+  difference at these sizes; the fix removes a quadratic term, not a heard
+  problem. Memory is O(audio not yet played), and nothing of played audio is kept.
+  The per-quantum copy is a plain loop rather than `set(subarray(...))`, so the
+  audio thread allocates nothing while playing: a view per quantum is garbage
+  collected on the thread that must not pause.
+- **The output context runs at the stream's rate, not the device's.** Planned
+  the other way, changed on measurement: rendering ElevenLabs-sized chunks
+  offline at 48 kHz put 632 clicked samples at the joins (36.8 dB against a
+  continuous render), and at 24 kHz none. The worklet keeps this: it plays the
+  stream sample for sample and the browser resamples the output once, rather
+  than the worklet carrying a resampler of its own. The microphone context
+  already relied on a requested rate, so the support argument did not hold.
+- **No pre-roll.** Playback starts on the first chunk. Synthesis measured at
+  ~36× real time on localhost, so a jitter buffer would spend latency on every
+  turn to guard against stutters not yet observed. The gap counter is what
+  would justify one.
+- **`audio_start` is sent lazily, on the first chunk.** A synthesis that fails
+  outright then looks exactly as it did batched — an `audio_error` and no audio
+  begun — rather than a stream opened and never closed. One that fails
+  mid-reply closes what it sent with `audio_end`, then reports the error; the
+  text is kept either way.
+- **The mute window is what is left to play, not the reply's length.** Audio
+  is already playing while the rest arrives, so the server now returns length
+  minus time since the first chunk. It errs short — the browser starts a moment
+  after the send — and the browser's own `playback` hold covers the difference.
+- **The half-duplex gate reopens only when `audio_end` has arrived *and* the
+  last sample has played.** Either alone releases it while the agent is still
+  audible.
+- **Replaced, not toggled.** A `STREAM_SYNTHESIS` switch would have kept two
+  audio protocols alive in the server and the browser for a comparison that
+  was measured once, below, before the batched path was removed.
+- **The greeting's cache key includes the audio format**, and a synthesis that
+  fails partway is not cached. An MP3 cache read back as PCM would not fail; it
+  would play as noise, every visit.
+
+**Latency impact**
+
+Live, real DeepSeek and real ElevenLabs (`eleven_flash_v2_5`), typed turns,
+two runs each, timed server-side and confirmed within 40 ms by the client.
+"First audio" is turn start to the first audio byte sent:
+
+| Reply | Batched synthesis | Batched first audio | Streaming first byte | Streaming first audio |
+| --- | --- | --- | --- | --- |
+| ~1 s of speech | 144-429 ms | 757-1521 ms | 130-140 ms | 789-1060 ms |
+| ~20 s | 749-850 ms | 2041-2107 ms | 154 ms | **1310-1391 ms** |
+| ~40 s | 1219-1259 ms | 2873-3239 ms | 155-166 ms | **1555-1683 ms** |
+
+- Synthesis's contribution to first audio is now flat at ~150 ms instead of
+  growing with the reply — inside the §7 budget's 150 ms for that stage.
+- On a short reply the difference is within run-to-run noise: synthesis was
+  already small, and time-to-first-token (543-982 ms here) dominates.
+- On long replies what remains is the reasoning engine's full generation time
+  (370-1060 ms), which this chapter does not touch. That is Chapter 7's target.
+- Browser playback latency was **not measured**. Gaps were: zero across a
+  126.7-second reply played by the page in headless Chrome.
+
+**Deliberately not done**
+
+- No streaming *input*: the synthesizer still waits for the whole reply (Chapter 7).
+- No speculative synthesis of a reply before its turn commits (Chapter 8).
+- No barge-in, and so no record of what was actually heard — though the worklet
+  can already drop a stream instantly.
+- No jitter buffer, and no reconnect or resume mid-stream.
+- One WebSocket message per provider chunk — ~1,800 for a 40-second reply. Fine
+  locally; coalescing belongs with a transport that is not localhost.
+- Only the output format both current backends share. A backend without 24 kHz
+  PCM would need resampling behind the interface.
+
+**Verification**
+
+- `uv run verify` green: ruff, ruff format, mypy strict, 164 tests (169 after the fixes below).
+- New tests: odd-sized chunks re-cut to whole samples with nothing lost; both
+  adapters request PCM and stream in whole samples; an ElevenLabs error raised
+  mid-stream still surfaces as `ProviderError`; a reply arrives as more than one
+  binary frame, between `audio_start` and `audio_end`, byte-identical to what
+  was synthesized; a failure before the first chunk opens no stream; a failure
+  mid-reply closes the audio it began and keeps the text; the mute window is
+  the remainder; a blank reply is never synthesized; the greeting cache key
+  carries the format and a partial greeting is not cached; the page's player
+  plays a queue without seams, counts gaps only mid-stream, runs its context at
+  the stream rate, keeps queued speech through the autoplay fallback, and
+  reopens the gate only after the last sample.
+- **Six sabotages, all caught**: dropping the odd-byte carry, returning the full
+  length as the mute window, announcing `audio_start` eagerly, caching a partial
+  greeting, leaving the format out of the cache key, and not closing audio on a
+  mid-stream failure (caught as a hang, the way a browser would wait).
+- **Live audio, inspected numerically** (ElevenLabs): the captured PCM of 38 s
+  and 43 s replies has RMS ~5.7k, no clipping, and ~3,000 zero crossings per
+  second — speech. The same bytes shifted by one byte, the failure
+  `whole_samples` guards against, measure RMS 18.2k, 2.1% clipped, 10,600
+  crossings per second.
+- **`whole_samples` is defensive, not a fix for anything observed**: 290
+  ElevenLabs chunks were all exactly 1,024 bytes. It stays because nothing in
+  HTTP chunking promises that, and the failure it prevents is total.
+- **Listened to, and it failed**: replies up to 32 s sounded clean; a 100-second
+  one was clicky and pitch-warped — the cause and the redesign are under Design
+  decisions. The worklet player has since been driven end to end in headless
+  Chrome (see the refactor entry) but **not yet listened to**.
+- **Not verified**: the OpenAI backend live (no key in this environment).
+
+**Fixes**
+
+- A connection lost mid-synthesis degrades the reply to text instead of dropping the socket: both SDKs pass transport errors through as raw `httpx` exceptions, now mapped to `ProviderError` (`httpx` declared as a runtime dependency). The LLM adapters still have this gap.
+- The greeting cache is written atomically and an odd-length file is re-synthesised: raw PCM, unlike the old JSON, loaded a truncated file as a valid shorter greeting.
+- Sending a first message drops a greeting still waiting on autoplay, rather than starting it for the reply to cut off mid-word.
+- The browser's gap counts are coerced to integers before logging; they are client-supplied.
+- The mid-stream-failure test reads to a frame the server always sends, so a regression fails instead of hanging the suite; the mute-window test uses a fake clock.
+
 ## Chapter 5 — Speculation: answering before the question finishes
 
 When a partial transcript adds no new words, the speaker has probably stopped.
@@ -544,6 +895,7 @@ currently see that number from the inside.
 
 - A recognizer session that ends on its own is reconnected, not silently ignored.
 - A leaked playback hold no longer mutes the microphone permanently and silently.
+- A reply longer than the one-minute hold ceiling no longer stops listening mid-reply: a hold is not treated as stuck while the server knows its reply is still playing (156 s was heard).
 - Blank committed transcripts are not reported at all.
 - An orderly close of the recognizer socket is no longer reported as a failure.
 - `stop()` no longer deadlocks when called from the task it waits on.

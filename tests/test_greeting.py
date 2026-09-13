@@ -1,16 +1,17 @@
 """The agent's opening line, and the cold start it exists to absorb."""
 
 import asyncio
+from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeLLM, FakeTTS
+from tests.conftest import FakeLLM, FakeTTS, pcm_for, receive
 from voice_agent import server
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
-from voice_agent.tts.base import AudioClip
+from voice_agent.tts.base import MEDIA_TYPE
 
 HELLO = "Hi, I'm a voice agent."
 
@@ -20,7 +21,7 @@ class SilentChannel:
 
     async def send_json(self, payload: dict[str, object]) -> None: ...
 
-    async def send_audio(self, announcement: dict[str, object], data: bytes) -> None: ...
+    async def send_bytes(self, data: bytes) -> None: ...
 
 
 @pytest.fixture(autouse=True)
@@ -51,12 +52,17 @@ def test_a_new_conversation_is_greeted_in_text_and_speech(store: SessionStore) -
     with client, client.websocket_connect(f"/ws/{open_conversation(client)}") as socket:
         socket.receive_json()  # ready
         greeting = socket.receive_json()
-        audio = socket.receive_json()
-        clip = socket.receive_bytes()
+        start = socket.receive_json()
+        pcm = socket.receive_bytes()
+        end = socket.receive_json()
 
     assert greeting == {"type": "greeting", "text": HELLO}
-    assert audio["cached"] is True
-    assert clip == b"ID3" + HELLO.encode()
+    # The same start / frames / end shape as a live reply: one audio path.
+    assert start == {"type": "audio_start", "media_type": MEDIA_TYPE, "sample_rate": 24000}
+    assert end["type"] == "audio_end" and end["cached"] is True
+    assert end["chunks"] == 1
+    assert pcm == pcm_for(HELLO)
+    assert end["bytes"] == len(pcm)
     assert tts.spoken == [HELLO]
 
 
@@ -71,8 +77,8 @@ def test_the_greeting_is_synthesised_once_for_the_whole_process(store: SessionSt
             with client.websocket_connect(f"/ws/{open_conversation(client)}") as socket:
                 socket.receive_json()
                 assert socket.receive_json()["type"] == "greeting"
-                socket.receive_json()
-                socket.receive_bytes()
+                while receive(socket)["type"] != "audio_end":
+                    pass
 
     assert tts.spoken == [HELLO], "the greeting was synthesised more than once"
 
@@ -85,9 +91,8 @@ def test_the_greeting_becomes_part_of_the_conversation(store: SessionStore) -> N
     with client:
         key = open_conversation(client)
         with client.websocket_connect(f"/ws/{key}") as socket:
-            for _ in range(3):
-                socket.receive_json()
-            socket.receive_bytes()
+            while receive(socket)["type"] != "audio_end":
+                pass
 
     assert [(m.role, m.content) for m in store.get(key).messages] == [("assistant", HELLO)]
 
@@ -98,9 +103,8 @@ def test_reconnecting_does_not_greet_again(store: SessionStore) -> None:
     with client:
         key = open_conversation(client)
         with client.websocket_connect(f"/ws/{key}") as socket:
-            for _ in range(3):
-                socket.receive_json()
-            socket.receive_bytes()
+            while receive(socket)["type"] != "audio_end":
+                pass
 
         with client.websocket_connect(f"/ws/{key}") as socket:
             ready = socket.receive_json()
@@ -198,9 +202,10 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     from voice_agent.server import Greeting
 
     class SlowTTS(FakeTTS):
-        async def synthesize(self, text: str) -> AudioClip:
+        async def stream(self, text: str) -> AsyncIterator[bytes]:
             await asyncio.sleep(0.05)  # long enough for the other tab to arrive
-            return await super().synthesize(text)
+            async for chunk in super().stream(text):
+                yield chunk
 
     opening = Greeting(HELLO, SlowTTS(), cache_dir=tmp_path)
     conversation = Conversation(id="shared")
@@ -212,3 +217,69 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     )
 
     assert [m.content for m in conversation.messages] == [HELLO]
+
+
+def test_a_cache_in_another_audio_format_is_not_played(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Read back as PCM, a greeting cached as MP3 by an earlier chapter does
+    not fail — it plays as noise. The format is part of the key, so a cache in
+    any other format is simply not found."""
+    from voice_agent.server import Greeting
+
+    speaker = FakeTTS()
+    current = Greeting(HELLO, speaker, cache_dir=tmp_path)._cache_file
+    monkeypatch.setattr(server, "MEDIA_TYPE", "audio/mpeg")
+    other = Greeting(HELLO, speaker, cache_dir=tmp_path)._cache_file
+
+    assert current != other
+
+
+async def test_a_greeting_that_dies_mid_synthesis_is_not_cached(tmp_path: Path) -> None:
+    """A truncated greeting written to disk would be replayed, truncated, on
+    every visit from then on."""
+    from voice_agent.server import Greeting
+
+    await Greeting(HELLO, FakeTTS(fail_after=2), cache_dir=tmp_path).prepare()
+    fresh = FakeTTS()
+    await Greeting(HELLO, fresh, cache_dir=tmp_path).prepare()
+
+    assert fresh.spoken == [HELLO], "a partial greeting was cached"
+
+
+def write(path: Path, data: bytes) -> None:
+    path.write_bytes(data)
+
+
+def read(path: Path) -> bytes:
+    return path.read_bytes()
+
+
+def listing(directory: Path) -> list[str]:
+    return [entry.name for entry in directory.iterdir()]
+
+
+async def test_a_damaged_cache_file_is_resynthesised_not_replayed(tmp_path: Path) -> None:
+    """Raw PCM has no structure to fail on: a file cut short loads as a shorter
+    greeting and would be replayed, truncated, on every visit."""
+    from voice_agent.server import Greeting
+
+    speaker = FakeTTS()
+    opening = Greeting(HELLO, speaker, cache_dir=tmp_path)
+    write(opening._cache_file, pcm_for(HELLO)[:-1])  # an odd length: a split sample
+
+    await opening.prepare()
+
+    assert speaker.spoken == [HELLO], "a damaged cache file was trusted"
+    assert read(opening._cache_file) == pcm_for(HELLO)
+
+
+async def test_the_cache_is_written_atomically(tmp_path: Path) -> None:
+    """Written aside and renamed, so an interrupted write never leaves a
+    truncated greeting under the real name."""
+    from voice_agent.server import Greeting
+
+    opening = Greeting(HELLO, FakeTTS(), cache_dir=tmp_path)
+    await opening.prepare()
+
+    assert listing(tmp_path) == [opening._cache_file.name]

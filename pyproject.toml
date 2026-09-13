@@ -16,6 +16,7 @@ dependencies = [
     "anthropic>=1.4.0",
     "elevenlabs>=2.66.0",
     "fastapi>=0.141.1",
+    "httpx>=0.28.1",
     "openai>=3.8.0",
     "python-dotenv>=1.2.3",
     "uvicorn[standard]>=0.52.4",
@@ -32,7 +33,6 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
-    "httpx>=0.28.1",
     "mypy>=1.13.0",
     "pytest>=8.3.0",
     "pytest-asyncio>=1.0.0",

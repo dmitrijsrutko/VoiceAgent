@@ -1,9 +1,14 @@
+from collections.abc import AsyncIterator
+from types import SimpleNamespace
+from typing import Any
+
 import pytest
 
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError
 from voice_agent.llm import create_llm
 from voice_agent.llm.anthropic_provider import AnthropicLLM, to_anthropic_messages
+from voice_agent.llm.base import Usage
 from voice_agent.llm.openai_compatible import (
     DEEPSEEK,
     OPENAI,
@@ -72,3 +77,115 @@ def test_a_missing_key_fails_loudly_rather_than_at_the_first_request(
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     with pytest.raises(ConfigError, match="DEEPSEEK_API_KEY"):
         create_llm("deepseek")
+
+
+def chunk(content: str | None, usage: dict[str, Any] | None = None) -> SimpleNamespace:
+    """An OpenAI-shaped stream chunk; the usage chunk has no choices."""
+    choices = [] if content is None else [SimpleNamespace(delta=SimpleNamespace(content=content))]
+    reported = None
+    if usage is not None:
+        reported = SimpleNamespace(
+            prompt_tokens=usage["prompt_tokens"],
+            completion_tokens=usage["completion_tokens"],
+            model_dump=lambda: usage,
+        )
+    return SimpleNamespace(choices=choices, usage=reported)
+
+
+class FakeCompletions:
+    def __init__(self, chunks: list[SimpleNamespace]) -> None:
+        self.chunks = chunks
+        self.requests: list[dict[str, Any]] = []
+
+    async def create(self, **request: Any) -> AsyncIterator[SimpleNamespace]:
+        self.requests.append(request)
+
+        async def stream() -> AsyncIterator[SimpleNamespace]:
+            for item in self.chunks:
+                yield item
+
+        return stream()
+
+
+async def test_a_streamed_openai_compatible_reply_reports_its_token_usage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without `include_usage` a stream reports nothing; with it, one final chunk
+    with no choices carries the counts — DeepSeek's cache hits included."""
+    completions = FakeCompletions(
+        [
+            chunk("Hel"),
+            chunk("lo"),
+            chunk(
+                None,
+                {"prompt_tokens": 1390, "completion_tokens": 3, "prompt_cache_hit_tokens": 1152},
+            ),
+        ]
+    )
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    llm = OpenAICompatibleLLM(DEEPSEEK, client=client)  # type: ignore[arg-type]
+    usage = Usage()
+
+    text = [fragment async for fragment in llm.stream("be brief", CONVERSATION, usage)]
+
+    assert text == ["Hel", "lo"]
+    assert completions.requests[0]["stream_options"] == {"include_usage": True}
+    assert usage == Usage(prompt_tokens=1390, cached_tokens=1152, output_tokens=3)
+
+
+async def test_openai_nests_its_cache_hits_differently_and_is_read_too() -> None:
+    reported = {
+        "prompt_tokens": 900,
+        "completion_tokens": 12,
+        "prompt_tokens_details": {"cached_tokens": 768},
+    }
+    client = SimpleNamespace(
+        chat=SimpleNamespace(completions=FakeCompletions([chunk(None, reported)]))
+    )
+    usage = Usage()
+
+    llm = OpenAICompatibleLLM(OPENAI, client=client)  # type: ignore[arg-type]
+    _ = [f async for f in llm.stream("s", CONVERSATION, usage)]
+
+    assert usage == Usage(prompt_tokens=900, cached_tokens=768, output_tokens=12)
+
+
+class FakeAnthropicStream:
+    def __init__(self, texts: list[str], usage: SimpleNamespace) -> None:
+        self._texts = texts
+        self._usage = usage
+
+    async def __aenter__(self) -> "FakeAnthropicStream":
+        return self
+
+    async def __aexit__(self, *_: object) -> None: ...
+
+    @property
+    def text_stream(self) -> AsyncIterator[str]:
+        async def texts() -> AsyncIterator[str]:
+            for text in self._texts:
+                yield text
+
+        return texts()
+
+    async def get_final_message(self) -> SimpleNamespace:
+        return SimpleNamespace(usage=self._usage)
+
+
+async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> None:
+    """Anthropic's `input_tokens` excludes both; the prompt is all three."""
+    final = SimpleNamespace(
+        input_tokens=20,
+        output_tokens=7,
+        cache_read_input_tokens=1000,
+        cache_creation_input_tokens=30,
+    )
+    client = SimpleNamespace(
+        messages=SimpleNamespace(stream=lambda **_: FakeAnthropicStream(["Hi", " there"], final))
+    )
+    usage = Usage()
+
+    text = [f async for f in AnthropicLLM(client=client).stream("s", CONVERSATION, usage)]  # type: ignore[arg-type]
+
+    assert text == ["Hi", " there"]
+    assert usage == Usage(prompt_tokens=1050, cached_tokens=1000, output_tokens=7)

@@ -79,11 +79,25 @@ for the full log and the reasoning behind each step.
   on a turn where it fired. It does not fire on short turns — the recognizer is
   still delivering words when the turn commits, so there is no dead air to use —
   and the cost of every wrong guess is counted on screen.
+- **Chapter 6 — streaming synthesis.** The reply's audio plays as it is made.
+  The whole text still goes in at once, but speech comes back as raw PCM
+  (24 kHz, 16-bit, mono) over the same WebSocket, and the browser plays it as
+  it arrives through an AudioWorklet queue. The provider's first byte now lands in
+  130-166 ms whatever the reply's length, where batched synthesis took 144 ms
+  to 1.3 s; measured live, a 20-second answer starts
+  speaking ~0.7 s earlier and a 40-second one 1.2-1.7 s earlier. Any stutter —
+  the queue running dry mid-reply — is counted on screen.
+- **Refactor — the browser client as modules.** The page's script, which had
+  grown to ~400 lines inline, is split into native ES modules served from
+  `/static`. Still no build step and no npm; the player's logic now runs under
+  `node --test` instead of being checked as text.
 
 ## Requirements
 
 - Python ≥ 3.12
 - [uv](https://docs.astral.sh/uv/)
+- Optional: node ≥ 22, to run the page's own tests (`uv run verify` skips them
+  without it, and says so)
 
 ## Setup
 
@@ -148,7 +162,15 @@ src/voice_agent/
   config.py               chapter 1: env settings + system-prompt loading
   errors.py               errors this project raises deliberately
   verify.py               the `uv run verify` quality gate
-  web/index.html          chapter 1: the chat page (no framework, no build step)
+  web/                    the browser client: native ES modules, no framework, no build step
+    index.html            markup and styles; loads app.js as a module
+    app.js                wiring: the socket, message handling, shared page state
+    player.js             streaming playback rules: the half-duplex gate, autoplay, replacement (tested in node)
+    playback-worklet.js   the audio-thread queue that plays PCM seamlessly and counts gaps (tested in node)
+    mic.js                microphone permission and the capture graph
+    capture-worklet.js    the audio-thread processor that emits PCM16 frames
+    ui.js                 the chat log: append, scroll, enable
+    protocol.js           the messages the page sends
   llm/
     base.py               the LLM protocol every reasoning backend implements
     registry.py           name -> backend
@@ -159,12 +181,12 @@ src/voice_agent/
     registry.py           name -> backend, or None for deafness
     elevenlabs_stt.py     Scribe realtime over a raw WebSocket (VAD endpointing)
   tts/                    chapter 2: speech synthesis
-    base.py               AudioClip + Voice + the TTS protocol
+    base.py               the TTS protocol: text in, PCM chunks out
     registry.py           name -> backend, or None for silence
     elevenlabs_tts.py     ElevenLabs (default)
     openai_tts.py         OpenAI
 docs/ROADMAP.md           research notes and candidate future chapters
-tests/
+tests/                    pytest suite; tests/web/ holds node tests for the page (`node --test`)
 .env.example              provider keys and settings
 ```
 
@@ -180,8 +202,12 @@ half-duplex gate, and recording what the caller actually *heard* rather than
 what the agent meant to say. Semantic turn detection, to replace the single
 silence threshold and take endpointing back from the vendor — currently 1.3 s
 of a 2.9 s round trip, and not measurable from inside the project. Streaming
-synthesis, to stop paying 500 ms serially. Then context management and prompt
-caching for the reasoning stage, which grows worse every turn.
+synthesis *input* — speaking the reply while it is still being written, in
+pieces cut where they will not damage prosody — which removes the wait for the
+whole reply that Chapter 6 left in place. Then speculative synthesis: the first
+sentence voiced before the turn commits and held until it does. Then context
+management and prompt caching for the reasoning stage, which grows worse every
+turn.
 
 After that the work turns to making it feel human: barge-in and interruption
 handling, streaming every stage boundary so nothing waits for a complete

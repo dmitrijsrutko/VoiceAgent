@@ -26,6 +26,22 @@ class Warmth:
     cached_tokens: int
 
 
+@dataclass(slots=True)
+class Usage:
+    """What the provider says one streamed reply cost, in tokens.
+
+    Filled in by the adapter as its stream finishes, so it reads zero until
+    then — and stays zero for a provider that reports nothing, which the page
+    shows as absence rather than as a count of zero. Passed in rather than
+    returned because `stream` already yields text; a claimed speculation hands
+    its own `Usage` to the turn that adopts it.
+    """
+
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    output_tokens: int = 0
+
+
 class LLM(Protocol):
     """A streaming, provider-agnostic reasoning engine.
 
@@ -41,8 +57,14 @@ class LLM(Protocol):
     @property
     def model(self) -> str: ...
 
-    def stream(self, system: str, messages: Sequence[Message]) -> AsyncIterator[str]:
+    def stream(
+        self, system: str, messages: Sequence[Message], usage: Usage | None = None
+    ) -> AsyncIterator[str]:
         """Yield the reply in fragments, in order, as the provider produces them.
+
+        A fragment is whatever the provider sends in one event — often one
+        token, but not by contract — so fragments are not a token count; the
+        provider's own count lands in `usage` once the stream ends.
 
         Not `async def`: an implementation is an async *generator* function, so
         calling it returns the iterator without awaiting.

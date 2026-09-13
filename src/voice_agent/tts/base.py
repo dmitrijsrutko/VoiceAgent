@@ -1,30 +1,41 @@
 """The one interface every speech synthesis backend implements."""
 
+from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Protocol
 
+SAMPLE_RATE = 24_000
+"""Hz. Chosen because both backends produce it natively — ElevenLabs as
+`pcm_24000`, OpenAI as its only `pcm` rate — so neither needs resampling."""
 
-@dataclass(frozen=True, slots=True)
-class AudioClip:
-    """A finished piece of speech, ready to play.
+BYTES_PER_SAMPLE = 2
+"""16-bit signed little-endian, mono."""
 
-    `media_type` travels with the bytes because the browser needs it to decode
-    them, and because the format is a per-provider choice this project intends
-    to change later — PCM frames when playback becomes incremental.
+MEDIA_TYPE = f"audio/pcm;rate={SAMPLE_RATE};encoding=s16le;channels=1"
+"""Travels with the stream so the browser never has to assume a format. A
+wrong rate does not fail, it plays — pitched up or down."""
+
+
+def pcm_seconds(n_bytes: int) -> float:
+    """How long `n_bytes` of this module's PCM takes to play."""
+    return n_bytes / (SAMPLE_RATE * BYTES_PER_SAMPLE)
+
+
+async def whole_samples(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+    """Re-cut a provider's byte stream so that no chunk splits a sample.
+
+    HTTP chunking knows nothing about 16-bit samples, and an odd-length chunk
+    is ordinary. Played as it arrives, a split sample shifts every sample after
+    it by one byte — the rest of the reply becomes full-scale noise. A trailing
+    odd byte is held back and prepended to the next chunk instead.
     """
-
-    data: bytes
-    media_type: str
-    seconds: float | None = None
-    """How long this takes to play, when the backend can say.
-
-    Not decoration: while a reply is playing the browser is muted, so the
-    server must not count that stretch as the user being silent. Trusting the
-    browser to report playback is not enough — a lost message there stops the
-    microphone with a message blaming the user."""
-
-    def __len__(self) -> int:
-        return len(self.data)
+    carry = b""
+    async for chunk in chunks:
+        data = carry + chunk
+        cut = len(data) - len(data) % BYTES_PER_SAMPLE
+        carry = data[cut:]
+        if cut:
+            yield data[:cut]
 
 
 @dataclass(frozen=True, slots=True)
@@ -37,13 +48,12 @@ class Voice:
 
 
 class TTS(Protocol):
-    """Text in, one complete clip out.
+    """Text in, a stream of speech out.
 
-    Batched on purpose in this chapter, and the signature says so rather than
-    hiding it behind an iterator that would yield exactly once. Streaming
-    synthesis widens this to an async iterator of frames, and that widening is
-    the point of the chapter that does it — the cost of *not* streaming should
-    be visible until then.
+    The whole text still goes in at once: this interface streams the *output*
+    only. Every chunk is PCM in the format above and holds whole samples, so a
+    consumer may play each one the moment it arrives. Streaming the *input* —
+    speaking a reply while it is still being written — is a later chapter.
     """
 
     @property
@@ -52,7 +62,10 @@ class TTS(Protocol):
     @property
     def voice(self) -> str: ...
 
-    async def synthesize(self, text: str) -> AudioClip: ...
+    def stream(self, text: str) -> AsyncIterator[bytes]:
+        """Raises `ProviderError` — possibly after some chunks have already
+        been yielded, which a consumer that has started playing must handle."""
+        ...
 
     async def list_voices(self) -> list[Voice]:
         """The voices this account may actually use.

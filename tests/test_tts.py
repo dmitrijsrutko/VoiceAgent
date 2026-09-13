@@ -1,18 +1,45 @@
+from collections.abc import AsyncIterator
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from elevenlabs.core import ApiError
 
-from voice_agent.errors import ConfigError
-from voice_agent.tts import AudioClip, create_tts
-from voice_agent.tts.elevenlabs_tts import DEFAULT_VOICE, ElevenLabsTTS, explain
-from voice_agent.tts.openai_tts import OpenAITTS
+from voice_agent.errors import ConfigError, ProviderError
+from voice_agent.tts import create_tts
+from voice_agent.tts.base import SAMPLE_RATE, pcm_seconds, whole_samples
+from voice_agent.tts.elevenlabs_tts import DEFAULT_VOICE, OUTPUT_FORMAT, ElevenLabsTTS, explain
+from voice_agent.tts.openai_tts import RESPONSE_FORMAT, OpenAITTS
 
 
-def test_a_clip_carries_the_media_type_the_browser_needs() -> None:
-    clip = AudioClip(data=b"1234", media_type="audio/mpeg")
-    assert len(clip) == 4
-    assert clip.media_type == "audio/mpeg"
+async def chunks_of(*parts: bytes) -> AsyncIterator[bytes]:
+    for part in parts:
+        yield part
+
+
+async def collect(stream: AsyncIterator[bytes]) -> list[bytes]:
+    return [chunk async for chunk in stream]
+
+
+async def test_no_chunk_splits_a_sample() -> None:
+    """HTTP chunking knows nothing about 16-bit samples. A chunk played with a
+    dangling byte shifts every sample after it: the rest of the reply is noise."""
+    out = await collect(whole_samples(chunks_of(b"abc", b"d", b"e", b"fgh", b"")))
+
+    assert all(len(chunk) % 2 == 0 for chunk in out)
+    assert b"".join(out) == b"abcdefgh", "a byte was lost or reordered"
+    assert b"" not in out, "an empty chunk would announce audio that is not there"
+
+
+def test_pcm_duration_follows_from_its_size() -> None:
+    assert pcm_seconds(SAMPLE_RATE * 2) == 1.0
+
+
+def test_both_backends_ask_for_the_rate_the_browser_is_told() -> None:
+    """A mismatch here does not fail — it plays, at the wrong pitch."""
+    assert SAMPLE_RATE == 24_000
+    assert f"pcm_{SAMPLE_RATE}" == OUTPUT_FORMAT
+    assert RESPONSE_FORMAT == "pcm"  # OpenAI's pcm is fixed at 24 kHz s16le
 
 
 def test_registry_builds_each_backend(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -154,3 +181,108 @@ async def test_openai_voices_need_no_api_call(monkeypatch: pytest.MonkeyPatch) -
 
     assert all(v.usable for v in voices)
     assert "alloy" in {v.id for v in voices}
+
+
+class FakeElevenLabs:
+    """`text_to_speech.stream` as the SDK shapes it: a call that returns an
+    async iterator, and does its request — and fails — on iteration."""
+
+    def __init__(
+        self, parts: list[bytes], fail_after: int | None = None, drop_after: int | None = None
+    ) -> None:
+        self.calls: list[dict[str, object]] = []
+        self.text_to_speech = SimpleNamespace(stream=self._stream)
+        self._parts = parts
+        self._fail_after = fail_after
+        self._drop_after = drop_after
+
+    def _stream(self, voice_id: str, **kwargs: object) -> AsyncIterator[bytes]:
+        self.calls.append({"voice_id": voice_id, **kwargs})
+        return self._iterate()
+
+    async def _iterate(self) -> AsyncIterator[bytes]:
+        for index, part in enumerate(self._parts):
+            if index == self._fail_after:
+                raise FakeApiError(429, {"detail": {"code": "quota_exceeded", "message": "no"}})
+            if index == self._drop_after:
+                raise httpx.ReadError("connection reset")
+            yield part
+
+
+async def test_elevenlabs_streams_pcm_in_whole_samples() -> None:
+    client = FakeElevenLabs([b"\x01\x02\x03", b"\x04"])
+    out = await collect(ElevenLabsTTS(client=client).stream("hello"))  # type: ignore[arg-type]
+
+    assert out == [b"\x01\x02", b"\x03\x04"]
+    assert client.calls[0]["output_format"] == "pcm_24000"
+    assert client.calls[0]["text"] == "hello"
+
+
+async def test_an_elevenlabs_failure_mid_stream_is_explained() -> None:
+    """The request happens on iteration, so a failure can arrive after audio
+    has already been handed on — it must still surface as a ProviderError."""
+    client = FakeElevenLabs([b"\x01\x02", b"\x03\x04"], fail_after=1)
+    received: list[bytes] = []
+
+    with pytest.raises(ProviderError, match="character quota"):
+        async for chunk in ElevenLabsTTS(client=client).stream("hello"):  # type: ignore[arg-type]
+            received.append(chunk)
+
+    assert received == [b"\x01\x02"]
+
+
+async def test_an_elevenlabs_connection_lost_mid_stream_is_a_provider_error() -> None:
+    """The SDK passes transport failures through as raw httpx errors. One that
+    escapes as anything but a ProviderError takes the connection down with it
+    rather than letting the turn fall back to text."""
+    client = FakeElevenLabs([b"\x01\x02", b"\x03\x04"], drop_after=1)
+
+    with pytest.raises(ProviderError, match="interrupted"):
+        await collect(ElevenLabsTTS(client=client).stream("hello"))  # type: ignore[arg-type]
+
+
+class FakeStreamingResponse:
+    def __init__(self, parts: list[bytes], drop_after: int | None = None) -> None:
+        self._parts = parts
+        self._drop_after = drop_after
+
+    async def __aenter__(self) -> "FakeStreamingResponse":
+        return self
+
+    async def __aexit__(self, *_: object) -> None: ...
+
+    async def iter_bytes(self) -> AsyncIterator[bytes]:
+        for index, part in enumerate(self._parts):
+            if index == self._drop_after:
+                raise httpx.RemoteProtocolError("peer closed connection")
+            yield part
+
+
+def openai_client(create: object) -> SimpleNamespace:
+    streaming = SimpleNamespace(create=create)
+    return SimpleNamespace(
+        audio=SimpleNamespace(speech=SimpleNamespace(with_streaming_response=streaming))
+    )
+
+
+async def test_openai_streams_pcm_in_whole_samples() -> None:
+    calls: list[dict[str, object]] = []
+
+    def create(**kwargs: object) -> FakeStreamingResponse:
+        calls.append(kwargs)
+        return FakeStreamingResponse([b"\x01", b"\x02\x03\x04\x05", b"\x06"])
+
+    client = openai_client(create)
+    out = await collect(OpenAITTS(client=client).stream("hello"))  # type: ignore[arg-type]
+
+    assert b"".join(out) == b"\x01\x02\x03\x04\x05\x06"
+    assert all(len(chunk) % 2 == 0 for chunk in out)
+    assert calls[0]["response_format"] == "pcm"
+
+
+async def test_an_openai_connection_lost_mid_stream_is_a_provider_error() -> None:
+    def create(**_: object) -> FakeStreamingResponse:
+        return FakeStreamingResponse([b"\x01\x02", b"\x03\x04"], drop_after=1)
+
+    with pytest.raises(ProviderError, match="interrupted"):
+        await collect(OpenAITTS(client=openai_client(create)).stream("hello"))  # type: ignore[arg-type]

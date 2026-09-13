@@ -133,6 +133,26 @@ async def test_a_hold_that_is_never_released_expires_by_itself(
     assert mic.listening is False
 
 
+async def test_a_long_reply_s_playback_hold_is_not_mistaken_for_a_stuck_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 156-second reply held playback past the one-minute ceiling, the hold was
+    declared lost, the idle clock was reset to *now* — and listening stopped with
+    the agent still talking. The server already knows the reply's length."""
+    monkeypatch.setattr(server, "MAX_HOLD_SECONDS", 0.1)
+    channel = RecordingChannel()
+    mic = await running_mic(channel, idle_timeout=0.1, session_cap=60.0)
+
+    mic.expect_silence(0.8)  # a reply far longer than the hold ceiling
+    mic.hold("playback", True)  # the browser playing it
+
+    await asyncio.sleep(0.5)
+    assert mic.listening is True, "listening stopped while the reply was still playing"
+
+    # A hold that outlives the reply is still released — and then expires.
+    await channel.wait_for(type="listening", active=False)
+
+
 async def test_the_hard_cap_is_not_pausable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A cap a stuck hold can defeat is not a cap, and a stuck hold is exactly
     what it most needs to catch."""

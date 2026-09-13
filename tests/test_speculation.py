@@ -6,7 +6,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeLLM, FakeSTT, FakeTTS
+from tests.conftest import FakeLLM, FakeSTT, FakeTTS, receive
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
 from voice_agent.speculation import Speculation
@@ -43,10 +43,8 @@ def converse(client: TestClient, frames: int) -> tuple[str, list[dict[str, objec
         for _ in range(frames):
             socket.send_bytes(FRAME)
         while True:
-            frame = socket.receive_json()
+            frame = receive(socket)
             seen.append(frame)
-            if frame["type"] == "audio":
-                socket.receive_bytes()
             if frame["type"] == "reply_end":
                 return key, seen
 
@@ -70,6 +68,9 @@ def test_a_settled_prefix_starts_the_reply_before_the_turn_ends(store: SessionSt
     # One generation, not two: the speculation became the reply.
     assert len(llm.seen) == 1
     assert llm.seen[0][-1].content == "what is the capital of Latvia"
+    # The adopted guess brings its own usage: the turn made no call to count.
+    fragments = int(reply_end["fragments"])  # type: ignore[call-overload]
+    assert reply_end["output_tokens"] == 2 * fragments > 0
 
 
 def test_the_recorded_turn_is_the_committed_text_not_the_guess(store: SessionStore) -> None:
@@ -169,7 +170,7 @@ def test_a_guess_that_fails_leaves_the_turn_to_do_the_work(store: SessionStore) 
         socket.receive_json()
         for _ in range(4):
             socket.send_bytes(FRAME)
-        while (frame := socket.receive_json())["type"] not in ("error", "reply_end"):
+        while (frame := receive(socket))["type"] not in ("error", "reply_end"):
             pass
 
     assert frame["type"] == "error"
@@ -259,9 +260,8 @@ def test_endpointing_is_measured_from_the_last_word_not_the_last_message(
         socket.receive_json()
         socket.send_bytes(FRAME)  # the commit
         commit = socket.receive_json()
-        while (frame := socket.receive_json())["type"] != "reply_end":
-            if frame["type"] == "audio":
-                socket.receive_bytes()
+        while (frame := receive(socket))["type"] != "reply_end":
+            pass
 
     assert commit["final"] is True
     assert int(commit["endpoint_ms"]) >= 250, (
@@ -290,7 +290,7 @@ def test_a_spoken_exit_does_not_claim_the_guess_made_for_it(store: SessionStore)
         socket.receive_json()
         for _ in range(3):
             socket.send_bytes(FRAME)
-        while (frame := socket.receive_json())["type"] != "ended":
+        while (frame := receive(socket))["type"] != "ended":
             pass
 
     assert frame["type"] == "ended"

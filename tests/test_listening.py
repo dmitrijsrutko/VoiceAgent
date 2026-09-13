@@ -7,7 +7,7 @@ import time
 import pytest
 from fastapi.testclient import TestClient
 
-from tests.conftest import FakeLLM, FakeSTT, FakeTTS
+from tests.conftest import FakeLLM, FakeSTT, FakeTTS, receive
 from voice_agent import server
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Warmth
@@ -323,9 +323,8 @@ def test_the_agent_talking_does_not_count_against_the_user(
         socket.receive_json()
 
         socket.send_bytes(FRAME)
-        while socket.receive_json()["type"] != "audio":
-            pass
-        socket.receive_bytes()  # the reply's audio, which the turn also covers
+        while receive(socket)["type"] != "audio_end":
+            pass  # through the reply's audio, which the turn also covers
 
         # Still listening: the next frame is speech, not an expiry notice.
         socket.send_bytes(FRAME)
@@ -395,7 +394,7 @@ def test_the_commit_reports_whether_the_agreed_prefix_held(store: SessionStore) 
             socket.send_bytes(FRAME)
         frames = []
         while True:
-            frame = socket.receive_json()
+            frame = receive(socket)
             frames.append(frame)
             if frame["type"] == "transcript" and frame["final"]:
                 break
@@ -426,7 +425,7 @@ def test_a_prefix_that_did_not_hold_is_reported_as_such(store: SessionStore) -> 
         for _ in range(3):
             socket.send_bytes(FRAME)
         while True:
-            frame = socket.receive_json()
+            frame = receive(socket)
             if frame["type"] == "transcript" and frame["final"]:
                 break
 
@@ -483,9 +482,7 @@ def test_each_turn_warms_again_rather_than_only_the_first(store: SessionStore) -
         for _ in range(6):
             socket.send_bytes(FRAME)
         while replies < 2:
-            frame = socket.receive_json()
-            if frame["type"] == "audio":
-                socket.receive_bytes()  # the reply's audio follows its announcement
+            frame = receive(socket)
             if frame["type"] == "reply_end":
                 replies += 1
 
@@ -528,9 +525,7 @@ def test_a_warm_that_lands_after_its_turn_is_not_credited_to_the_next(
         for _ in range(3):
             socket.send_bytes(FRAME)  # type: ignore[attr-defined]
         while True:
-            frame = socket.receive_json()  # type: ignore[attr-defined]
-            if frame["type"] == "audio":
-                socket.receive_bytes()  # type: ignore[attr-defined]
+            frame = receive(socket)
             if frame["type"] == "transcript" and frame["final"]:
                 commit = frame
             if frame["type"] == "reply_end":
@@ -588,9 +583,7 @@ def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
         for _ in range(3):
             socket.send_bytes(FRAME)
         while True:
-            frame = socket.receive_json()
-            if frame["type"] == "audio":
-                socket.receive_bytes()
+            frame = receive(socket)
             if frame["type"] == "transcript" and frame["final"]:
                 commit = frame
             if frame["type"] == "reply_end":
@@ -626,7 +619,7 @@ def test_a_warm_that_does_not_land_in_time_is_still_counted(store: SessionStore)
             for _ in range(3):
                 socket.send_bytes(FRAME)
             while True:
-                frame = socket.receive_json()
+                frame = receive(socket)
                 if frame["type"] == "transcript" and frame["final"]:
                     break
     finally:

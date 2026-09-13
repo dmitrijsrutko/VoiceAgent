@@ -13,7 +13,7 @@ from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Warmth
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, Warmth
 
 DEFAULT_MODEL = "claude-opus-5"
 
@@ -46,7 +46,9 @@ class AnthropicLLM:
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncAnthropic(api_key=require_env("ANTHROPIC_API_KEY"))
 
-    async def stream(self, system: str, messages: Sequence[Message]) -> AsyncIterator[str]:
+    async def stream(
+        self, system: str, messages: Sequence[Message], usage: Usage | None = None
+    ) -> AsyncIterator[str]:
         try:
             async with self._client.messages.stream(
                 model=self.model,
@@ -57,6 +59,15 @@ class AnthropicLLM:
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
+                if usage is not None:
+                    final = (await stream.get_final_message()).usage
+                    cached = final.cache_read_input_tokens or 0
+                    written = final.cache_creation_input_tokens or 0
+                    # Anthropic's `input_tokens` excludes both cache reads and
+                    # cache writes; the prompt is all three together.
+                    usage.prompt_tokens = final.input_tokens + cached + written
+                    usage.cached_tokens = cached
+                    usage.output_tokens = final.output_tokens
         except AnthropicError as exc:
             raise ProviderError(f"{self.provider} request failed: {exc}") from exc
 

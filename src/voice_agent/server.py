@@ -19,29 +19,34 @@ import asyncio
 import contextlib
 import json
 import logging
+import os
 import time
-from base64 import b64decode, b64encode
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 from hashlib import sha256
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import Response
+from starlette.types import Scope
 
 from voice_agent.config import load_settings, load_system_prompt
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ProviderError, SessionNotFoundError, VoiceAgentError
 from voice_agent.llm import LLM, create_llm
-from voice_agent.llm.base import Warmth
+from voice_agent.llm.base import Usage, Warmth
 from voice_agent.sessions import SessionStore
 from voice_agent.speculation import Speculation
 from voice_agent.stt import STT, create_stt
 from voice_agent.stt.agreement import StablePrefix
-from voice_agent.tts import TTS, AudioClip, create_tts
+from voice_agent.tts import TTS, create_tts
+from voice_agent.tts.base import BYTES_PER_SAMPLE, MEDIA_TYPE, SAMPLE_RATE, pcm_seconds
 
 logger = logging.getLogger(__name__)
 
-PAGE_PATH = Path(__file__).parent / "web" / "index.html"
+WEB_DIR = Path(__file__).parent / "web"
+PAGE_PATH = WEB_DIR / "index.html"
 GREETING_CACHE = Path(".cache")
 
 IDLE_TIMEOUT_SECONDS = 30.0
@@ -55,10 +60,9 @@ continuous partials — a television, a conversation nearby. Scribe enforces its
 own session limit regardless; better to hit ours, with an explanation."""
 
 MAX_HOLD_SECONDS = 60.0
-"""How long expiry may be suspended before the hold is assumed lost.
-
-Nothing legitimate holds this long — the longest reply so far was 18 s of
-audio. A hold that is never released, because a tab closed or a browser event
+"""How long expiry may be suspended before the hold is assumed lost — beyond
+the end of any reply the server knows is still playing, which can be far longer
+(156 s has been heard). A hold that is never released, because a tab closed or a browser event
 never fired, would otherwise stop the microphone forever *and* silently, since
 a suspended timer announces nothing. This converts the worst failure mode
 observed in this project into a one-minute hiccup."""
@@ -232,13 +236,36 @@ class Guesses:
         self.adopted = False
 
 
+class PageModules(StaticFiles):
+    """The page's scripts, revalidated on every load.
+
+    Without a `Cache-Control` header browsers cache these heuristically, so a
+    reload after an edit can pair a fresh `app.js` with a stale `player.js` —
+    and a module that imports a name its cached neighbour lacks fails to link,
+    leaving a page that silently does nothing. `no-cache` still lets the ETag
+    answer with a 304; it only forbids using a copy without asking.
+    """
+
+    def file_response(
+        self,
+        full_path: os.PathLike[str] | str,
+        stat_result: os.stat_result,
+        scope: Scope,
+        status_code: int = 200,
+    ) -> Response:
+        response = super().file_response(full_path, stat_result, scope, status_code)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 class Channel:
     """Serializes writes to one WebSocket.
 
-    Two producers now write to the same socket: the receive loop's replies, and
-    the microphone's transcript task. Interleaving them would be harmless for
-    JSON but fatal for audio, whose `audio` frame and binary frame must arrive
-    adjacent — hence `send_audio` holding the lock across both.
+    Two producers write to the same socket: the receive loop's replies, and the
+    microphone's transcript task. Audio no longer needs its binary frame kept
+    adjacent to a JSON one — speech is a run of binary frames bracketed by
+    `audio_start` and `audio_end`, and a JSON message landing inside that run
+    is harmless — so each write is locked on its own.
     """
 
     def __init__(self, websocket: WebSocket) -> None:
@@ -249,9 +276,8 @@ class Channel:
         async with self._lock:
             await self._websocket.send_json(payload)
 
-    async def send_audio(self, announcement: dict[str, object], data: bytes) -> None:
+    async def send_bytes(self, data: bytes) -> None:
         async with self._lock:
-            await self._websocket.send_json(announcement)
             await self._websocket.send_bytes(data)
 
 
@@ -269,7 +295,7 @@ class Greeting:
         # Resolved now rather than bound as a default argument, so that a test
         # can point it somewhere disposable instead of at the working tree.
         self._cache_dir = GREETING_CACHE if cache_dir is None else cache_dir
-        self._clip: AudioClip | None = None
+        self._pcm: bytes | None = None
         self._synthesis_ms = 0
         self._attempted = False
 
@@ -278,37 +304,36 @@ class Greeting:
         """Keyed by everything that changes the audio, so editing the greeting
         or switching voice produces a different file rather than a stale one."""
         assert self._speaker is not None
-        key = f"{self._speaker.provider}:{self._speaker.voice}:{self.text}"
-        return self._cache_dir / f"greeting-{sha256(key.encode()).hexdigest()[:16]}.json"
+        # The format is part of the key: a cache written by the MP3 chapters,
+        # read back as PCM, would not fail — it would play as noise.
+        key = f"{self._speaker.provider}:{self._speaker.voice}:{MEDIA_TYPE}:{self.text}"
+        return self._cache_dir / f"greeting-{sha256(key.encode()).hexdigest()[:16]}.pcm"
 
-    def _load(self) -> AudioClip | None:
+    def _load(self) -> bytes | None:
         try:
-            saved = json.loads(self._cache_file.read_text())
-            return AudioClip(
-                data=b64decode(saved["audio"]),
-                media_type=saved["media_type"],
-                seconds=saved["seconds"],
-            )
-        except (OSError, ValueError, KeyError):
+            pcm = self._cache_file.read_bytes()
+        except OSError:
             return None
+        # Raw PCM has no structure to fail on, so a damaged file would play as
+        # a shorter greeting on every visit. An odd length is the one damage it
+        # can reveal; the atomic write below is what prevents the rest.
+        if not pcm or len(pcm) % BYTES_PER_SAMPLE:
+            return None
+        return pcm
 
-    def _save(self, clip: AudioClip) -> None:
+    def _save(self, pcm: bytes) -> None:
         try:
             self._cache_dir.mkdir(parents=True, exist_ok=True)
-            self._cache_file.write_text(
-                json.dumps(
-                    {
-                        "media_type": clip.media_type,
-                        "seconds": clip.seconds,
-                        "audio": b64encode(clip.data).decode(),
-                    }
-                )
-            )
+            # Written aside and renamed into place: a process killed mid-write
+            # leaves a stray temporary file, never a truncated greeting.
+            partial = self._cache_file.with_suffix(".partial")
+            partial.write_bytes(pcm)
+            partial.replace(self._cache_file)
         except OSError as exc:  # a cache that cannot be written is not an error
             logger.info("could not cache the greeting: %s", exc)
 
     async def prepare(self) -> None:
-        if not self.text or self._speaker is None or self._clip is not None:
+        if not self.text or self._speaker is None or self._pcm is not None:
             return
         if self._attempted:
             # Tried once and failed. Retrying per visitor makes every page load
@@ -321,18 +346,23 @@ class Greeting:
         # string, and re-synthesising it on every `uv run voice-agent` bills for
         # bytes we already have. On a free plan that is a meaningful fraction of
         # a month's quota spent on a sentence that never changes.
-        self._clip = self._load()
-        if self._clip is not None:
+        self._pcm = self._load()
+        if self._pcm is not None:
             return
         started = time.perf_counter()
         try:
-            self._clip = await self._speaker.synthesize(self.text)
+            # Joined, not streamed: nobody is waiting on it yet, and a partial
+            # greeting cached to disk would be replayed truncated forever.
+            pcm = b"".join([chunk async for chunk in self._speaker.stream(self.text)])
         except VoiceAgentError as exc:
             # An agent that cannot greet must still be able to converse.
             logger.warning("could not prepare the greeting: %s", exc)
             return
         self._synthesis_ms = elapsed_ms(started)
-        self._save(self._clip)
+        if not pcm:
+            return
+        self._pcm = pcm
+        self._save(pcm)
         logger.info("greeting synthesised in %d ms and cached", self._synthesis_ms)
 
     async def deliver(self, channel: Channel, conversation: Conversation) -> None:
@@ -347,19 +377,21 @@ class Greeting:
             return
         conversation.add_assistant(self.text)
         await channel.send_json({"type": "greeting", "text": self.text})
-        if self._clip is None:
+        if self._pcm is None:
             return
-        await channel.send_audio(
+        # The same start / frames / end shape as a live reply, so the browser
+        # has one audio path rather than a special case for the greeting.
+        await channel.send_json(audio_start())
+        await channel.send_bytes(self._pcm)
+        await channel.send_json(
             {
-                "type": "audio",
-                "media_type": self._clip.media_type,
-                "bytes": len(self._clip),
-                "seconds": self._clip.seconds,
+                "type": "audio_end",
+                "bytes": len(self._pcm),
+                "chunks": 1,
+                "seconds": pcm_seconds(len(self._pcm)),
                 "synthesis_ms": self._synthesis_ms,
-                "total_ms": 0,
                 "cached": True,
-            },
-            self._clip.data,
+            }
         )
 
 
@@ -502,7 +534,12 @@ class Mic:
                 return
 
             if self._holds:
-                if now - self._held_since < MAX_HOLD_SECONDS:
+                # Not stuck while the server itself knows the reply is still
+                # playing: `expect_silence` has already pushed the idle clock
+                # past its end. A fixed ceiling alone let a 156-second reply's
+                # playback hold be declared lost a minute in, and the mic stop
+                # half a minute later with the agent still talking.
+                if now - self._held_since < MAX_HOLD_SECONDS or now < self._heard_speech_at:
                     continue
                 logger.warning(
                     "expiry holds %s stuck for %.0fs; releasing",
@@ -708,6 +745,9 @@ def create_app(
         yield
 
     app = FastAPI(title="voice-agent", lifespan=lifespan)
+    # The page's scripts, as native ES modules. Served as files rather than
+    # inlined so each one can be imported — and executed — by node under test.
+    app.mount("/static", PageModules(directory=WEB_DIR), name="static")
 
     @app.get("/")
     async def new_conversation() -> RedirectResponse:
@@ -861,6 +901,7 @@ def create_app(
                         system_prompt,
                         text,
                         fragments=claimed.stream() if claimed is not None else None,
+                        usage=claimed.usage if claimed is not None else None,
                         report=guesses.report(),
                     )
                 if mic is not None and seconds:
@@ -884,7 +925,15 @@ def create_app(
                 "provider": engine.provider,
                 "model": engine.model,
                 "voice": (
-                    {"provider": speaker.provider, "voice": speaker.voice} if speaker else None
+                    {
+                        "provider": speaker.provider,
+                        "voice": speaker.voice,
+                        # Before any audio, because the browser builds its
+                        # output context on a gesture that precedes the reply.
+                        "sample_rate": SAMPLE_RATE,
+                    }
+                    if speaker
+                    else None
                 ),
                 "ears": (
                     {"provider": listener.provider, "sample_rate": listener.sample_rate}
@@ -942,6 +991,16 @@ async def handle_text(
         # when playback actually ends.
         if mic is not None:
             mic.hold("playback", bool(payload.get("active")))
+        # Chunks that arrived after the previous one had finished playing. Only
+        # the browser can see them, and a stutter nobody logs is a stutter
+        # nobody fixes. Coerced first: these are client-supplied, and a string
+        # logged verbatim can forge log lines.
+        try:
+            gaps, gap_ms = int(payload.get("gaps", 0)), int(payload.get("gap_ms", 0))
+        except (TypeError, ValueError):
+            return
+        if gaps:
+            logger.info("playback stuttered: %d gaps, %d ms of silence", gaps, gap_ms)
         return
 
     if kind in ("listen_start", "listen_stop"):
@@ -976,9 +1035,11 @@ async def run_turn(
     text: str,
     fragments: AsyncIterator[str] | None = None,
     report: dict[str, object] | None = None,
+    usage: Usage | None = None,
 ) -> float | None:
-    """Returns how long the spoken reply lasts, when that is known — the window
-    during which the browser will be muted and the user cannot be heard."""
+    """Returns how much of the spoken reply is still to play when this returns —
+    the window during which the browser stays muted and the user cannot be
+    heard."""
     if is_exit_command(text):
         conversation.end()
         await channel.send_json({"type": "ended"})
@@ -993,8 +1054,11 @@ async def run_turn(
     # A claimed speculation is already generating — possibly already finished.
     # Everything after this point is identical either way, which is the point:
     # a turn does not know whether its reply was guessed at.
+    usage = usage if usage is not None else Usage()
     source = (
-        fragments if fragments is not None else engine.stream(system_prompt, conversation.messages)
+        fragments
+        if fragments is not None
+        else engine.stream(system_prompt, conversation.messages, usage)
     )
     try:
         async for fragment in source:
@@ -1029,42 +1093,100 @@ async def run_turn(
             # matters into the one that does not.
             "ttft_ms": elapsed_ms(started, first_token_at),
             "generation_ms": elapsed_ms(generation_started),
+            # Events the provider sent, and what it says they cost. Not the same
+            # number: a fragment is often one token but not by contract.
+            "fragments": len(produced),
+            "output_tokens": usage.output_tokens,
+            "prompt_tokens": usage.prompt_tokens,
+            "cached_tokens": usage.cached_tokens,
         }
     )
 
-    if speaker is not None:
+    # A blank reply has nothing to say aloud. Streamed, it would produce no
+    # chunks and so no audio at all — asking a provider for it only buys an
+    # error or a billed request for silence.
+    if speaker is not None and reply.strip():
         return await speak(channel, speaker, reply, started)
     return None
 
 
-async def speak(channel: Channel, speaker: TTS, reply: str, turn_started: float) -> float | None:
-    """Synthesize the whole reply, then send it.
+def audio_start() -> dict[str, object]:
+    return {"type": "audio_start", "media_type": MEDIA_TYPE, "sample_rate": SAMPLE_RATE}
 
-    Batched, and deliberately after `reply_end`: the text is already on screen
-    while this runs, so the wait this chapter introduces is visible rather than
-    hidden inside the turn.
+
+async def speak(channel: Channel, speaker: TTS, reply: str, turn_started: float) -> float | None:
+    """Synthesize the whole reply, sending its audio as it is produced.
+
+    Still deliberately after `reply_end`: the text goes in whole, so only the
+    output streams. What the browser hears first is now the first chunk rather
+    than the last one.
+
+    Returns how much audio is still to play, which is less than its length:
+    the browser starts playing the first chunk while the rest is being made.
     """
     synthesis_started = time.perf_counter()
+    first_sent_at: float | None = None
+    sent = chunks = 0
     try:
-        clip = await speaker.synthesize(reply)
+        async for chunk in speaker.stream(reply):
+            if first_sent_at is None:
+                # Announced on the first chunk rather than before the request,
+                # so a synthesis that fails outright looks exactly as it did
+                # when it was batched: an error, and no audio begun.
+                await channel.send_json(audio_start())
+                first_sent_at = time.perf_counter()
+            await channel.send_bytes(chunk)
+            sent += len(chunk)
+            chunks += 1
     except VoiceAgentError as exc:
         # The reply itself is fine; only its voice failed. Degrade to text
         # rather than discarding a good answer — losing the words is a far
         # worse failure than losing the audio.
         logger.warning("synthesis failed: %s", exc)
+        if first_sent_at is not None:
+            # Audio already began, so close it: the browser plays what it has,
+            # and the mute window below still covers it.
+            await end_audio(channel, sent, chunks, synthesis_started, first_sent_at, turn_started)
         await channel.send_json({"type": "audio_error", "message": str(exc)})
-        return None
+        return remaining(sent, first_sent_at)
 
-    await channel.send_audio(
+    if first_sent_at is None:
+        return None
+    await end_audio(channel, sent, chunks, synthesis_started, first_sent_at, turn_started)
+    return remaining(sent, first_sent_at)
+
+
+async def end_audio(
+    channel: Channel,
+    sent: int,
+    chunks: int,
+    synthesis_started: float,
+    first_sent_at: float,
+    turn_started: float,
+) -> None:
+    await channel.send_json(
         {
-            "type": "audio",
-            "media_type": clip.media_type,
-            "bytes": len(clip),
-            "seconds": clip.seconds,
+            "type": "audio_end",
+            "bytes": sent,
+            # Binary frames sent: one per provider chunk, so this is also what
+            # the page's player queued.
+            "chunks": chunks,
+            "seconds": pcm_seconds(sent),
+            # The provider's latency, separated from the pipeline's.
+            "synthesis_first_byte_ms": elapsed_ms(synthesis_started, first_sent_at),
             "synthesis_ms": elapsed_ms(synthesis_started),
             # The number the whole project is judged on: send to first audio.
-            "total_ms": elapsed_ms(turn_started),
-        },
-        clip.data,
+            "first_audio_ms": elapsed_ms(turn_started, first_sent_at),
+        }
     )
-    return clip.seconds
+
+
+def remaining(sent: int, first_sent_at: float | None) -> float | None:
+    """Playback left, assuming it began when the first chunk was sent.
+
+    Approximate in the safe direction: the browser starts a little after the
+    send, so this slightly under-counts, and the browser's own `playback` hold
+    covers the difference."""
+    if first_sent_at is None:
+        return None
+    return max(0.0, pcm_seconds(sent) - (time.perf_counter() - first_sent_at))

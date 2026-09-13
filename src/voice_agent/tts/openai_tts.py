@@ -2,22 +2,25 @@
 
 An interface with one implementation is a guess. This one differs from
 ElevenLabs in every detail that matters (voices are names rather than ids, the
-format is a separate parameter, the response is a binary body rather than a
-chunk stream), which is what makes the `TTS` protocol worth having.
+format is a separate parameter, streaming is a response wrapper rather than a
+separate endpoint), which is what makes the `TTS` protocol worth having.
 """
 
+from collections.abc import AsyncIterator
 from typing import Literal
 
+import httpx
 from openai import AsyncOpenAI, OpenAIError
 
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.tts.base import AudioClip, Voice
+from voice_agent.tts.base import Voice, whole_samples
 
 DEFAULT_VOICE = "alloy"
 DEFAULT_MODEL = "gpt-4o-mini-tts"
-RESPONSE_FORMAT: Literal["mp3"] = "mp3"
-MEDIA_TYPE = "audio/mpeg"
+RESPONSE_FORMAT: Literal["pcm"] = "pcm"
+"""OpenAI's `pcm` has no rate parameter: it is always 24 kHz, 16-bit signed
+little-endian — which is why `tts.base.SAMPLE_RATE` is 24 kHz."""
 
 VOICES = (
     "alloy",
@@ -48,20 +51,26 @@ class OpenAITTS:
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncOpenAI(api_key=require_env("OPENAI_API_KEY"))
 
-    async def synthesize(self, text: str) -> AudioClip:
+    async def stream(self, text: str) -> AsyncIterator[bytes]:
         try:
-            response = await self._client.audio.speech.create(
+            # `with_streaming_response`, because plain `create` reads the whole
+            # body before returning — which is the batched behaviour, renamed.
+            async with self._client.audio.speech.with_streaming_response.create(
                 model=self.model,
                 # The SDK's type narrows to its stock voice names; the API
                 # itself accepts any voice string the account has.
                 voice=self.voice,
                 input=text,
                 response_format=RESPONSE_FORMAT,
-            )
-            data = await response.aread()
+            ) as response:
+                async for chunk in whole_samples(response.iter_bytes()):
+                    yield chunk
         except OpenAIError as exc:
             raise ProviderError(f"openai synthesis failed: {exc}") from exc
-        return AudioClip(data=data, media_type=MEDIA_TYPE)
+        except httpx.HTTPError as exc:
+            # The SDK wraps failures to *connect*, but `iter_bytes` reads the
+            # body straight from httpx: a connection lost mid-reply arrives raw.
+            raise ProviderError(f"openai synthesis interrupted: {exc!r}") from exc
 
     async def list_voices(self) -> list[Voice]:
         return [Voice(id=name, name=name, usable=True) for name in VOICES]

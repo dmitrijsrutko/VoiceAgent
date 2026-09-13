@@ -22,7 +22,7 @@ from collections.abc import AsyncIterator, Sequence
 
 from voice_agent.conversation import Message
 from voice_agent.errors import VoiceAgentError
-from voice_agent.llm.base import LLM
+from voice_agent.llm.base import LLM, Usage
 from voice_agent.stt.agreement import same_words
 
 logger = logging.getLogger(__name__)
@@ -34,6 +34,8 @@ class Speculation:
     def __init__(self, engine: LLM, system: str, history: Sequence[Message], text: str) -> None:
         self.text = text
         self.chars = 0
+        self.usage = Usage()
+        """Filled in as the guess finishes; a turn that adopts it reports this."""
         self.started_at = time.perf_counter()
         self._fragments: asyncio.Queue[str | None] = asyncio.Queue()
         self._failure: VoiceAgentError | None = None
@@ -43,7 +45,7 @@ class Speculation:
 
     async def _generate(self, engine: LLM, system: str, messages: Sequence[Message]) -> None:
         try:
-            async for fragment in engine.stream(system, messages):
+            async for fragment in engine.stream(system, messages, self.usage):
                 self.chars += len(fragment)
                 self._fragments.put_nowait(fragment)
         except VoiceAgentError as exc:
