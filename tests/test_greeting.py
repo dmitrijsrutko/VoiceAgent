@@ -10,6 +10,7 @@ from tests.conftest import FakeLLM, FakeTTS
 from voice_agent import server
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
+from voice_agent.tts.base import AudioClip
 
 HELLO = "Hi, I'm a voice agent."
 
@@ -197,7 +198,7 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     from voice_agent.server import Greeting
 
     class SlowTTS(FakeTTS):
-        async def synthesize(self, text: str) -> object:
+        async def synthesize(self, text: str) -> AudioClip:
             await asyncio.sleep(0.05)  # long enough for the other tab to arrive
             return await super().synthesize(text)
 

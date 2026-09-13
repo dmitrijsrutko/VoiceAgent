@@ -139,6 +139,13 @@ account data — prefill is the larger half of TTFT.
 
 ### D. Speculation: buying latency with money
 
+*Built in Chapter 5, with two measured corrections to what follows.* The saving
+is `min(head start, time-to-first-token)`, not the sum of the head start and the
+network floor — the floor is paid inside the head start. And the gate matters
+less than the recognizer: on turns under about three seconds this recognizer is
+still emitting new words when the commit lands, so no threshold, however clever,
+finds a head start that does not exist.
+
 Once turn-completion probability exists, it can be spent. When P(complete)
 crosses a threshold, start a full generation on the current transcript. If the
 caller stops there, TTFT is effectively zero — audio is already being produced.

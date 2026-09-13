@@ -68,11 +68,17 @@ for the full log and the reasoning behind each step.
   talking. Measured honestly: warming saves ~60-90 ms on a conversation's first
   turn and ~10 ms after, because the provider's cache is already 80-87% warm
   from the previous turn. The stable prefix is the point — it settles the whole
-  turn 0.3-1.0 s before the recognizer commits, which is what speculative
-  generation will spend.
+  turn 0.3-1.0 s before the recognizer commits, which is what Chapter 5
+  spends.
   The agent also opens with a greeting, synthesised once at startup — which
   absorbs the synthesis engine's cold start (3.1 s on a process's first call)
   rather than paying it on your first question.
+- **Chapter 5 — speculation.** When a partial adds no new words, the agent
+  assumes you have stopped and starts generating the *real* reply, cancelling it
+  if you carry on. Measured live, time-to-first-token fell from 844 ms to 11 ms
+  on a turn where it fired. It does not fire on short turns — the recognizer is
+  still delivering words when the turn commits, so there is no dead air to use —
+  and the cost of every wrong guess is counted on screen.
 
 ## Requirements
 

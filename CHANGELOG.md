@@ -14,6 +14,159 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 5 — Speculation: answering before the question finishes
+
+When a partial transcript adds no new words, the speaker has probably stopped.
+The agent takes that as its cue and starts generating the real reply — not a
+discarded prefill, the actual answer — so that when the recognizer finally
+commits, the reply already exists. Measured live, this turned time-to-first-token
+from **844 ms into 11 ms** on a turn where it fired.
+
+It is a bet, and the design is built around losing it cheaply: the generation is
+cancelled the moment the recognizer finds another word, so a wrong guess costs
+only what it produced in the meantime. That argument holds *only* because this
+agent has no tools. A speculation that could send a message or move money is not
+a bet, it is an action, and the chapter that adds tools has to defend that line.
+
+**What changed**
+
+- `stt/agreement.py`: `repeated` — whether the latest partial added nothing to
+  the one before it. The closest thing to a turn-completion signal available
+  without building a turn detector. Plus `same_words`, which compares
+  transcripts normalised, because a commit adds the punctuation its own partials
+  were still arguing about.
+- `speculation.py`: `Speculation` — one in-flight guess. Holds the text it
+  guessed at, the fragments produced so far, and the characters it has cost.
+  `answers()` asks whether the turn that arrived is the one it guessed at;
+  `stream()` replays what it has and continues; `abandon()` cancels and reports
+  the waste.
+- `server.py`: the lifecycle. A settled prefix starts a guess; more speech
+  cancels it; a commit either claims it or discards it. `Guesses` counts what
+  the turn spent — started, discarded, characters wasted — reported on
+  `reply_end` rather than assumed.
+- `web/index.html`: `⚡ started 782 ms before you finished` when a guess is
+  claimed, and `🗑 1 guess discarded · 34 chars wasted` when one is not.
+
+**Design decisions**
+
+- **Guess on the agreed-stable prefix, never on a raw partial.** The recognizer
+  rewrites partials; a guess at words the user never said is the one failure
+  this must not have. Chapter 4 existed to make this possible.
+- **Cancel, do not discard.** Letting a doomed generation finish and then
+  throwing it away pays for every token. Cancelling on the next word pays only
+  for the lead time — tens of characters — which is the whole cost argument.
+- **Claim by comparing what was said, not by trusting the guess.** The model saw
+  the question without its question mark, so the comparison is normalised; but a
+  commit that says something else discards the guess and the turn regenerates.
+- **One guess in flight.** A second would be generating an answer to the same
+  words the first is already on.
+- **The cost is on screen.** Chapter 4 shipped a warm that fired seven times and
+  cached nothing, and the only reason anyone noticed is that the count was
+  visible. Discarded guesses and wasted characters get the same treatment.
+
+**Latency impact**
+
+Live, real Scribe and real DeepSeek, on a 7.1 s utterance:
+
+| | without speculation | with |
+| --- | --- | --- |
+| Time to first token | 844 ms | **11 ms** |
+| Guess started before the commit | — | 782 ms |
+| Characters wasted | — | 0 |
+
+**But it does not fire on short turns, and that is not a weak gate.** Measured
+across repeated runs:
+
+| Utterance | Partials | Gate fired |
+| --- | --- | --- |
+| 2.9 s | 4 | **0 / 3** |
+| 7.1 s | 8 | **2 / 2** |
+
+On the short utterance the recognizer was still delivering words when the commit
+arrived — its last partial was `'...people live ther'` and the complete text
+first appeared *in the commit itself*. There was no interval in which the
+transcript was finished and the turn was not, so there was nothing to speculate
+on. The head start exists only when the recognizer catches up before the VAD
+timer expires, which on this service means longer turns. Fixing that is not a
+better gate; it is less recognizer lag or less endpointing.
+
+**Correction to an earlier estimate.** Chapter 4 predicted speculation was worth
+1.0-1.7 s. That double-counted: it added the head start *and* the ~716 ms
+network floor, but the floor is paid *inside* the head start. The saving is
+`min(head start, time-to-first-token)` — measured at 833 ms on the turn above,
+and zero on turns where the gate never fires.
+
+**Deliberately not done**
+
+- No speculative synthesis. Audio still waits for the commit, so this chapter
+  improves time-to-first-*token*, not time-to-first-*audio*. Wasted synthesis is
+  billed per character.
+- No turn-completion probability, so no threshold to tune between speculating
+  rarely and speculating often. The gate is one binary signal.
+- No side-effect boundary, because there are no side effects yet. That is a
+  prerequisite for the tools chapter, not for this one.
+
+**Verification**
+
+- `uv run verify` green: ruff, ruff format, mypy strict, 153 tests.
+- Eight speculation tests: a settled prefix starting the reply early, the
+  *committed* text being what is recorded rather than the guess, a guess the
+  user talks through being discarded and never reaching them, the cost of a
+  wrong guess being reported, an un-guessed turn behaving exactly as before,
+  one guess in flight, a failing guess leaving the turn to do the work, and a
+  commit that says something else discarding the guess.
+- **A guess is abandoned when the browser disconnects**, or it goes on
+  generating — and being billed for — a reply nobody is waiting for. Cancelling
+  the task is sufficient to release the provider's stream: the task is always
+  suspended *inside* the generator's own await, so the cancellation is delivered
+  there and its cleanup runs. An explicit `aclose()` was written first and
+  removed after measurement showed it changed nothing.
+- **The disconnect path itself is not covered by a test**, and could not be:
+  the test client either tears down the event loop on disconnect — killing the
+  task whether or not the code cancelled it, which looks like a pass — or holds
+  the handler open so its cleanup never runs at all. Neither can tell the fix
+  from its absence. The mechanism is tested directly instead, and the caller is
+  covered by reading it.
+- **Every one of the four safety properties was sabotage-checked, and the first
+  attempt caught none of them.** Adopting any guess without checking what was
+  said, and never cancelling on new speech, both left the suite green: the two
+  mechanisms cover for each other, so either alone rescued the scenario. Two
+  further tests were written to isolate them — a commit that differs from the
+  guess with nothing in between to cancel on, and an assertion that the second
+  guess was *adopted* rather than the turn regenerating. All four sabotages now
+  fail.
+
+  The abandonment test needed three attempts of its own. Asserting only that
+  nothing was left generating passed without the cancellation, because awaiting
+  the task also ends with nothing generating — that is waiting for the guess to
+  finish, which is the opposite of abandoning it. It now asserts that the guess
+  was stopped *partway* (40 of 40 characters is the failure) and that abandoning
+  returned promptly.
+
+**Fixes**
+
+- `endpoint_ms` is measured from the recognizer's last *word*, not its last
+  *message*. A repeated partial was resetting the clock, which made the figure
+  identical to the speculation lead on every turn — both were timing the same
+  instant, since a repeat is exactly what starts a speculation. Found by reading
+  a real session log where the two columns matched to the millisecond, five
+  turns in a row.
+- The page says a guess started so long "before the turn ended" rather than
+  "before you finished". It is measured to the commit, and the commit is not
+  when the speaker stopped.
+- A guess in flight when the browser disconnects is cancelled, rather than
+  generating — and being billed for — a reply nobody is waiting for.
+- A spoken `exit` abandons its guess instead of claiming it. `exit` produces no
+  reply, so the guess would have run to completion unread and uncounted.
+- A warm that was fired but never landed is counted and shown. A missing warm
+  line was ambiguous between "nothing was warmed" and "a warm was billed and
+  arrived too late to help", and those two want opposite responses. Found by
+  reading a session log in which a turn speculated, settled five words, and
+  reported no warm at all.
+- An unexpected exception inside a guess is logged rather than swallowed. A
+  fire-and-forget task's exception belongs to nobody by default, and provider
+  failures are already handled — anything else reaching there is a defect.
+
 ## Chapter 4 — Acting before the turn ends: agreed-stable text, and prefill
 
 The agent starts using what you are saying before you finish saying it. Every
@@ -73,9 +226,12 @@ prefix, not the warming, is the deliverable.
   provider's cache is already 80-87% warm from the previous turn's own call, so
   warming adds almost nothing. What it does add is the machinery: agreeing a
   stable prefix and acting on it before the turn is over. Pointing that same
-  signal at a *real* generation instead of a discarded one is worth an estimated
-  1.0-1.7 s. This chapter is that change with the payoff switched off, which
-  makes the next one a small, measured delta rather than a leap.
+  signal at a *real* generation instead of a discarded one is worth up to
+  ~830 ms — measured in Chapter 5, which also corrected the estimate written
+  here first: 1.0-1.7 s double-counted the network floor, which is paid inside
+  the head start rather than alongside it. This chapter is that change with the
+  payoff switched off, which makes the next one a small, measured delta rather
+  than a leap.
 - **Only agreed text is ever warmed.** Prefilling a hypothesis caches a prompt
   the real call will not match — the spend with none of the benefit — and, once
   the same signal drives real generation, it becomes acting on words the user
@@ -140,7 +296,8 @@ discarded token could be happening.
 **Deliberately not done**
 
 - No speculative generation. The stable prefix starts a throwaway call, not a
-  real one, so the 1.0-1.7 s is left on the table on purpose.
+  real one, so the head start is left on the table on purpose. Chapter 5 spends
+  it, and measures what it was actually worth.
 - No semantic turn detection, which is still the largest single term.
 - No cancellation machinery, no discarded-token accounting, and no side-effect
   boundary — all of which speculation needs and none of which warming does.

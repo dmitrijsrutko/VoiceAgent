@@ -601,3 +601,36 @@ def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
     assert commit["stable_words"] == 4, commit
     assert llm.warmed, "agreement was wedged, so nothing warmed"
     assert llm.warmed[-1][-1].content == "what is the weather"
+
+
+def test_a_warm_that_does_not_land_in_time_is_still_counted(store: SessionStore) -> None:
+    """A missing warm line is otherwise ambiguous between "nothing was warmed"
+    and "a warm was billed and arrived too late to help" — and those two want
+    opposite responses from whoever is reading the screen."""
+    release = threading.Event()
+
+    async def slow_warm(system: str, messages: object) -> Warmth:
+        await asyncio.get_running_loop().run_in_executor(None, release.wait, 5)
+        return Warmth(prompt_tokens=1200, cached_tokens=1024)
+
+    llm = FakeLLM()
+    llm.warm = slow_warm  # type: ignore[method-assign]
+    client = build(store, FakeSTT(script=AGREEING), llm)
+    key = start(client)
+
+    try:
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            socket.receive_json()
+            socket.send_json({"type": "listen_start"})
+            socket.receive_json()
+            for _ in range(3):
+                socket.send_bytes(FRAME)
+            while True:
+                frame = socket.receive_json()
+                if frame["type"] == "transcript" and frame["final"]:
+                    break
+    finally:
+        release.set()
+
+    assert frame["warms"] == 0, "a warm that never returned was reported as landed"
+    assert frame["warms_attempted"] == 1, "the warm that was paid for is invisible"

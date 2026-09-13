@@ -34,6 +34,7 @@ from voice_agent.errors import ProviderError, SessionNotFoundError, VoiceAgentEr
 from voice_agent.llm import LLM, create_llm
 from voice_agent.llm.base import Warmth
 from voice_agent.sessions import SessionStore
+from voice_agent.speculation import Speculation
 from voice_agent.stt import STT, create_stt
 from voice_agent.stt.agreement import StablePrefix
 from voice_agent.tts import TTS, AudioClip, create_tts
@@ -97,6 +98,20 @@ seven were billed prefill that cached nothing. One block is roughly 48 words of
 speech, so that is the threshold — long utterances still warm more than once,
 short ones warm exactly once and keep the earliest, longest lead."""
 
+SPECULATE = True
+"""Whether to start the real reply on a prefix the user has not finished saying.
+
+The bet: when a partial adds no new words the speaker has probably stopped, and
+the ~0.8 s the reasoning engine needs can be spent now rather than after the
+recognizer gets round to committing. Worth min(head start, time-to-first-token)
+— measured at 0.27 s and 0.80 s on two real utterances, so 0.3-0.8 s, not the
+1.0-1.7 s an earlier estimate claimed by counting the network floor separately
+from the head start that contains it.
+
+Losing the bet costs only what the generation produced before it was cancelled.
+That is only true while the agent has no tools: a speculation that could send a
+message or move money is not a bet, it is an action."""
+
 WARM_ON_STABLE = True
 """Whether to prefill the reasoning engine on agreed-stable transcript text
 while the user is still speaking.
@@ -143,9 +158,19 @@ class Warmings:
     """
 
     def __init__(self) -> None:
+        self.attempted = 0
         self.count = 0
         self.last: Warmth | None = None
         self.finished_at: float | None = None
+
+    def attempt(self) -> None:
+        """A warm has been fired. Counted separately from one that *landed*.
+
+        Without this, a missing warm line is ambiguous between "nothing was
+        warmed" and "a warm was paid for and arrived too late to help" — and
+        those want opposite responses.
+        """
+        self.attempted += 1
 
     def record(self, warmth: Warmth) -> None:
         self.count += 1
@@ -154,9 +179,10 @@ class Warmings:
 
     def report(self) -> dict[str, object]:
         if self.last is None:
-            return {"warms": self.count}
+            return {"warms": self.count, "warms_attempted": self.attempted}
         return {
             "warms": self.count,
+            "warms_attempted": self.attempted,
             "warm_prompt_tokens": self.last.prompt_tokens,
             "warm_cached_tokens": self.last.cached_tokens,
             # How far ahead of the turn ending the last warm landed. A warm
@@ -166,9 +192,44 @@ class Warmings:
         }
 
     def reset(self) -> None:
-        self.count = 0
+        self.attempted = self.count = 0
         self.last = None
         self.finished_at = None
+
+
+class Guesses:
+    """What speculating cost this turn, and what it bought.
+
+    Reported rather than assumed. Chapter 4 shipped a warm that fired seven
+    times for one turn and cached nothing, and the only reason that was ever
+    noticed is that the count was on screen.
+    """
+
+    def __init__(self) -> None:
+        self.discarded = 0
+        self.wasted_chars = 0
+        self.adopted = False
+        self.lead_ms = 0
+
+    def discard(self, chars: int) -> None:
+        self.discarded += 1
+        self.wasted_chars += chars
+
+    def adopt(self, lead_ms: int) -> None:
+        self.adopted = True
+        self.lead_ms = lead_ms
+
+    def report(self) -> dict[str, object]:
+        return {
+            "speculated": self.adopted,
+            "speculation_lead_ms": self.lead_ms,
+            "speculations_discarded": self.discarded,
+            "speculation_wasted_chars": self.wasted_chars,
+        }
+
+    def reset(self) -> None:
+        self.discarded = self.wasted_chars = self.lead_ms = 0
+        self.adopted = False
 
 
 class Channel:
@@ -321,8 +382,8 @@ class Mic:
         stt: STT,
         channel: Channel,
         on_final: Callable[[str], Awaitable[None]],
-        on_stable: Callable[[str], Awaitable[None]] | None = None,
-        on_session: Callable[[], None] | None = None,
+        on_partial: Callable[[str, bool], Awaitable[None]] | None = None,
+        on_session: Callable[[], Awaitable[None]] | None = None,
         extra_report: Callable[[], dict[str, object]] | None = None,
         idle_timeout: float | None = None,
         session_cap: float | None = None,
@@ -330,7 +391,7 @@ class Mic:
         self._stt = stt
         self._channel = channel
         self._on_final = on_final
-        self._on_stable = on_stable
+        self._on_partial = on_partial
         self._on_session = on_session
         self._extra_report = extra_report
         self._agreement = StablePrefix()
@@ -542,21 +603,30 @@ class Mic:
         # words nobody repeated.
         self._agreement.reset()
         if self._on_session is not None:
-            self._on_session()
+            await self._on_session()
         heard_at = time.perf_counter()
         async for transcript in self._stt.stream(self._audio()):
             self._heard_speech_at = time.perf_counter()
             self._client_frames = 0
             if not transcript.is_final:
-                heard_at = time.perf_counter()
+                # The recognizer will rewrite this text; agreement decides which
+                # of it is safe to act on before the turn is over. `repeated`
+                # says the recognizer found nothing new this time, which is the
+                # closest thing to "they have stopped talking" available here.
+                self._agreement.update(transcript.text)
+                if not self._agreement.repeated:
+                    # Only a partial carrying a new word means words are still
+                    # being produced. Bumping this on every partial made
+                    # `endpoint_ms` measure from the recognizer's last *message*
+                    # rather than its last *word* — which made it identical to
+                    # the speculation lead on every turn, since a repeat is
+                    # exactly what starts a speculation.
+                    heard_at = time.perf_counter()
                 await self._channel.send_json(
                     {"type": "transcript", "text": transcript.text, "final": False}
                 )
-                # The recognizer will rewrite this text; agreement decides which
-                # of it is safe to act on before the turn is over.
-                stable = self._agreement.update(transcript.text)
-                if stable and self._on_stable is not None:
-                    await self._on_stable(stable)
+                if self._agreement.text and self._on_partial is not None:
+                    await self._on_partial(self._agreement.text, self._agreement.repeated)
                 continue
 
             if not transcript.text.strip():
@@ -667,9 +737,37 @@ def create_app(
         turn_lock = asyncio.Lock()
 
         mic: Mic | None = None
+        guess: Speculation | None = None
+        guesses = Guesses()
         warming: asyncio.Task[None] | None = None
         warms = Warmings()
         warmed_words = 0
+
+        async def abandon_guess() -> None:
+            """Drop a guess the recognizer has just proved premature."""
+            nonlocal guess
+            if guess is None:
+                return
+            stale, guess = guess, None
+            guesses.discard(await stale.abandon())
+
+        async def on_partial(stable: str, repeated: bool) -> None:
+            nonlocal guess
+            if not repeated:
+                # More words arrived, so whatever we were generating answers a
+                # question that is still being asked. Cancelling now is what
+                # keeps a wrong guess cheap.
+                await abandon_guess()
+                await warm_on(stable)
+                return
+            if SPECULATE and guess is None:
+                guess = Speculation(engine, system_prompt, conversation.messages, stable)
+
+        async def forget_utterance() -> None:
+            """Everything known about the utterance in progress is void."""
+            forget_warming()
+            await abandon_guess()
+            guesses.reset()
 
         def forget_warming() -> None:
             """Discard everything known about warming the current utterance.
@@ -718,6 +816,7 @@ def create_app(
             if warmed_words and words - warmed_words < WARM_MIN_NEW_WORDS:
                 return
             warmed_words = words
+            warms.attempt()
 
             async def run() -> None:
                 try:
@@ -731,27 +830,50 @@ def create_app(
 
             warming = asyncio.create_task(run())
 
+        async def claim_guess(committed: str) -> Speculation | None:
+            """Keep the guess if the turn that arrived is the one it answered."""
+            nonlocal guess
+            if guess is None:
+                return None
+            candidate, guess = guess, None
+            # `exit` produces no reply, so a guess at it answers nothing. Left
+            # claimed it would run to completion unread and uncounted.
+            if is_exit_command(committed) or not candidate.answers(committed):
+                guesses.discard(await candidate.abandon())
+                return None
+            guesses.adopt(elapsed_ms(candidate.started_at))
+            return candidate
+
         async def take_turn(text: str) -> None:
             # A spoken turn and a typed one are the same turn. The lock is not
             # decoration: a committed transcript arrives on the microphone task,
             # not the receive loop, so without it a fast second utterance could
             # start a turn while the first is still streaming.
-            forget_warming()  # the turn just reported them; the next starts fresh
+            forget_warming()  # already reported on the transcript frame
+            claimed = await claim_guess(text)
             async with turn_lock:
                 with mic.busy() if mic is not None else contextlib.nullcontext():
                     seconds = await run_turn(
-                        channel, conversation, engine, speaker, system_prompt, text
+                        channel,
+                        conversation,
+                        engine,
+                        speaker,
+                        system_prompt,
+                        text,
+                        fragments=claimed.stream() if claimed is not None else None,
+                        report=guesses.report(),
                     )
                 if mic is not None and seconds:
                     mic.expect_silence(seconds)
+            guesses.reset()  # reported inside the turn, so cleared after it
 
         if listener is not None:
             mic = Mic(
                 listener,
                 channel,
                 take_turn,
-                on_stable=warm_on,
-                on_session=forget_warming,
+                on_partial=on_partial,
+                on_session=forget_utterance,
                 extra_report=warms.report,
             )
 
@@ -791,6 +913,10 @@ def create_app(
         finally:
             if mic is not None:
                 await mic.stop(announce=False)
+            # A guess outlives the browser that prompted it otherwise, and goes
+            # on generating — and being billed for — a reply to a question
+            # nobody is waiting for any more.
+            await forget_utterance()
 
     return app
 
@@ -848,6 +974,8 @@ async def run_turn(
     speaker: TTS | None,
     system_prompt: str,
     text: str,
+    fragments: AsyncIterator[str] | None = None,
+    report: dict[str, object] | None = None,
 ) -> float | None:
     """Returns how long the spoken reply lasts, when that is known — the window
     during which the browser will be muted and the user cannot be heard."""
@@ -861,12 +989,18 @@ async def run_turn(
 
     started = time.perf_counter()
     first_token_at: float | None = None
-    fragments: list[str] = []
+    produced: list[str] = []
+    # A claimed speculation is already generating — possibly already finished.
+    # Everything after this point is identical either way, which is the point:
+    # a turn does not know whether its reply was guessed at.
+    source = (
+        fragments if fragments is not None else engine.stream(system_prompt, conversation.messages)
+    )
     try:
-        async for fragment in engine.stream(system_prompt, conversation.messages):
+        async for fragment in source:
             if first_token_at is None:
                 first_token_at = time.perf_counter()
-            fragments.append(fragment)
+            produced.append(fragment)
             await channel.send_json({"type": "delta", "text": fragment})
     except (ProviderError, VoiceAgentError) as exc:
         # Fail closed: drop the user turn too, so a failed exchange never leaves
@@ -876,13 +1010,14 @@ async def run_turn(
         await channel.send_json({"type": "error", "message": str(exc)})
         return None
 
-    reply = "".join(fragments)
+    reply = "".join(produced)
     # Falls back to "now" when nothing streamed, so an empty reply reports its
     # whole duration as time-to-first-token rather than as zero of everything.
     generation_started = first_token_at if first_token_at is not None else time.perf_counter()
     conversation.add_assistant(reply)
     await channel.send_json(
         {
+            **(report or {}),
             "type": "reply_end",
             "text": reply,
             "chars": len(reply),

@@ -21,15 +21,23 @@ class FakeLLM:
     """
 
     def __init__(
-        self, replies: Sequence[str] | None = None, fail: bool = False, delay: float = 0.0
+        self,
+        replies: Sequence[str] | None = None,
+        fail: bool = False,
+        delay: float = 0.0,
+        pace: float = 0.0,
     ) -> None:
         self.provider = "fake"
         self.model = "fake-1"
         self.replies = list(replies) if replies else ["Sure thing."]
         self.fail = fail
         self.delay = delay
+        self.pace = pace
         self.seen: list[list[Message]] = []
         self.warmed: list[list[Message]] = []
+        # Generations currently running. A speculation that outlives its socket
+        # keeps billing, so "nothing is still generating" is a thing to assert.
+        self.active = 0
         self.systems: list[str] = []
 
     async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
@@ -48,9 +56,14 @@ class FakeLLM:
         if self.delay:
             await asyncio.sleep(self.delay)
         reply = self.replies[min(len(self.seen) - 1, len(self.replies) - 1)]
-        for word in reply.split(" "):
-            if word:  # an empty reply must stream nothing, not one blank fragment
-                yield word + " "
+        self.active += 1
+        try:
+            for word in reply.split(" "):
+                if word:  # an empty reply must stream nothing, not one blank fragment
+                    yield word + " "
+                await asyncio.sleep(self.pace)
+        finally:
+            self.active -= 1
 
 
 @pytest.fixture

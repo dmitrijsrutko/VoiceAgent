@@ -268,6 +268,13 @@ ws.onmessage = (event) => {
     if (bubble) {
       bubble.classList.remove("cursor");
       note(bubble, `💭 thought for ${ms(msg.ttft_ms)} · ${msg.chars} chars in ${ms(msg.generation_ms)}`);
+      if (msg.speculated) {
+        note(bubble, `⚡ started ${ms(msg.speculation_lead_ms)} before the turn ended — the reply was already being written`);
+      }
+      if (msg.speculations_discarded) {
+        // The cost of guessing wrong, on screen rather than assumed.
+        note(bubble, `🗑 ${msg.speculations_discarded} guess${msg.speculations_discarded > 1 ? "es" : ""} discarded · ${msg.speculation_wasted_chars} chars wasted`);
+      }
     }
     setEnabled(true);
 
@@ -304,6 +311,11 @@ ws.onmessage = (event) => {
         line += ` · ${msg.stable_words} words settled early${msg.prefix_held ? "" : " ⚠ prefix did not hold"}`;
       }
       note(live, line);
+      if (!msg.warms && msg.warms_attempted) {
+        // Billed and useless. Saying nothing here makes a wasted warm look
+        // identical to no warm at all.
+        note(live, `🔥 ${msg.warms_attempted} warm started but did not land before the turn ended`);
+      }
       if (msg.warms) {
         const pct = msg.warm_prompt_tokens
           ? Math.round(100 * msg.warm_cached_tokens / msg.warm_prompt_tokens)
