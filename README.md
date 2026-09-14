@@ -91,6 +91,12 @@ for the full log and the reasoning behind each step.
   grown to ~400 lines inline, is split into native ES modules served from
   `/static`. Still no build step and no npm; the player's logic now runs under
   `node --test` instead of being checked as text.
+- **Chapter 7 — streaming synthesis input.** The agent speaks while the reply is
+  still being written. Tokens go to ElevenLabs as they arrive, and its chunk
+  schedule, not our code, decides when there is enough to say aloud. Measured
+  live, a 35-second answer starts speaking 460-800 ms before the reply has
+  finished, and first audio fell from 1.7-1.9 s to 1.0-1.2 s (measured with a 50-char first piece, since raised to 120 for a natural first phrase). Its `auto_mode`,
+  fed tokens, voiced every token as a separate utterance, which is why it is off.
 
 ## Requirements
 
@@ -158,7 +164,7 @@ src/voice_agent/
   cli.py                  chapter 1: `uv run voice-agent` (entry point)
   server.py               chapter 1: routes, the socket's receive loop
   session.py              one connected conversation: starts, queues and cancels turns
-  turn.py                 chapter 1/2/6: one exchange — streamed reply, then streamed speech
+  turn.py                 chapter 1/2/6/7: one exchange — the reply spoken while it is written
   channel.py              serialized writes to the socket, shared audio framing
   mic.py                  chapter 3: one listening session — transcripts, expiry, keepalive
   greeting.py             chapter 2: the opening line, synthesised once and cached on disk
@@ -189,10 +195,10 @@ src/voice_agent/
     registry.py           name -> backend, or None for deafness
     elevenlabs_stt.py     Scribe realtime over a raw WebSocket (VAD endpointing)
   tts/                    chapter 2: speech synthesis
-    base.py               the TTS protocol: text in, PCM chunks out
+    base.py               the TTS protocol: a text stream in, PCM chunks out
     registry.py           name -> backend, or None for silence
-    elevenlabs_tts.py     ElevenLabs (default)
-    openai_tts.py         OpenAI
+    elevenlabs_tts.py     ElevenLabs (default): tokens in over the stream-input WebSocket
+    openai_tts.py         OpenAI: whole text only, so it waits for the reply
 docs/ROADMAP.md           research notes and candidate future chapters
 tests/                    pytest suite; tests/web/ holds node tests for the page (`node --test`)
 .env.example              provider keys and settings
@@ -209,11 +215,9 @@ Barge-in: letting the user interrupt, which means undoing Chapter 3's
 half-duplex gate, and recording what the caller actually *heard* rather than
 what the agent meant to say. Semantic turn detection, to replace the single
 silence threshold and take endpointing back from the vendor — currently 1.3 s
-of a 2.9 s round trip, and not measurable from inside the project. Streaming
-synthesis *input* — speaking the reply while it is still being written, in
-pieces cut where they will not damage prosody — which removes the wait for the
-whole reply that Chapter 6 left in place. Then speculative synthesis: the first
-sentence voiced before the turn commits and held until it does. Then context
+of a 2.9 s round trip, and not measurable from inside the project.
+Speculative synthesis: the first sentence voiced before the turn commits and
+held until it does, now that Chapter 7 speaks a reply as it is written. Then context
 management and prompt caching for the reasoning stage, which grows worse every
 turn.
 

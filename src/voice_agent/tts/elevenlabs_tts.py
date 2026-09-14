@@ -1,9 +1,26 @@
-"""ElevenLabs speech synthesis."""
+"""ElevenLabs speech synthesis, fed the reply while it is still being written.
 
+Reached over the `stream-input` WebSocket rather than an HTTP endpoint, which
+takes a text that is already whole. Tokens are forwarded exactly as the
+reasoning engine writes them — half words, no spaces added — and deciding when
+there is enough text to say something aloud is left to the service's chunk
+schedule. Measured, it does more than count: past each threshold it speaks a
+prefix ending on a word and holds the unfinished tail back, voicing it with
+whatever arrives next. Where the reply is cut is not this project's code.
+
+The SDK binds this endpoint only as a blocking, synchronous client, so it is
+spoken to directly, as Scribe is.
+"""
+
+import asyncio
+import base64
+import contextlib
+import json
 from collections.abc import AsyncIterator
 from typing import Literal
+from urllib.parse import urlencode
 
-import httpx
+import websockets
 from elevenlabs.client import AsyncElevenLabs
 from elevenlabs.core import ApiError
 
@@ -32,7 +49,12 @@ def explain(exc: ApiError) -> str:
     detail = exc.body.get("detail", {}) if isinstance(exc.body, dict) else {}
     if not isinstance(detail, dict):
         return f"elevenlabs synthesis failed ({exc.status_code}): {detail}"
-    message = detail.get("message") or f"HTTP {exc.status_code}"
+    return describe(detail, f"HTTP {exc.status_code}")
+
+
+def describe(detail: dict[str, object], fallback: str) -> str:
+    """One line from an error's `message` and `code`, over HTTP or the socket."""
+    message = detail.get("message") or detail.get("error") or fallback
     hint = HINTS.get(str(detail.get("code")))
     return f"elevenlabs synthesis failed: {message}" + (f" — {hint}" if hint else "")
 
@@ -61,6 +83,27 @@ OUTPUT_FORMAT: Literal["pcm_24000"] = "pcm_24000"
 """Raw PCM at `tts.base.SAMPLE_RATE`. Asserted equal to it in the tests, since
 the two drifting apart would pitch the voice rather than fail."""
 
+ENDPOINT = "wss://api.elevenlabs.io/v1/text-to-speech"
+
+CLOSE_TIMEOUT_SECONDS = 1.0
+
+CHUNK_LENGTH_SCHEDULE = [120, 160, 250, 290]
+"""Characters of text the service waits for before speaking each part; the last
+value repeats. This is the service's own default, stated so it is a decision.
+
+Started at `[50, 120, 160, 250]` for time to first sound — 223 ms against 346 ms
+on a replayed reply. Listened to live, the 50-character first piece was voiced
+as an utterance of its own: "The Millennium Prize Problems are seven big…",
+then a pause no gap counter sees, because no audio was missing. A reasoning
+engine writing ~760 characters a second reaches 120 in about 100 ms more, and a
+natural first phrase is worth that.
+
+Not `auto_mode`, which sounds like the smarter choice and is the opposite: it
+switches buffering *off* and speaks every message the moment it arrives. Fed
+tokens, it voiced each one as an utterance of its own — "Da · ug · ava" — and a
+33-second reply came out 60 seconds long. It is for clients that send whole
+sentences, which this one does not."""
+
 
 class ElevenLabsTTS:
     def __init__(
@@ -68,34 +111,80 @@ class ElevenLabsTTS:
         voice: str | None = None,
         model: str | None = None,
         client: AsyncElevenLabs | None = None,
+        api_key: str | None = None,
     ) -> None:
         self.provider = "elevenlabs"
         self.voice = voice or DEFAULT_VOICE
         self.model = model or DEFAULT_MODEL
-        self._client = client or AsyncElevenLabs(api_key=require_env("ELEVENLABS_API_KEY"))
+        self._api_key = api_key or require_env("ELEVENLABS_API_KEY")
+        self._client = client or AsyncElevenLabs(api_key=self._api_key)
 
-    async def stream(self, text: str) -> AsyncIterator[bytes]:
-        # The `/stream` endpoint rather than `convert`: both answer in chunked
-        # HTTP, but `convert` renders before it starts sending.
-        chunks = self._client.text_to_speech.stream(
-            voice_id=self.voice,
-            model_id=self.model,
-            text=text,
-            output_format=OUTPUT_FORMAT,
+    @property
+    def url(self) -> str:
+        return f"{ENDPOINT}/{self.voice}/stream-input?" + urlencode(
+            {"model_id": self.model, "output_format": OUTPUT_FORMAT}
         )
-        # The request is made lazily, on first iteration, and a failure can
-        # arrive at any chunk — so the whole loop is the guarded region.
+
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+        async def pump(socket: websockets.ClientConnection) -> None:
+            # A single space opens the stream and carries its settings.
+            await socket.send(
+                json.dumps(
+                    {
+                        "text": " ",
+                        "generation_config": {"chunk_length_schedule": CHUNK_LENGTH_SCHEDULE},
+                    }
+                )
+            )
+            async for fragment in text:
+                # Never an empty text: that is the message which ends the stream.
+                if fragment:
+                    await socket.send(json.dumps({"text": fragment}))
+            # "That is all": the service voices whatever it is still holding back,
+            # however short, then ends the stream.
+            await socket.send(json.dumps({"text": ""}))
+
         try:
-            async for chunk in whole_samples(chunks):
-                yield chunk
-        except ApiError as exc:
-            raise ProviderError(explain(exc)) from exc
-        except httpx.HTTPError as exc:
-            # The SDK wraps HTTP *statuses* in ApiError but passes transport
-            # failures through raw — a dropped connection mid-reply, or no
-            # network at all. Unmapped, they are not a VoiceAgentError, so the
-            # turn cannot degrade to text and the whole connection dies instead.
-            raise ProviderError(f"elevenlabs synthesis interrupted: {exc!r}") from exc
+            async with websockets.connect(
+                self.url,
+                additional_headers={"xi-api-key": self._api_key},
+                # A cancelled synthesis closes the socket and would wait this
+                # long for the service to answer — holding up the turn, and so
+                # `ended`, that cancelled it. The default is 10 s, and this
+                # vendor's Scribe endpoint never answers a close at all.
+                close_timeout=CLOSE_TIMEOUT_SECONDS,
+            ) as socket:
+                task = asyncio.create_task(pump(socket))
+                try:
+                    async for chunk in whole_samples(self._audio(socket)):
+                        yield chunk
+                finally:
+                    # A turn that stops reading — cancelled, or failed — must
+                    # not leave text flowing into a socket that is closing.
+                    task.cancel()
+                    with contextlib.suppress(asyncio.CancelledError, websockets.WebSocketException):
+                        await task
+        except websockets.InvalidStatus as exc:
+            # Refused at the handshake with an empty body, so the status is all
+            # there is to go on. Measured: an unknown voice id is a bare 403.
+            raise ProviderError(
+                f"elevenlabs refused the stream (HTTP {exc.response.status_code}) — check the "
+                "voice id with --list-voices and the key's text-to-speech permission"
+            ) from exc
+        except (websockets.WebSocketException, OSError) as exc:
+            raise ProviderError(f"elevenlabs synthesis interrupted: {exc}") from exc
+
+    async def _audio(self, socket: websockets.ClientConnection) -> AsyncIterator[bytes]:
+        async for raw in socket:
+            payload = json.loads(raw)
+            if not isinstance(payload, dict):
+                continue
+            if audio := payload.get("audio"):
+                yield base64.b64decode(audio)
+            elif "error" in payload or "message" in payload:
+                raise ProviderError(describe(payload, "the stream was refused"))
+            if payload.get("isFinal"):
+                return
 
     async def list_voices(self) -> list[Voice]:
         try:

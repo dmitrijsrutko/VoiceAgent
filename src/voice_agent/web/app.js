@@ -10,13 +10,13 @@ import {
 
 const key = location.pathname.split("/").pop();
 
-let bubble = null;
+let bubble = null;         // the agent reply still being written, if any
+let reply = null;          // the latest agent bubble — whatever audio arrives is its voice
 let live = null;           // the user bubble being transcribed into, if any
 let listening = false;
 let speaking = false;      // half-duplex gate: don't let the agent hear itself
 let mic = null;            // { context, node, stream } once built
 let sampleRate = 16000;
-let lastVoiced = null;     // the bubble whose audio ended last, for a late audio_error
 
 const proto = location.protocol === "https:" ? "wss:" : "ws:";
 const ws = new WebSocket(`${proto}//${location.host}/ws/${key}`);
@@ -91,10 +91,10 @@ ws.onmessage = (event) => {
     else setEnabled(true);
 
   } else if (msg.type === "greeting") {
-    bubble = add(msg.text, "msg agent");
+    reply = add(msg.text, "msg agent");
 
   } else if (msg.type === "reply_start") {
-    bubble = add("", "msg agent cursor");
+    bubble = reply = add("", "msg agent cursor");
 
   } else if (msg.type === "delta") {
     if (bubble) stick(() => { bubble.textContent += msg.text; });
@@ -120,15 +120,16 @@ ws.onmessage = (event) => {
         note(bubble, `🗑 ${msg.speculations_discarded} guess${msg.speculations_discarded > 1 ? "es" : ""} discarded · ${msg.speculation_wasted_chars} chars wasted`);
       }
     }
+    bubble = null;
     setEnabled(true);
 
   } else if (msg.type === "audio_start") {
-    player.start(bubble);
-    bubble = null;
+    // Speech streams while the reply is still being written, so this can come
+    // before `reply_end` — the text keeps arriving into the same bubble.
+    player.start(reply);
 
   } else if (msg.type === "audio_end") {
     const voiced = player.end();
-    lastVoiced = voiced;
     if (voiced) {
       // The reply's own length matters as much as the time taken to make it:
       // a 31-second answer is a product problem no latency work can fix.
@@ -139,7 +140,10 @@ ws.onmessage = (event) => {
           : "reused from an earlier run";
         note(voiced, `🔊 ${length} · ${origin} · no wait for you`);
       } else {
-        note(voiced, `🔊 ${length} · audio at ${ms(msg.first_audio_ms)} · first byte after ${ms(msg.synthesis_first_byte_ms)} · synthesized in ${ms(msg.synthesis_ms)}`);
+        // "Before the reply was written" is the point of streaming the text in:
+        // without it, speech waits for the last word the model writes.
+        const early = msg.audio_before_reply_end ? " · spoke before the reply was written" : "";
+        note(voiced, `🔊 ${length} · audio at ${ms(msg.first_audio_ms)}${early} · ${ms(msg.synthesis_first_byte_ms)} from first words to first sound · synthesized in ${ms(msg.synthesis_ms)}`);
       }
     }
 
@@ -182,14 +186,13 @@ ws.onmessage = (event) => {
     add(msg.message, "error");
 
   } else if (msg.type === "audio_error") {
-    // After `audio_end` when synthesis failed mid-reply, so the bubble to
-    // annotate may belong to a stream that has already been closed.
-    const target = bubble || lastVoiced;
-    if (target) note(target, `🔇 ${msg.message}`);
-    bubble = null;
+    // Possibly after `audio_end` when synthesis failed mid-reply, and possibly
+    // before `reply_end`: the text carries on either way, so `bubble` is left
+    // alone and the note goes on the reply whose voice this was.
+    if (reply) note(reply, `🔇 ${msg.message}`);
 
   } else if (msg.type === "error") {
-    if (bubble) { bubble.remove(); bubble = null; }
+    if (bubble) { bubble.remove(); bubble = reply = null; }
     add(msg.message, "error");
     setEnabled(true);
 

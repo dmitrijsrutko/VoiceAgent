@@ -4,6 +4,11 @@ An interface with one implementation is a guess. This one differs from
 ElevenLabs in every detail that matters (voices are names rather than ids, the
 format is a separate parameter, streaming is a response wrapper rather than a
 separate endpoint), which is what makes the `TTS` protocol worth having.
+
+Crude on purpose since Chapter 7: `/audio/speech` takes whole text only, so the
+reply is gathered in full and synthesized after it has been written — the
+batched wait that ElevenLabs no longer has. Sentence-sized requests, cut on our
+side, would fix it; nothing here needs that yet.
 """
 
 from collections.abc import AsyncIterator
@@ -51,7 +56,10 @@ class OpenAITTS:
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncOpenAI(api_key=require_env("OPENAI_API_KEY"))
 
-    async def stream(self, text: str) -> AsyncIterator[bytes]:
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+        whole = "".join([fragment async for fragment in text])
+        if not whole.strip():
+            return
         try:
             # `with_streaming_response`, because plain `create` reads the whole
             # body before returning — which is the batched behaviour, renamed.
@@ -60,7 +68,7 @@ class OpenAITTS:
                 # The SDK's type narrows to its stock voice names; the API
                 # itself accepts any voice string the account has.
                 voice=self.voice,
-                input=text,
+                input=whole,
                 response_format=RESPONSE_FORMAT,
             ) as response:
                 async for chunk in whole_samples(response.iter_bytes()):

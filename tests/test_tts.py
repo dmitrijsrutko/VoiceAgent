@@ -1,15 +1,29 @@
-from collections.abc import AsyncIterator
+import asyncio
+import base64
+import json
+import time
+from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 
 import httpx
 import pytest
 from elevenlabs.core import ApiError
+from websockets.asyncio.server import ServerConnection, serve
+from websockets.datastructures import Headers
+from websockets.http11 import Response
 
 from voice_agent.errors import ConfigError, ProviderError
-from voice_agent.tts import create_tts
-from voice_agent.tts.base import SAMPLE_RATE, pcm_seconds, whole_samples
-from voice_agent.tts.elevenlabs_tts import DEFAULT_VOICE, OUTPUT_FORMAT, ElevenLabsTTS, explain
+from voice_agent.tts import create_tts, elevenlabs_tts
+from voice_agent.tts.base import SAMPLE_RATE, once, pcm_seconds, whole_samples
+from voice_agent.tts.elevenlabs_tts import (
+    CHUNK_LENGTH_SCHEDULE,
+    DEFAULT_VOICE,
+    OUTPUT_FORMAT,
+    ElevenLabsTTS,
+    explain,
+)
 from voice_agent.tts.openai_tts import RESPONSE_FORMAT, OpenAITTS
+from voice_agent.turn import closing
 
 
 async def chunks_of(*parts: bytes) -> AsyncIterator[bytes]:
@@ -159,7 +173,7 @@ async def test_library_voices_are_listed_as_visible_but_not_usable() -> None:
             SimpleNamespace(voice_id="mine-1", name="My Clone", category="cloned"),
         ]
     )
-    voices = await ElevenLabsTTS(client=client).list_voices()  # type: ignore[arg-type]
+    voices = await ElevenLabsTTS(client=client, api_key="test").list_voices()  # type: ignore[arg-type]
 
     assert [(v.id, v.usable) for v in voices] == [
         ("stock-1", True),
@@ -170,7 +184,7 @@ async def test_library_voices_are_listed_as_visible_but_not_usable() -> None:
 
 async def test_a_voice_with_no_name_still_lists() -> None:
     client = FakeVoicesClient([SimpleNamespace(voice_id="v1", name=None, category="premade")])
-    assert (await ElevenLabsTTS(client=client).list_voices())[0].name == "v1"  # type: ignore[arg-type]
+    assert (await ElevenLabsTTS(client=client, api_key="test").list_voices())[0].name == "v1"  # type: ignore[arg-type]
 
 
 async def test_openai_voices_need_no_api_call(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -183,62 +197,194 @@ async def test_openai_voices_need_no_api_call(monkeypatch: pytest.MonkeyPatch) -
     assert "alloy" in {v.id for v in voices}
 
 
-class FakeElevenLabs:
-    """`text_to_speech.stream` as the SDK shapes it: a call that returns an
-    async iterator, and does its request — and fails — on iteration."""
-
-    def __init__(
-        self, parts: list[bytes], fail_after: int | None = None, drop_after: int | None = None
-    ) -> None:
-        self.calls: list[dict[str, object]] = []
-        self.text_to_speech = SimpleNamespace(stream=self._stream)
-        self._parts = parts
-        self._fail_after = fail_after
-        self._drop_after = drop_after
-
-    def _stream(self, voice_id: str, **kwargs: object) -> AsyncIterator[bytes]:
-        self.calls.append({"voice_id": voice_id, **kwargs})
-        return self._iterate()
-
-    async def _iterate(self) -> AsyncIterator[bytes]:
-        for index, part in enumerate(self._parts):
-            if index == self._fail_after:
-                raise FakeApiError(429, {"detail": {"code": "quota_exceeded", "message": "no"}})
-            if index == self._drop_after:
-                raise httpx.ReadError("connection reset")
-            yield part
+async def tokens(*parts: str, pace: float = 0.0) -> AsyncIterator[str]:
+    for part in parts:
+        yield part
+        await asyncio.sleep(pace)
 
 
-async def test_elevenlabs_streams_pcm_in_whole_samples() -> None:
-    client = FakeElevenLabs([b"\x01\x02\x03", b"\x04"])
-    out = await collect(ElevenLabsTTS(client=client).stream("hello"))  # type: ignore[arg-type]
+class StreamInput:
+    """A stand-in for `stream-input`: records every message, and answers each
+    piece of text with its bytes as "audio" once the stream is closed — or at
+    once, with `eager`, as a service speaking while text still arrives."""
+
+    def __init__(self, parts: list[bytes] | None = None, eager: bool = False) -> None:
+        self.received: list[dict[str, object]] = []
+        self.paths: list[str] = []
+        self.headers: list[str | None] = []
+        self.closed = asyncio.Event()
+        self.parts = parts
+        self.eager = eager
+
+    async def __call__(self, connection: ServerConnection) -> None:
+        assert connection.request is not None
+        self.paths.append(connection.request.path)
+        self.headers.append(connection.request.headers.get("xi-api-key"))
+        try:
+            async for raw in connection:
+                message = json.loads(raw)
+                self.received.append(message)
+                text = message["text"]
+                if text == "":
+                    for part in self.parts or []:
+                        await send_audio(connection, part)
+                    await connection.send(json.dumps({"audio": None, "isFinal": True}))
+                elif self.eager and text.strip():
+                    await send_audio(connection, text.encode())
+        finally:
+            self.closed.set()
+
+
+async def send_audio(connection: ServerConnection, data: bytes) -> None:
+    payload = {"audio": base64.b64encode(data).decode(), "isFinal": None, "alignment": None}
+    await connection.send(json.dumps(payload))
+
+
+Serve = Callable[[Callable[[ServerConnection], Awaitable[None]]], Awaitable[ElevenLabsTTS]]
+
+
+@pytest.fixture
+async def endpoint(monkeypatch: pytest.MonkeyPatch) -> Serve:
+    async def build(handler: Callable[[ServerConnection], Awaitable[None]]) -> ElevenLabsTTS:
+        server = await serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(elevenlabs_tts, "ENDPOINT", f"ws://127.0.0.1:{port}")
+        return ElevenLabsTTS(api_key="test-key", client=SimpleNamespace())  # type: ignore[arg-type]
+
+    return build
+
+
+async def test_tokens_are_forwarded_exactly_as_the_reasoning_engine_wrote_them(
+    endpoint: Serve,
+) -> None:
+    """Half words, no spaces added: deciding when there is enough to speak is
+    the service's job, and measured, it does that job better than re-cutting."""
+    service = StreamInput(parts=[b"\x01\x02"])
+    tts = await endpoint(service)
+
+    await collect(tts.stream(tokens("R", "iga", " is", "", " the capital.")))
+
+    texts = [m["text"] for m in service.received]
+    assert texts == [" ", "R", "iga", " is", " the capital.", ""]
+    assert service.received[0]["generation_config"] == {
+        "chunk_length_schedule": CHUNK_LENGTH_SCHEDULE
+    }
+    assert "" not in texts[:-1], "an empty fragment would have ended the stream early"
+
+
+def test_buffering_is_left_on_not_switched_off_by_auto_mode() -> None:
+    """`auto_mode` speaks every message the moment it arrives: fed tokens, a
+    33-second reply came out 60 seconds long, one token at a time."""
+    tts = ElevenLabsTTS(api_key="k", client=SimpleNamespace())  # type: ignore[arg-type]
+
+    assert "auto_mode" not in tts.url
+    assert "output_format=pcm_24000" in tts.url
+    assert f"/{DEFAULT_VOICE}/stream-input" in tts.url
+    assert CHUNK_LENGTH_SCHEDULE[0] >= 50, "the service rejects values under 50"
+    assert all(50 <= n <= 500 for n in CHUNK_LENGTH_SCHEDULE)
+
+
+async def test_audio_comes_back_in_whole_samples_and_the_key_in_a_header(endpoint: Serve) -> None:
+    service = StreamInput(parts=[b"\x01\x02\x03", b"\x04"])
+    tts = await endpoint(service)
+
+    out = await collect(tts.stream(once("hello")))
 
     assert out == [b"\x01\x02", b"\x03\x04"]
-    assert client.calls[0]["output_format"] == "pcm_24000"
-    assert client.calls[0]["text"] == "hello"
+    assert service.headers == ["test-key"]
 
 
-async def test_an_elevenlabs_failure_mid_stream_is_explained() -> None:
-    """The request happens on iteration, so a failure can arrive after audio
-    has already been handed on — it must still surface as a ProviderError."""
-    client = FakeElevenLabs([b"\x01\x02", b"\x03\x04"], fail_after=1)
-    received: list[bytes] = []
+async def test_audio_arrives_while_text_is_still_being_sent(endpoint: Serve) -> None:
+    service = StreamInput(eager=True)
+    tts = await endpoint(service)
+    heard_before_the_end: list[bytes] = []
+    finished = False
+
+    async def slow_text() -> AsyncIterator[str]:
+        nonlocal finished
+        yield "ab"
+        await asyncio.sleep(0.2)
+        yield "cd"
+        finished = True
+
+    async for chunk in tts.stream(slow_text()):
+        if not finished:
+            heard_before_the_end.append(chunk)
+
+    assert heard_before_the_end == [b"ab"]
+
+
+async def test_an_error_payload_is_a_provider_error(endpoint: Serve) -> None:
+    async def refusing(connection: ServerConnection) -> None:
+        await connection.recv()
+        await connection.send(json.dumps({"message": "quota gone", "code": "quota_exceeded"}))
+        await connection.close()
+
+    tts = await endpoint(refusing)
 
     with pytest.raises(ProviderError, match="character quota"):
-        async for chunk in ElevenLabsTTS(client=client).stream("hello"):  # type: ignore[arg-type]
-            received.append(chunk)
-
-    assert received == [b"\x01\x02"]
+        await collect(tts.stream(once("hello")))
 
 
-async def test_an_elevenlabs_connection_lost_mid_stream_is_a_provider_error() -> None:
-    """The SDK passes transport failures through as raw httpx errors. One that
-    escapes as anything but a ProviderError takes the connection down with it
-    rather than letting the turn fall back to text."""
-    client = FakeElevenLabs([b"\x01\x02", b"\x03\x04"], drop_after=1)
+async def test_a_connection_lost_mid_stream_is_a_provider_error(endpoint: Serve) -> None:
+    """Unmapped, a dropped socket is not a VoiceAgentError, and the turn could
+    not fall back to text."""
+
+    async def dropping(connection: ServerConnection) -> None:
+        await connection.recv()
+        await send_audio(connection, b"\x01\x02")
+        connection.transport.abort()
+
+    tts = await endpoint(dropping)
 
     with pytest.raises(ProviderError, match="interrupted"):
-        await collect(ElevenLabsTTS(client=client).stream("hello"))  # type: ignore[arg-type]
+        await collect(tts.stream(tokens("hello", pace=0.1)))
+
+
+async def test_a_refused_handshake_says_what_to_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured: an unknown voice is a bare 403 with an empty body."""
+
+    def forbid(connection: ServerConnection, request: object) -> Response:
+        return Response(403, "Forbidden", Headers(), b"")
+
+    async def unused(connection: ServerConnection) -> None: ...
+
+    async with serve(unused, "127.0.0.1", 0, process_request=forbid) as server:
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(elevenlabs_tts, "ENDPOINT", f"ws://127.0.0.1:{port}")
+        tts = ElevenLabsTTS(api_key="k", client=SimpleNamespace())  # type: ignore[arg-type]
+
+        with pytest.raises(ProviderError, match=r"403.*--list-voices"):
+            await collect(tts.stream(once("hello")))
+
+
+async def test_an_unreachable_service_is_a_provider_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(elevenlabs_tts, "ENDPOINT", "ws://127.0.0.1:1")
+    tts = ElevenLabsTTS(api_key="k", client=SimpleNamespace())  # type: ignore[arg-type]
+
+    with pytest.raises(ProviderError):
+        await collect(tts.stream(once("hello")))
+
+
+async def test_a_reader_that_stops_closes_the_socket(endpoint: Serve) -> None:
+    """A cancelled turn stops reading between chunks. The socket — and the text
+    still flowing into it — must close with it, not wait for collection."""
+    service = StreamInput(eager=True)
+    tts = await endpoint(service)
+
+    async def unfinished() -> AsyncIterator[str]:
+        yield "more "
+        await asyncio.sleep(2)  # a reply still being written when the turn is cancelled
+
+    async with closing(tts.stream(unfinished())) as stream:
+        await anext(stream)
+        stopped = time.perf_counter()
+
+    # Timed rather than wrapped in a timeout: a timeout's cancellation lands in
+    # the very cleanup under test, which swallows it and looks like success.
+    assert time.perf_counter() - stopped < 0.5, "closing waited on text that never came"
+    async with asyncio.timeout(1):
+        await service.closed.wait()
 
 
 class FakeStreamingResponse:
@@ -273,11 +419,25 @@ async def test_openai_streams_pcm_in_whole_samples() -> None:
         return FakeStreamingResponse([b"\x01", b"\x02\x03\x04\x05", b"\x06"])
 
     client = openai_client(create)
-    out = await collect(OpenAITTS(client=client).stream("hello"))  # type: ignore[arg-type]
+    out = await collect(OpenAITTS(client=client).stream(tokens("hel", "lo")))  # type: ignore[arg-type]
 
     assert b"".join(out) == b"\x01\x02\x03\x04\x05\x06"
     assert all(len(chunk) % 2 == 0 for chunk in out)
     assert calls[0]["response_format"] == "pcm"
+    # It has no streaming input: the text is gathered and sent once, whole.
+    assert [c["input"] for c in calls] == ["hello"]
+
+
+async def test_openai_is_not_asked_to_speak_a_blank_text() -> None:
+    calls: list[dict[str, object]] = []
+
+    def create(**kwargs: object) -> FakeStreamingResponse:
+        calls.append(kwargs)
+        return FakeStreamingResponse([b"\x00\x00"])
+
+    out = await collect(OpenAITTS(client=openai_client(create)).stream(tokens(" ", "")))  # type: ignore[arg-type]
+
+    assert out == [] and calls == []
 
 
 async def test_an_openai_connection_lost_mid_stream_is_a_provider_error() -> None:
@@ -285,4 +445,4 @@ async def test_an_openai_connection_lost_mid_stream_is_a_provider_error() -> Non
         return FakeStreamingResponse([b"\x01\x02", b"\x03\x04"], drop_after=1)
 
     with pytest.raises(ProviderError, match="interrupted"):
-        await collect(OpenAITTS(client=openai_client(create)).stream("hello"))  # type: ignore[arg-type]
+        await collect(OpenAITTS(client=openai_client(create)).stream(once("hello")))  # type: ignore[arg-type]

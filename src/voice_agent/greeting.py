@@ -10,7 +10,7 @@ from voice_agent.conversation import Conversation
 from voice_agent.errors import VoiceAgentError
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
-from voice_agent.tts.base import BYTES_PER_SAMPLE, MEDIA_TYPE, pcm_seconds
+from voice_agent.tts.base import BYTES_PER_SAMPLE, MEDIA_TYPE, once, pcm_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +89,7 @@ class Greeting:
         try:
             # Joined, not streamed: nobody is waiting on it yet, and a partial
             # greeting cached to disk would be replayed truncated forever.
-            pcm = b"".join([chunk async for chunk in self._speaker.stream(self.text)])
+            pcm = b"".join([chunk async for chunk in self._speaker.stream(once(self.text))])
         except VoiceAgentError as exc:
             # An agent that cannot greet must still be able to converse.
             logger.warning("could not prepare the greeting: %s", exc)

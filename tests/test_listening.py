@@ -28,6 +28,15 @@ def start(client: TestClient) -> str:
     return client.get("/", follow_redirects=False).headers["location"].removeprefix("/c/")
 
 
+def text_frame(socket: object) -> dict[str, Any]:
+    """The next frame that is not the reply's audio. Speech now streams while
+    the reply is still being written, so its frames interleave with the text
+    these tests are about, in an order that depends on scheduling."""
+    while (frame := receive(socket))["type"] in ("audio_bytes", "audio_start", "audio_end"):
+        pass
+    return frame
+
+
 def build(store: SessionStore, stt: FakeSTT, llm: FakeLLM | None = None) -> TestClient:
     return TestClient(
         create_app(
@@ -42,14 +51,14 @@ def test_speaking_produces_volatile_then_committed_text(store: SessionStore) -> 
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        assert socket.receive_json() == {"type": "listening", "active": True}
+        assert text_frame(socket) == {"type": "listening", "active": True}
 
         for _ in range(3):
             socket.send_bytes(FRAME)
 
-        transcripts = [socket.receive_json() for _ in range(3)]
+        transcripts = [text_frame(socket) for _ in range(3)]
 
     # Volatile hypotheses get rewritten; only the last one is committed.
     assert [(t["text"], t["final"]) for t in transcripts] == [
@@ -69,15 +78,15 @@ def test_a_committed_transcript_starts_a_turn_by_itself(store: SessionStore) -> 
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
 
         kinds = []
         while "reply_end" not in kinds:
-            kinds.append(socket.receive_json()["type"])
+            kinds.append(text_frame(socket)["type"])
 
     assert kinds == [
         "transcript",
@@ -104,11 +113,11 @@ def test_volatile_text_never_reaches_the_reasoning_engine(store: SessionStore) -
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         socket.send_bytes(FRAME)
-        assert socket.receive_json()["final"] is False
+        assert text_frame(socket)["final"] is False
 
     assert llm.seen == []
     assert store.get(key).messages == []
@@ -129,14 +138,14 @@ def test_an_empty_commit_is_not_reported_at_all(store: SessionStore) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         socket.send_bytes(FRAME)  # the blank commit
         socket.send_bytes(FRAME)  # a real partial
 
         # The blank one produced no frame, so this is the first thing back.
-        assert socket.receive_json()["text"] == "a real one"
+        assert text_frame(socket)["text"] == "a real one"
 
     assert llm.seen == []
     assert store.get(key).messages == []
@@ -149,12 +158,12 @@ def test_saying_exit_ends_the_conversation(store: SessionStore) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         socket.send_bytes(FRAME)
-        assert socket.receive_json()["final"] is True
-        assert socket.receive_json() == {"type": "ended"}
+        assert text_frame(socket)["final"] is True
+        assert text_frame(socket) == {"type": "ended"}
 
     assert store.get(key).ended
 
@@ -164,11 +173,11 @@ def test_listening_stops_on_request(store: SessionStore) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        assert socket.receive_json()["active"] is True
+        assert text_frame(socket)["active"] is True
         socket.send_json({"type": "listen_stop"})
-        assert socket.receive_json() == {"type": "listening", "active": False}
+        assert text_frame(socket) == {"type": "listening", "active": False}
 
 
 def test_audio_before_listening_starts_is_dropped_not_buffered(store: SessionStore) -> None:
@@ -177,10 +186,10 @@ def test_audio_before_listening_starts_is_dropped_not_buffered(store: SessionSto
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_bytes(FRAME)  # user's mic is on but they never pressed listen
         socket.send_json({"type": "listen_start"})
-        assert socket.receive_json()["active"] is True
+        assert text_frame(socket)["active"] is True
 
     assert stt.heard == []
 
@@ -190,18 +199,18 @@ def test_a_failing_recognizer_reports_and_leaves_typing_working(store: SessionSt
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         socket.send_bytes(FRAME)
-        error = socket.receive_json()
+        error = text_frame(socket)
 
         assert error["type"] == "listen_error"
         assert "recognizer exploded" in error["message"]
 
         # Ears are not load-bearing for typing.
         socket.send_json({"type": "user_message", "text": "typed instead"})
-        while socket.receive_json()["type"] != "reply_end":
+        while text_frame(socket)["type"] != "reply_end":
             pass
 
     assert [m.content for m in store.get(key).messages] == ["typed instead", "Sure thing. "]
@@ -214,9 +223,9 @@ def test_a_deaf_agent_says_so_rather_than_failing_silently(store: SessionStore) 
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        assert socket.receive_json()["ears"] is None
+        assert text_frame(socket)["ears"] is None
         socket.send_json({"type": "listen_start"})
-        assert socket.receive_json() == {
+        assert text_frame(socket) == {
             "type": "listen_error",
             "message": "this agent has no ears",
         }
@@ -229,7 +238,7 @@ def test_the_ready_frame_advertises_the_capture_rate(store: SessionStore) -> Non
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        assert socket.receive_json()["ears"] == {"provider": "fake-ears", "sample_rate": 16000}
+        assert text_frame(socket)["ears"] == {"provider": "fake-ears", "sample_rate": 16000}
 
 
 def test_listening_expires_after_a_silent_stretch(
@@ -243,12 +252,12 @@ def test_listening_expires_after_a_silent_stretch(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        assert socket.receive_json()["active"] is True
+        assert text_frame(socket)["active"] is True
         socket.send_bytes(FRAME)  # audio arriving; nobody talking
 
-        expiry = socket.receive_json()
+        expiry = text_frame(socket)
 
     assert expiry["type"] == "listening"
     assert expiry["active"] is False
@@ -265,14 +274,14 @@ def test_speaking_keeps_the_session_alive(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
 
         for _ in range(6):
             time.sleep(0.1)  # longer in total than the idle window
             socket.send_bytes(FRAME)
-            assert socket.receive_json()["type"] == "transcript"
+            assert text_frame(socket)["type"] == "transcript"
 
 
 def test_the_session_cap_stops_even_a_talkative_room(
@@ -286,11 +295,11 @@ def test_the_session_cap_stops_even_a_talkative_room(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
 
-        expiry = socket.receive_json()
+        expiry = text_frame(socket)
 
     assert expiry["active"] is False
     assert "stopped after" in expiry["reason"]
@@ -319,9 +328,9 @@ def test_the_agent_talking_does_not_count_against_the_user(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
 
         socket.send_bytes(FRAME)
         while receive(socket)["type"] != "audio_end":
@@ -329,7 +338,7 @@ def test_the_agent_talking_does_not_count_against_the_user(
 
         # Still listening: the next frame is speech, not an expiry notice.
         socket.send_bytes(FRAME)
-        following = socket.receive_json()
+        following = text_frame(socket)
 
     assert following["type"] == "transcript", f"listening expired during the turn: {following}"
 
@@ -349,12 +358,12 @@ def test_only_agreed_text_is_ever_warmed(store: SessionStore) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
-        while socket.receive_json()["type"] != "reply_end":
+        while text_frame(socket)["type"] != "reply_end":
             pass
 
     assert llm.warmed, "nothing was warmed at all"
@@ -372,12 +381,12 @@ def test_the_turn_still_sends_the_committed_text_not_the_warmed_prefix(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
-        while socket.receive_json()["type"] != "reply_end":
+        while text_frame(socket)["type"] != "reply_end":
             pass
 
     assert store.get(key).messages[0].content == "What is the capital of Latvia?"
@@ -388,9 +397,9 @@ def test_the_commit_reports_whether_the_agreed_prefix_held(store: SessionStore) 
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
         frames: list[dict[str, Any]] = []
@@ -420,9 +429,9 @@ def test_a_prefix_that_did_not_hold_is_reported_as_such(store: SessionStore) -> 
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
         while True:
@@ -445,12 +454,12 @@ def test_a_failing_warm_costs_only_the_warm(store: SessionStore) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
-        while socket.receive_json()["type"] != "reply_end":
+        while text_frame(socket)["type"] != "reply_end":
             pass
 
     assert [m.content for m in store.get(key).messages] == [
@@ -476,9 +485,9 @@ def test_each_turn_warms_again_rather_than_only_the_first(store: SessionStore) -
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         replies = 0
         for _ in range(6):
             socket.send_bytes(FRAME)
@@ -534,9 +543,9 @@ def test_a_warm_that_lands_after_its_turn_is_not_credited_to_the_next(
 
     try:
         with client.websocket_connect(f"/ws/{key}") as socket:
-            socket.receive_json()
+            text_frame(socket)
             socket.send_json({"type": "listen_start"})
-            socket.receive_json()
+            text_frame(socket)
 
             run_turn(socket)
             release.set()  # turn one's warm completes only now, far too late
@@ -569,17 +578,17 @@ def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(2):  # the abandoned half-sentence
             socket.send_bytes(FRAME)
-            socket.receive_json()
+            text_frame(socket)
         socket.send_json({"type": "listen_stop"})
-        socket.receive_json()
+        text_frame(socket)
 
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         commit = None
         for _ in range(3):
             socket.send_bytes(FRAME)
@@ -614,9 +623,9 @@ def test_a_warm_that_does_not_land_in_time_is_still_counted(store: SessionStore)
 
     try:
         with client.websocket_connect(f"/ws/{key}") as socket:
-            socket.receive_json()
+            text_frame(socket)
             socket.send_json({"type": "listen_start"})
-            socket.receive_json()
+            text_frame(socket)
             for _ in range(3):
                 socket.send_bytes(FRAME)
             while True:
@@ -642,12 +651,12 @@ def test_stopping_the_mic_mid_reply_neither_waits_for_nor_cuts_the_reply(
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        socket.receive_json()
+        text_frame(socket)
         socket.send_json({"type": "listen_start"})
-        socket.receive_json()
+        text_frame(socket)
         for _ in range(3):
             socket.send_bytes(FRAME)
-        while socket.receive_json()["type"] != "reply_start":
+        while text_frame(socket)["type"] != "reply_start":
             pass
         socket.send_json({"type": "listen_stop"})
 

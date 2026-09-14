@@ -5,8 +5,12 @@ depends on scheduling. Here every wait has a deadline and every frame is kept.
 """
 
 import asyncio
+from collections.abc import AsyncIterator
+from typing import Any
 
-from tests.conftest import FakeLLM, FakeSTT
+from starlette.websockets import WebSocketDisconnect
+
+from tests.conftest import FakeLLM, FakeSTT, FakeTTS
 from voice_agent.conversation import Conversation
 from voice_agent.session import Session
 from voice_agent.stt.base import Transcript
@@ -29,7 +33,10 @@ class RecordingChannel:
         self.arrived.set()
         await asyncio.sleep(self.latency.get(str(payload["type"]), 0.0))
 
-    async def send_bytes(self, data: bytes) -> None: ...
+    async def send_bytes(self, data: bytes) -> None:
+        self.frames.append({"type": "audio_bytes"})
+        self.arrived.set()
+        await asyncio.sleep(self.latency.get("audio_bytes", 0.0))
 
     def kinds(self) -> list[object]:
         return [frame["type"] for frame in self.frames]
@@ -42,11 +49,14 @@ class RecordingChannel:
 
 
 def session_for(
-    llm: FakeLLM, stt: FakeSTT | None = None, latency: dict[str, float] | None = None
+    llm: FakeLLM,
+    stt: FakeSTT | None = None,
+    latency: dict[str, float] | None = None,
+    tts: FakeTTS | None = None,
 ) -> tuple[Session, RecordingChannel, Conversation]:
     channel = RecordingChannel(latency)
     conversation = Conversation(id="test")
-    session = Session(channel, conversation, llm, None, "system", stt)  # type: ignore[arg-type]
+    session = Session(channel, conversation, llm, tts, "system", stt)  # type: ignore[arg-type]
     return session, channel, conversation
 
 
@@ -114,3 +124,86 @@ async def test_no_guess_is_made_while_a_turn_is_running() -> None:
     assert len(llm.seen) == 2
     assert [m.role for m in llm.seen[1]] == ["user", "assistant", "user"]
     assert not any(f.get("speculated") for f in channel.frames if f["type"] == "reply_end")
+
+
+async def test_ending_mid_sentence_stops_the_voice_too() -> None:
+    """Speech now runs beside the reply in a task of its own. Cancelling the
+    turn without it would leave the synthesizer speaking — and billing — a
+    reply that the conversation has already dropped."""
+    llm, tts = FakeLLM(replies=[SLOW_REPLY], pace=0.01), FakeTTS()
+    session, channel, _ = session_for(llm, latency={"ended": 0.2}, tts=tts)
+
+    await session.submit("tell me something long")
+    await channel.wait_for("audio_bytes")
+    await session.submit("bye")
+
+    assert channel.kinds()[-1] == "ended", "a frame of the reply followed the end"
+    assert tts.active == 0, "the voice was still being synthesized after the end"
+    assert llm.active == 0
+
+
+async def test_closing_mid_sentence_stops_the_voice_too() -> None:
+    llm, tts = FakeLLM(replies=[SLOW_REPLY], pace=0.05), FakeTTS()
+    session, channel, conversation = session_for(llm, tts=tts)
+
+    await session.submit("tell me something long")
+    await channel.wait_for("audio_bytes")
+    await session.close()
+
+    assert tts.active == 0, "a voice nobody will hear is still being synthesized"
+    assert "audio_end" not in channel.kinds()
+    assert conversation.messages == []
+
+
+async def test_ending_while_the_reply_end_is_being_sent_stops_the_voice() -> None:
+    """The one await between the text finishing and waiting on the voice. A
+    write there queues behind audio frames for the socket, so a cancel landing
+    in it is ordinary — and the voice used to outlive the turn, sending audio
+    after `ended`."""
+    llm, tts = FakeLLM(replies=[SLOW_REPLY], pace=0.005), FakeTTS()
+    # Audio still being sent when the text is done: speech is slower than text.
+    latency = {"reply_end": 0.3, "audio_bytes": 0.05}
+    session, channel, _ = session_for(llm, latency=latency, tts=tts)
+
+    await session.submit("tell me something long")
+    await channel.wait_for("reply_end")
+    await session.submit("bye")
+    await asyncio.sleep(0.2)  # room for an orphaned voice to send something
+
+    assert channel.kinds()[-1] == "ended", "the voice sent audio after the end"
+    assert tts.active == 0, "the voice outlived its turn"
+
+
+class VanishingLLM(FakeLLM):
+    """A reply whose writer dies as the turn is cancelled — as a write to a
+    socket that has just gone does, raising the socket's error instead."""
+
+    async def stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        self.active += 1
+        try:
+            for word in SLOW_REPLY.split():
+                yield word + " "
+                await asyncio.sleep(0.2)
+        except asyncio.CancelledError:
+            raise WebSocketDisconnect(code=1006) from None
+        finally:
+            self.active -= 1
+
+
+async def test_a_turn_that_fails_while_being_cancelled_does_not_abort_closing() -> None:
+    """Seen live: the browser closed mid-reply, and the turn ended with the
+    socket's error rather than a cancellation. Closing re-raised it — an ERROR
+    traceback per disconnect — and stopped there, never cancelling the turn
+    queued behind it or abandoning a guess still being generated."""
+    llm = VanishingLLM()
+    session, channel, _ = session_for(llm)
+
+    await session.submit("tell me something long")
+    await session.submit("and then this")  # queued behind the first
+    await channel.wait_for("delta")
+    await asyncio.sleep(0.05)  # inside the reply, between words
+
+    await session.close()  # must not raise
+
+    assert llm.active == 0
+    assert all(turn.done() for turn in session._turns), "a turn was left running"

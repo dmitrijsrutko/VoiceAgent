@@ -133,7 +133,10 @@ account data — prefill is the larger half of TTFT.
   `Current time: HH:MM:SS` stamp, a session id) invalidates everything after
   it and forces a full prefill. Verify with the provider's cache-read token
   counters rather than assuming.
-- **Chunk TTS on clause boundaries, not sentences and not finer.** Splitting
+- *Built in Chapter 7, with a measured correction:* the TTS service's own chunk
+  schedule, fed raw tokens, already cuts on word boundaries and carries context
+  across cuts; our own clause cutting stays the fallback if cuts are heard.
+  **Chunk TTS on clause boundaries, not sentences and not finer.** Splitting
   mid-clause costs prosody — the synthesizer needs lookahead to get intonation
   right, and a robotic first chunk is a worse trade than 80 ms more latency.
 

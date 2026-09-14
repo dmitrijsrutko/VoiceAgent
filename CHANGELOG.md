@@ -14,6 +14,176 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 7 — Streaming synthesis input: the voice starts while the reply is still being written
+
+Chapter 6 streamed synthesis *output*, but the text still went in whole, after
+`reply_end`. First audio therefore waited for the reasoning engine to finish
+writing the whole reply: 400–900 ms more on a 20–40-second answer, growing with
+its length. This chapter hands every token to ElevenLabs as it is written, over
+its `stream-input` WebSocket, so the voice starts once the synthesizer has
+enough of the first sentence. On long replies that is now well before the reply
+has finished being written.
+
+The hard question was not transport but **who decides when there is enough text
+to speak**. Audio once generated is final: when "ug" arrives, the sound for "Da"
+cannot become the start of "Daugava". Something has to choose when to commit.
+We answered that by measuring rather than by building a sentence splitter first.
+The service's own chunk schedule decides. Past each character threshold, it
+speaks a prefix that ends on a word and holds back the unfinished tail, which it
+then voices together with the next text to arrive. Where a reply is cut is not
+this project's code.
+
+**What changed**
+
+- `tts/base.py`: `TTS.stream` takes an `AsyncIterator[str]` rather than a string.
+  It replaces the old signature rather than adding a second one; `once(text)`
+  adapts a whole text.
+- `tts/elevenlabs_tts.py`: synthesis goes over the `stream-input` WebSocket,
+  spoken to directly as Scribe is, since the SDK binds it only as a blocking
+  client.
+  - Tokens are forwarded exactly as written: half words, no spaces added, and
+    empty fragments skipped, since an empty text ends the stream.
+  - The schedule is the service default, `[120, 160, 250, 290]`, stated explicitly (see Fixes). The final empty text makes the
+    service voice whatever it is still holding.
+  - A handshake refused with an empty 403 names what to check.
+- `tts/openai_tts.py`: crude on purpose. `/audio/speech` takes whole text only,
+  so the reply is gathered and synthesized once it is written: the batched wait,
+  kept for this backend.
+- `turn.py`: a turn's voice is a `Speech` task, started at `reply_start` so the
+  socket connects while the model is still thinking.
+  - Each fragment goes out as a `delta` and into the synthesizer at once, and
+    audio frames interleave with the text.
+  - If the reply fails after speaking began, the audio is closed before the
+    error is sent. A cancelled turn cancels its voice.
+  - `audio_end` gains `audio_before_reply_end`. `synthesis_first_byte_ms` now
+    runs from the first words handed over, so it includes the service's buffer.
+- The page: `audio_start` no longer detaches the reply bubble, which would have
+  dropped every delta after the voice began. The audio line says "spoke before
+  the reply was written" and shows the words-to-sound time.
+
+**Design decisions**
+
+- **Our own sentence cutting was not built.** Pipecat and LiveKit Agents both
+  aggregate sentences client-side, and it was the first plan. It was dropped
+  when measurement showed the service's schedule already cuts on word
+  boundaries and carries context across cuts. At the cut there was no
+  measurable pause in 2 of 3 runs and ~180 ms in the third, against ~480 ms for
+  a real sentence end. That is one voice and one model, a few runs each, so the
+  thresholds are indicative, not a spec. If length-based cuts are ever heard,
+  the fix is a first cut at the first clause or 50 characters, whichever comes
+  first — our code, sent with `auto_mode`.
+- **Not `auto_mode`, although it sounds like the smarter option and the docs
+  recommend it for LLM output.** It switches buffering *off* and speaks each
+  message the moment it arrives; it is meant for clients that send whole
+  sentences. One real DeepSeek reply (112 tokens) was replayed with its original
+  timing into each mode:
+
+  | Mode | First audio after first token | Audio length |
+  | --- | --- | --- |
+  | `auto_mode`, raw tokens | 303 ms | **59.9 s**: every token its own utterance, "Da · ug · ava" |
+  | default schedule `[120,160,250,290]`, raw tokens | 346 ms | 32.9 s |
+  | schedule `[50,120,160,250]`, raw tokens | 223 ms | 33.0 s |
+  | `auto_mode`, whole sentences | 234 ms | 31.5 s |
+
+  Pipecat reaches the same rule: auto mode on for sentence aggregation, off for
+  token streaming.
+- **No word re-cutting.** The endpoint's docs say each text should end in a
+  space. A whole-word re-cutter was written, then removed: 4-character slices
+  sent mid-word were voiced correctly, and re-cutting only delays text.
+- **Larger later chunks cost nothing.** The model writes 15–45× faster than
+  speech, so after the first piece the text is far ahead of the voice, and more
+  lookahead buys intonation at no latency. Not the whole remaining reply,
+  though: the service caps a chunk at 500 characters, and once barge-in exists,
+  text already sent is billed whether or not it is heard.
+- **The socket opens at `reply_start`, not on the first token.** The handshake
+  (~70 ms measured) then overlaps time-to-first-token. A blank reply opens a
+  socket and sends only the end message: measured, that returns `isFinal` and
+  no audio, so it bills nothing. The rule that a blank reply is never
+  *announced* as speech still holds.
+- **No pre-roll.** With streaming input, the gap risk is the text running dry
+  rather than network jitter. The worst case is a stalled model after a short
+  first piece, measured at ~1 s of silence when text stopped for 2 s. The page's
+  gap counter reports it if it happens.
+- **A reply that fails mid-speech still fails closed.** The question is dropped
+  from the history, as before, even though part of the answer was heard;
+  recording what was heard is barge-in's job. The audio is closed first, or the
+  page would keep the microphone muted waiting for it.
+
+**Latency impact**
+
+Live, real DeepSeek and real ElevenLabs `eleven_flash_v2_5`, typed turns. The
+previous commit and this change ran back to back on the same prompts. "First
+audio" is send to first audio byte, confirmed within 10 ms by the client:
+
+| Reply | Before: first audio | After: first audio | Spoke before the reply was written |
+| --- | --- | --- | --- |
+| ~1 s ("Riga.") | 1127–2063 ms | 676–1239 ms | no: 5 chars, under the first threshold |
+| ~17–23 s | 1287–1491 ms | **881–1309 ms** | yes |
+| ~32–40 s | 1682–1887 ms | **975–1228 ms** | yes |
+
+- **Long replies no longer wait for the reply to be written.** First audio now
+  runs 460–800 ms before `reply_end` on 35-second answers. The saving grows
+  with reply length, since it is the generation time that is no longer waited
+  for.
+- **Short replies: no measured change.** The whole reply is under 50 characters
+  and is voiced when it ends. The run-to-run spread is time-to-first-token
+  (512–1692 ms here), which this chapter does not touch.
+- **First words to first sound:** 164–313 ms, the service's buffer plus its
+  synthesis. That is what first audio is now built from: time-to-first-token
+  plus this.
+- **Gaps:** none in 6 replies of 17–40 s, simulated from each chunk's real
+  arrival time against a playback clock. Not yet counted by a browser.
+
+**Deliberately not done**
+
+- Our own clause or sentence cutting, and per-sentence requests for OpenAI:
+  both wait for evidence that they are needed.
+- Speculative synthesis of a reply before its turn commits: next.
+- Barge-in, multi-context sockets, and using the service's per-character
+  `alignment` to record what was actually heard.
+- A pre-roll buffer, and reconnecting a synthesis socket that drops mid-reply.
+  The reply degrades to text, as before.
+
+**Verification**
+
+- `uv run verify` passes: ruff, format, mypy strict, 217 tests.
+- New tests:
+  - The voice starts before `reply_end` with a paced model; this is the
+    chapter in one assertion.
+  - Against a local WebSocket speaking `stream-input`: tokens are forwarded
+    verbatim with the schedule and no empty fragment; the URL has no
+    `auto_mode`; audio arrives while text is still being sent, in whole
+    samples; an error payload, a dropped connection, a refused handshake and an
+    unreachable host are all `ProviderError`s; a reader that stops closes the
+    socket without waiting on unwritten text.
+  - A reply that fails after speaking closes its audio once, even when the
+    voice had already failed and closed it.
+  - Ending or closing mid-sentence stops synthesis.
+  - OpenAI gathers the text and skips a blank one.
+- **Six sabotages, all caught:**
+  - speech fed only after the reply;
+  - audio left open on failure;
+  - the voice not cancelled with its turn;
+  - an empty fragment forwarded;
+  - the sender task not cancelled (a timeout-based version of that test passed
+    anyway, because the cleanup under test swallowed the timeout's own
+    cancellation; it is now timed);
+  - the double-`audio_end` guard removed.
+- **Live, against the real service:** ending with "bye" mid-sentence sends
+  `ended` last with nothing after it, 40–42 ms after the "bye". The greeting,
+  started with an empty cache, was synthesized over the new socket in 429 ms,
+  cached and played. Closing the socket mid-reply first logged an ERROR
+  traceback (see Fixes). An earlier "no traceback" had been read from a log
+  that captured nothing. Not re-run live since the fix; covered by a unit test.
+- **Not yet verified:** listening to it in the browser (the WAVs above were
+  listened to, the page was not), the microphone path, and OpenAI live (no key).
+
+**Fixes**
+
+- A turn cancelled while its `reply_end` was being written left its voice running, sending audio after `ended`; one `finally` now cancels the voice however the turn ends.
+- The first piece waits for 120 characters, not 50: listened to live, a 50-character first piece ("The Millennium Prize Problems are seven big…") was spoken as its own utterance with an unnatural pause after it, and at ~760 chars/s the wait costs ~100 ms. The latency table above was measured with 50, so first audio is now slightly later.
+- The synthesis socket closes with a 1 s timeout, not the 10 s default, so a cancelled voice cannot hold up `ended`.
+
 ## Refactor — A turn gets its own task, and `server.py` its own modules
 
 By this point `server.py` was 1,192 lines, more than half the source. Its
@@ -83,6 +253,11 @@ so this had to change before that chapter.
   this entry's edge cases (late commit, `ended` last, streams closed, no guess
   mid-turn, the mic stopping itself) fails when its fix is reverted.
 - Not exercised with a real microphone yet.
+
+**Fixes**
+
+- Closing a session no longer aborts its cleanup when a turn ends with the socket's error instead of a cancellation (seen live as an ERROR traceback on disconnect mid-reply).
+
 
 ## Instrumentation — how many chunks, fragments and tokens a turn was
 

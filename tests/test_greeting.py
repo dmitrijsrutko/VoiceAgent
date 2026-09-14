@@ -194,7 +194,7 @@ async def test_a_failed_greeting_is_not_retried_for_every_visitor(tmp_path: Path
     for _ in range(3):
         await opening.prepare()
 
-    assert speaker.spoken == [HELLO], f"tried {len(speaker.spoken)} times"
+    assert len(speaker.spoken) == 1, f"tried {len(speaker.spoken)} times"
 
 
 async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None:
@@ -204,7 +204,7 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     from voice_agent.greeting import Greeting
 
     class SlowTTS(FakeTTS):
-        async def stream(self, text: str) -> AsyncIterator[bytes]:
+        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
             await asyncio.sleep(0.05)  # long enough for the other tab to arrive
             async for chunk in super().stream(text):
                 yield chunk

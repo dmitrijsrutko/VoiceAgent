@@ -92,8 +92,9 @@ class FakeTTS:
 
     `spoken` is the point of it: the assertion that the agent speaks exactly
     the reply it recorded — not a truncated or re-rendered version — is made
-    against this. The PCM arrives in several chunks, because a consumer that
-    only ever sees one chunk cannot be told apart from a batched one.
+    against this. Audio is produced as the text arrives, in several chunks,
+    because a consumer that only ever sees one chunk after all of the text
+    cannot be told apart from a batched one.
     """
 
     def __init__(self, fail: bool = False, fail_after: int | None = None) -> None:
@@ -103,17 +104,32 @@ class FakeTTS:
         self.fail_after = fail_after
         """Raise after this many chunks: a synthesis that dies mid-reply."""
         self.spoken: list[str] = []
+        """The whole text of each synthesis, as far as it was read."""
+        self.active = 0
+        """Syntheses still running — one outliving its turn keeps billing."""
 
-    async def stream(self, text: str) -> AsyncIterator[bytes]:
-        self.spoken.append(text)
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+        index = len(self.spoken)
+        self.spoken.append("")
         if self.fail:
             raise ProviderError("synthesizer exploded")
-        pcm = pcm_for(text)
-        chunks = [pcm[i : i + 4] for i in range(0, len(pcm), 4)]
-        for index, chunk in enumerate(chunks):
-            if self.fail_after is not None and index == self.fail_after:
-                raise ProviderError("synthesizer exploded mid-reply")
-            yield chunk
+        self.active += 1
+        try:
+            pending = b""
+            sent = 0
+            async for fragment in text:
+                self.spoken[index] += fragment
+                pending += fragment.encode()
+                while len(pending) >= 4:
+                    if self.fail_after is not None and sent == self.fail_after:
+                        raise ProviderError("synthesizer exploded mid-reply")
+                    yield pending[:4]
+                    pending = pending[4:]
+                    sent += 1
+            if pending:
+                yield pending + b"\x00" * (len(pending) % 2)
+        finally:
+            self.active -= 1
 
     async def list_voices(self) -> list[Voice]:
         return [Voice(id="fake-voice-1", name="Fake", usable=True)]

@@ -10,6 +10,7 @@ cancellable, which is the thing interruption will need.
 
 import asyncio
 import contextlib
+import logging
 
 from voice_agent.channel import Channel
 from voice_agent.conversation import Conversation
@@ -20,6 +21,8 @@ from voice_agent.stt import STT
 from voice_agent.tts import TTS
 from voice_agent.turn import run_turn
 from voice_agent.warming import Warmer
+
+logger = logging.getLogger(__name__)
 
 EXIT_COMMANDS = frozenset({"exit", "quit", "bye", "goodbye"})
 """Typing or saying any of these ends the conversation. Matched on the whole
@@ -135,8 +138,16 @@ class Session:
         for turn in turns:
             turn.cancel()
         for turn in turns:
-            with contextlib.suppress(asyncio.CancelledError):
+            try:
                 await turn
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                # A turn cancelled because the socket closed can end with the
+                # socket's own error instead: its write lost the race with the
+                # receive loop noticing. Re-raised, it aborted the rest of the
+                # cleanup — the turns after it, and any guess still billing.
+                logger.info("a turn ended with %r as it was cancelled", exc)
 
     async def end(self) -> None:
         self.conversation.end()

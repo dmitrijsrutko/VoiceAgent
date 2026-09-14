@@ -47,13 +47,21 @@ class Voice:
     distinction that cost an afternoon in chapter 2."""
 
 
-class TTS(Protocol):
-    """Text in, a stream of speech out.
+async def once(text: str) -> AsyncIterator[str]:
+    """A text that is already whole, as the stream `TTS.stream` takes."""
+    yield text
 
-    The whole text still goes in at once: this interface streams the *output*
-    only. Every chunk is PCM in the format above and holds whole samples, so a
-    consumer may play each one the moment it arrives. Streaming the *input* —
-    speaking a reply while it is still being written — is a later chapter.
+
+class TTS(Protocol):
+    """A stream of text in, a stream of speech out.
+
+    Both ends stream. Text is handed over as the reasoning engine writes it, in
+    fragments of no particular shape — half a word, a comma, a sentence — and
+    the backend decides when it has enough to say something aloud. Every chunk
+    out is PCM in the format above and holds whole samples, so a consumer may
+    play each one the moment it arrives.
+
+    A blank text is spoken as nothing: no chunks, and no error.
     """
 
     @property
@@ -62,7 +70,7 @@ class TTS(Protocol):
     @property
     def voice(self) -> str: ...
 
-    def stream(self, text: str) -> AsyncIterator[bytes]:
+    def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
         """Raises `ProviderError` — possibly after some chunks have already
         been yielded, which a consumer that has started playing must handle."""
         ...

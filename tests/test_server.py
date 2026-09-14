@@ -1,11 +1,17 @@
 """End-to-end tests over a real WebSocket; only the provider is faked."""
 
+import asyncio
+from collections.abc import AsyncIterator, Sequence
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
 from voice_agent.config import load_system_prompt
+from voice_agent.conversation import Message
+from voice_agent.errors import ProviderError
+from voice_agent.llm.base import Usage
 from voice_agent.server import create_app
 from voice_agent.session import is_exit_command
 from voice_agent.sessions import SessionStore
@@ -35,15 +41,24 @@ def start(client: TestClient) -> str:
 
 
 def drain(socket: object, audio: bool = True) -> tuple[str, list[dict[str, object]]]:
-    """Collect one reply turn, up to and including the end of its audio."""
+    """Collect one reply turn: its text, and the end of its audio.
+
+    Returns how the audio ended — or the error that ended the turn. The two
+    streams interleave, so the audio can finish before the text does."""
     frames: list[dict[str, object]] = []
     while True:
         frame = receive(socket)
         frames.append(frame)
-        if frame["type"] in ("error", "ended", "audio_error", "audio_end"):
+        if frame["type"] in ("error", "ended"):
             return str(frame["type"]), frames
-        if frame["type"] == "reply_end" and not audio:
+        kinds = [f["type"] for f in frames]
+        if "reply_end" not in kinds:
+            continue
+        if not audio:
             return "reply_end", frames
+        ends = [kind for kind in kinds if kind in ("audio_end", "audio_error")]
+        if ends:
+            return str(ends[-1]), frames
 
 
 def spoken_bytes(frames: list[dict[str, object]]) -> bytes:
@@ -211,9 +226,7 @@ def test_non_exit_commands(text: str) -> None:
     assert not is_exit_command(text)
 
 
-def test_the_reply_is_spoken_as_a_stream_of_binary_frames_after_its_text(
-    client: TestClient, tts: FakeTTS
-) -> None:
+def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tts: FakeTTS) -> None:
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
@@ -227,25 +240,86 @@ def test_the_reply_is_spoken_as_a_stream_of_binary_frames_after_its_text(
         socket.send_json({"type": "user_message", "text": "say something"})
         kind, frames = drain(socket)
 
+    types = [f["type"] for f in frames]
     audio_bytes = spoken_bytes(frames)
-    opening, closing = frames[4], frames[-1]
+    opening = frames[types.index("audio_start")]
+    closing = frames[types.index("audio_end")]
     assert kind == "audio_end"
     assert opening == {"type": "audio_start", "media_type": MEDIA_TYPE, "sample_rate": 24000}
     assert closing["bytes"] == len(audio_bytes)
     assert closing["seconds"] == len(audio_bytes) / 48_000
     assert isinstance(closing["synthesis_ms"], int)
 
-    # The text arrives first (only the output streams), then the audio in
-    # more than one frame — one frame would be batched synthesis, renamed.
-    types = [f["type"] for f in frames]
-    assert types[:5] == ["reply_start", "delta", "delta", "reply_end", "audio_start"]
-    assert types[-1] == "audio_end"
-    assert types.count("audio_bytes") > 1
-    assert closing["chunks"] == types.count("audio_bytes"), "chunks does not match frames sent"
+    # More than one frame, all inside the stream — one frame would be batched
+    # synthesis, renamed.
+    audio_at = [i for i, t in enumerate(types) if t == "audio_bytes"]
+    assert len(audio_at) > 1
+    assert types.index("audio_start") < audio_at[0] and audio_at[-1] < types.index("audio_end")
+    assert closing["chunks"] == len(audio_at), "chunks does not match frames sent"
 
     # The agent speaks exactly what it recorded — not a re-rendered version.
     assert tts.spoken == ["Sure thing. "]
     assert audio_bytes == pcm_for("Sure thing. ")
+
+
+def test_the_voice_starts_before_the_reply_has_finished_being_written(
+    store: SessionStore, tts: FakeTTS
+) -> None:
+    """The chapter in one assertion. Synthesizing after `reply_end` passes every
+    other test here, and makes the user wait for the whole reply to be written."""
+    words = "one two three four five six seven eight nine ten"
+    client = TestClient(
+        create_app(
+            llm=FakeLLM(replies=[words], pace=0.02), tts=tts, store=store, ears=False, greeting=""
+        )
+    )
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "count"})
+        _, frames = drain(socket)
+
+    types = [f["type"] for f in frames]
+    assert types.index("audio_bytes") < types.index("reply_end"), "speech waited for the reply"
+    assert next(f for f in frames if f["type"] == "audio_end")["audio_before_reply_end"] is True
+    assert spoken_bytes(frames) == pcm_for(words + " ")
+
+
+@pytest.mark.parametrize("voice_fails_first", [False, True])
+def test_a_reply_that_fails_after_speaking_began_closes_its_audio(
+    store: SessionStore, voice_fails_first: bool
+) -> None:
+    """Part of the answer has been heard, so audio is already playing. The page
+    reopens the microphone only when the audio it began is closed — once, even
+    when the voice had already failed and closed it itself."""
+    tts = FakeTTS(fail_after=1) if voice_fails_first else FakeTTS()
+
+    class DyingLLM(FakeLLM):
+        async def stream(
+            self, system: str, messages: Sequence[Message], usage: Usage | None = None
+        ) -> AsyncIterator[str]:
+            for word in ("Riga ", "is ", "the ", "capital "):
+                yield word
+                await asyncio.sleep(0.02)
+            raise ProviderError("connection lost mid-reply")
+
+    client = TestClient(create_app(llm=DyingLLM(), tts=tts, store=store, ears=False, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "tell me"})
+        kind, frames = drain(socket)
+
+    types = [f["type"] for f in frames]
+    assert kind == "error"
+    assert "audio_bytes" in types, "the test did not get as far as speaking"
+    assert "audio_end" in types, "audio that began was never closed"
+    assert types.index("audio_end") < types.index("error")
+    assert types.count("audio_end") == 1
+    assert tts.active == 0, "synthesis outlived the reply it was speaking"
+    assert store.get(key).messages == [], "a failed exchange stayed in the context"
 
 
 def test_a_failed_synthesis_keeps_the_reply_and_degrades_to_text(
@@ -262,7 +336,9 @@ def test_a_failed_synthesis_keeps_the_reply_and_degrades_to_text(
         kind, frames = drain(socket)
 
     assert kind == "audio_error"
-    assert "synthesizer exploded" in str(frames[-1]["message"])
+    assert "synthesizer exploded" in str(
+        next(f for f in frames if f["type"] == "audio_error")["message"]
+    )
     # Announced lazily, so a synthesis that never produced anything leaves no
     # half-open stream for the browser to wait on.
     assert "audio_start" not in [f["type"] for f in frames]
@@ -287,13 +363,19 @@ def test_a_synthesis_that_dies_mid_reply_closes_the_audio_it_began(
         frames = []
         while (frame := receive(socket))["type"] != "audio_error":
             frames.append(frame)
+        # The text streams on regardless; read it to its end so the socket's
+        # close cannot cancel the turn before the reply is recorded.
+        rest = [frame]
+        while "reply_end" not in [f["type"] for f in frames + rest]:
+            rest.append(receive(socket))
 
-    types = [f["type"] for f in frames]
+    types = [f["type"] for f in frames if f["type"] != "reply_end"]
     # What was sent is closed and accounted for, then the failure is reported.
     assert "audio_end" in types, "audio that began was never closed"
     assert types[-1] == "audio_end", "the error was reported before the audio was closed"
     assert types.count("audio_bytes") == 2
-    assert frames[-1]["bytes"] == len(spoken_bytes(frames)) == 8
+    closing = next(f for f in frames if f["type"] == "audio_end")
+    assert closing["bytes"] == len(spoken_bytes(frames)) == 8
     assert [m.content for m in store.get(key).messages] == ["say something", "Sure thing. "]
 
 
@@ -372,7 +454,8 @@ def test_an_empty_reply_reports_its_whole_duration_as_time_to_first_token(
     reply_end = next(f for f in frames if f["type"] == "reply_end")
     assert reply_end["chars"] == 0
     assert reply_end["generation_ms"] == 0
-    assert tts.spoken == [], "silence was sent to the synthesizer"
+    assert "".join(tts.spoken) == "", "silence was sent to the synthesizer"
+    assert "audio_start" not in [f["type"] for f in frames], "silence was announced as speech"
 
 
 def test_the_system_prompt_tells_the_agent_to_match_the_users_language() -> None:
@@ -393,7 +476,6 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     made. Counting the full length from when synthesis *ends* would keep the
     user's silence uncounted for the time already spent playing."""
     import time
-    from collections.abc import AsyncIterator
 
     from voice_agent import turn
 
@@ -401,7 +483,7 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
 
     class OneSecondTTS(FakeTTS):
-        async def stream(self, text: str) -> AsyncIterator[bytes]:
+        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
             yield b"\x00" * 24_000  # half a second
             clock[0] += 0.3  # the provider is slow with the rest
             yield b"\x00" * 24_000
@@ -411,6 +493,9 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
 
         async def send_bytes(self, data: bytes) -> None: ...
 
-    left = await turn.speak(Sink(), OneSecondTTS(), "hello", clock[0])  # type: ignore[arg-type]
+    speech = turn.Speech(Sink(), OneSecondTTS(), clock[0])  # type: ignore[arg-type]
+    speech.say("hello")
+    speech.finish()
+    left = await speech.done()
 
     assert left == pytest.approx(0.7), "a 1 s reply, 0.3 s into playing it"
