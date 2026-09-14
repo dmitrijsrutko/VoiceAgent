@@ -84,15 +84,26 @@ export class PcmQueue {
 // a message back to the page; `rate` is the context's sample rate.
 //
 // Page -> here:  start {stream} · chunk {stream, samples} · end {stream} · drop {stream}
+//                stop {stream}
 // Here -> page:  playing {stream} once audio is audible · finished {stream, gaps, gapMs}
+//                stopped {stream, played} — samples played, or null if it had already finished
 export function createPlayback(post, rate) {
-  let stream = null;  // { id, queue, playing }
+  let stream = null;  // { id, queue, playing, played }
 
   return {
     message(msg) {
       if (msg.type === "start") {
         // A new stream replaces whatever was playing, immediately.
-        stream = { id: msg.stream, queue: new PcmQueue(), playing: false };
+        stream = { id: msg.stream, queue: new PcmQueue(), playing: false, played: 0 };
+        return;
+      }
+      if (msg.type === "stop") {
+        // Always answered, even for a stream this thread has already finished:
+        // the page is waiting on it to say how much of the reply was heard, and
+        // "all of it" is an answer too.
+        const current = stream && msg.stream === stream.id;
+        post({ type: "stopped", stream: msg.stream, played: current ? stream.played : null });
+        if (current) stream = null;
         return;
       }
       if (!stream || msg.stream !== stream.id) return;  // for a stream already replaced
@@ -108,6 +119,9 @@ export function createPlayback(post, rate) {
       }
       const s = stream;
       const written = s.queue.pull(out);
+      // Counted here, at the moment samples leave for the speaker — the only
+      // place that knows how much of a reply was actually played.
+      s.played += written;
       if (written > 0 && !s.playing) {
         s.playing = true;
         post({ type: "playing", stream: s.id });

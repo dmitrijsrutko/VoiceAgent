@@ -183,3 +183,28 @@ test("a dropped stream goes silent and reports nothing", () => {
   assert.deepEqual([...out], [0, 0, 0, 0]);
   assert.deepEqual(posted, []);
 });
+
+test("a stopped stream goes silent and says how many samples actually played", () => {
+  // Only this thread knows: what was pulled for the speaker, not what arrived.
+  const { p, posted, render } = processor();
+  p.message({ type: "start", stream: 1 });
+  p.message({ type: "chunk", stream: 1, samples: samples(1, 1, 1, 1, 1, 1) });
+  render();  // 4 of 6 played
+  p.message({ type: "stop", stream: 1 });
+  const out = Float32Array.from([9, 9, 9, 9]);
+  p.process(out);
+
+  assert.deepEqual([...out], [0, 0, 0, 0]);
+  assert.deepEqual(posted.at(-1), { type: "stopped", stream: 1, played: 4 });
+});
+
+test("stopping a stream that already finished still answers, with nothing to cut", () => {
+  const { p, posted, render } = processor();
+  p.message({ type: "start", stream: 1 });
+  p.message({ type: "chunk", stream: 1, samples: samples(1, 1) });
+  p.message({ type: "end", stream: 1 });
+  render(2);
+  p.message({ type: "stop", stream: 1 });
+
+  assert.deepEqual(posted.at(-1), { type: "stopped", stream: 1, played: null });
+});

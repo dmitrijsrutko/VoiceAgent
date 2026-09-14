@@ -35,6 +35,7 @@ export function createPlayer({
   let rate = 24000;        // the voice's PCM rate, as announced in `ready`
   let speech = null;       // the reply currently streaming in / playing, if any
   let streams = 0;
+  const stopping = new Map();  // stream id -> callback waiting to hear how much played
 
   function context() {
     // At the voice's own rate, not the device's: the worklet then plays the
@@ -66,6 +67,14 @@ export function createPlayer({
   }
 
   function receive(msg) {
+    if (msg.type === "stopped") {
+      // Answered by stream id, not by `speech`: the stream was cleared when the
+      // stop was asked for, and a `finished` can cross the stop on the way.
+      const report = stopping.get(msg.stream);
+      stopping.delete(msg.stream);
+      report?.(msg.played === null ? null : (msg.played * 1000) / rate);
+      return;
+    }
     // Reports about a stream that has since been replaced or dropped are stale.
     if (!speech || msg.stream !== speech.id) return;
     if (msg.type === "playing") {
@@ -86,6 +95,9 @@ export function createPlayer({
 
     // A gesture: the one moment autoplay is allowed.
     resume() { return context().resume(); },
+
+    // Seconds between a sample leaving the worklet and leaving the speaker.
+    outputLatency() { return output?.outputLatency ?? 0; },
 
     // Resolves once the output is wired. Tests and benchmarks wait on it.
     ready() { context(); return ready; },
@@ -123,6 +135,19 @@ export function createPlayer({
       if (s.sent === 0) finish(s, 0, 0);  // muted, so nothing was queued and nothing will play
       else post({ type: "end", stream: s.id });
       return s.bubble;
+    },
+
+    // The user talked over the agent: silence now, and say how many
+    // milliseconds of the reply had been played — `null` when nothing was
+    // playing, which means whatever was sent was heard in full.
+    stop(report) {
+      const s = speech;
+      if (!s) { report(null); return; }
+      speech = null;
+      onSpeaking(false);
+      if (s.sent === 0) { report(null); return; }  // muted: read, not heard, and read in full
+      stopping.set(s.id, report);
+      post({ type: "stop", stream: s.id });
     },
 
     dropUnheard() {

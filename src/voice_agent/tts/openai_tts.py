@@ -19,7 +19,7 @@ from openai import AsyncOpenAI, OpenAIError
 
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.tts.base import Voice, whole_samples
+from voice_agent.tts.base import AudioChunk, Voice, whole_samples
 
 DEFAULT_VOICE = "alloy"
 DEFAULT_MODEL = "gpt-4o-mini-tts"
@@ -44,6 +44,13 @@ asymmetry with ElevenLabs is exactly why `list_voices` belongs on the backend
 rather than in one shared helper."""
 
 
+async def untimed(data: AsyncIterator[bytes]) -> AsyncIterator[AudioChunk]:
+    """`/audio/speech` says nothing about which words are where, so what an
+    interrupted user heard of this voice can only be estimated."""
+    async for pcm in data:
+        yield AudioChunk(pcm)
+
+
 class OpenAITTS:
     def __init__(
         self,
@@ -56,7 +63,7 @@ class OpenAITTS:
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncOpenAI(api_key=require_env("OPENAI_API_KEY"))
 
-    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         whole = "".join([fragment async for fragment in text])
         if not whole.strip():
             return
@@ -71,7 +78,7 @@ class OpenAITTS:
                 input=whole,
                 response_format=RESPONSE_FORMAT,
             ) as response:
-                async for chunk in whole_samples(response.iter_bytes()):
+                async for chunk in whole_samples(untimed(response.iter_bytes())):
                     yield chunk
         except OpenAIError as exc:
             raise ProviderError(f"openai synthesis failed: {exc}") from exc

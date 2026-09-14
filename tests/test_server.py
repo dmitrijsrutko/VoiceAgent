@@ -15,7 +15,7 @@ from voice_agent.llm.base import Usage
 from voice_agent.server import create_app
 from voice_agent.session import is_exit_command
 from voice_agent.sessions import SessionStore
-from voice_agent.tts.base import MEDIA_TYPE
+from voice_agent.tts.base import MEDIA_TYPE, AudioChunk
 
 
 @pytest.fixture
@@ -469,6 +469,12 @@ def test_the_system_prompt_tells_the_agent_to_match_the_users_language() -> None
     assert "greeting is not evidence" in prompt.lower()
 
 
+def test_the_system_prompt_says_what_a_cut_off_reply_means() -> None:
+    """The history marks an interrupted reply only by where it stops, so the
+    model has to be told what that means."""
+    assert "stops mid-sentence is where you were interrupted" in load_system_prompt()
+
+
 async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -483,10 +489,10 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
 
     class OneSecondTTS(FakeTTS):
-        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
-            yield b"\x00" * 24_000  # half a second
+        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
+            yield AudioChunk(b"\x00" * 24_000)  # half a second
             clock[0] += 0.3  # the provider is slow with the rest
-            yield b"\x00" * 24_000
+            yield AudioChunk(b"\x00" * 24_000)
 
     class Sink:
         async def send_json(self, payload: dict[str, object]) -> None: ...

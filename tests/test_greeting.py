@@ -11,7 +11,7 @@ from tests.conftest import FakeLLM, FakeTTS, pcm_for, receive
 from voice_agent import greeting as greeting_module
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
-from voice_agent.tts.base import MEDIA_TYPE
+from voice_agent.tts.base import MEDIA_TYPE, AudioChunk
 
 HELLO = "Hi, I'm a voice agent."
 
@@ -204,7 +204,7 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     from voice_agent.greeting import Greeting
 
     class SlowTTS(FakeTTS):
-        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
             await asyncio.sleep(0.05)  # long enough for the other tab to arrive
             async for chunk in super().stream(text):
                 yield chunk

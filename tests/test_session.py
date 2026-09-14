@@ -102,7 +102,10 @@ async def test_closing_mid_reply_stops_generating() -> None:
 
 async def test_no_guess_is_made_while_a_turn_is_running() -> None:
     """The running turn's reply is not in the history yet, so a guess made
-    during it would be adopted as an answer to the wrong conversation."""
+    during it would be adopted as an answer to the wrong conversation.
+
+    Since Chapter 8 the second commit also interrupts the first reply: with no
+    voice, what was on screen is kept, marked as interrupted."""
     llm = FakeLLM(replies=["Riga is the capital of Latvia", "About 600,000."], pace=0.1)
     stt = FakeSTT(
         script=[
@@ -124,6 +127,10 @@ async def test_no_guess_is_made_while_a_turn_is_running() -> None:
     assert len(llm.seen) == 2
     assert [m.role for m in llm.seen[1]] == ["user", "assistant", "user"]
     assert not any(f.get("speculated") for f in channel.frames if f["type"] == "reply_end")
+    assert [f.get("interrupted", False) for f in channel.frames if f["type"] == "reply_end"] == [
+        True,
+        False,
+    ]
 
 
 async def test_ending_mid_sentence_stops_the_voice_too() -> None:
@@ -207,3 +214,33 @@ async def test_a_turn_that_fails_while_being_cancelled_does_not_abort_closing() 
 
     assert llm.active == 0
     assert all(turn.done() for turn in session._turns), "a turn was left running"
+
+
+class DisconnectingChannel(RecordingChannel):
+    """A socket the browser closed: the next audio write fails."""
+
+    async def send_bytes(self, data: bytes) -> None:
+        raise WebSocketDisconnect(code=1006)
+
+
+async def test_a_turn_that_dies_on_a_closed_socket_is_not_an_unretrieved_traceback() -> None:
+    """Seen live: the page closed while a reply was still speaking. The turn
+    failed on its next audio write before `close()` could cancel it, and asyncio
+    printed "Task exception was never retrieved" for it."""
+    import gc
+
+    unretrieved: list[dict[str, Any]] = []
+    loop = asyncio.get_running_loop()
+    loop.set_exception_handler(lambda _, context: unretrieved.append(context))
+    try:
+        channel = DisconnectingChannel()
+        session = Session(channel, Conversation(id="t"), FakeLLM(), FakeTTS(), "system", None)  # type: ignore[arg-type]
+        await session.submit("hello")
+        await asyncio.wait(set(session._turns), timeout=WAIT_TIMEOUT)
+        del session
+        gc.collect()
+        await asyncio.sleep(0)
+    finally:
+        loop.set_exception_handler(None)
+
+    assert not unretrieved, unretrieved[0].get("message")

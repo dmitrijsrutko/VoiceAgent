@@ -308,8 +308,8 @@ def test_the_session_cap_stops_even_a_talkative_room(
 def test_the_agent_talking_does_not_count_against_the_user(
     store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """The browser stops sending audio while the agent replies, so no
-    transcript can arrive. An unpaused timer would blame the user for that.
+    """The user is not expected to speak while the agent replies. An unpaused
+    timer would blame them for the agent talking.
 
     Asserted *after* the turn rather than during it: an expiry that fires
     mid-turn cannot announce itself until the turn releases, so looking only at
@@ -336,9 +336,12 @@ def test_the_agent_talking_does_not_count_against_the_user(
         while receive(socket)["type"] != "audio_end":
             pass  # through the reply's audio, which the turn also covers
 
-        # Still listening: the next frame is speech, not an expiry notice.
+        # Still listening: the next frame is speech, not an expiry notice. That
+        # speech is over a reply the browser never said had finished, so it
+        # also interrupts it — announced before the words themselves.
         socket.send_bytes(FRAME)
-        following = text_frame(socket)
+        while (following := text_frame(socket))["type"] == "interrupt":
+            pass
 
     assert following["type"] == "transcript", f"listening expired during the turn: {following}"
 

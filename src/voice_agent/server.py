@@ -10,14 +10,15 @@ by the time a turn begins nothing downstream knows which it was — speech
 becomes text at the edge, and the rest of the pipeline is unchanged from the
 chapter that had no ears.
 
-It is deliberately **half-duplex**: the browser stops sending microphone audio
-while the agent is speaking, so the agent cannot transcribe its own voice.
-Removing that restriction is what the barge-in chapter is for.
+It is **full-duplex**: the browser keeps sending microphone audio while the
+agent speaks, and the user can talk over it. The browser's echo cancellation is
+what keeps the agent from hearing, and interrupting, its own voice.
 """
 
 import contextlib
 import json
 import logging
+import math
 import os
 from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
@@ -164,7 +165,7 @@ def create_app(
             }
         )
 
-        await opening.deliver(channel, conversation)
+        session.voiced(await opening.deliver(channel, conversation))
 
         try:
             while not conversation.ended:
@@ -193,12 +194,10 @@ async def handle_text(channel: Channel, session: Session, raw: str) -> None:
         return
 
     if kind == "playback":
-        # The browser is muted while it plays the reply (half-duplex), so no
-        # transcript can arrive for however long the audio lasts — which for a
-        # long answer is far more than the idle window. Only the browser knows
-        # when playback actually ends.
-        if session.mic is not None:
-            session.mic.hold("playback", bool(payload.get("active")))
+        # The user is not expected to speak for however long the audio lasts —
+        # which for a long answer is far more than the idle window — and only
+        # the browser knows when playback actually ends.
+        session.playback(bool(payload.get("active")))
         # Chunks that arrived after the previous one had finished playing. Only
         # the browser can see them, and a stutter nobody logs is a stutter
         # nobody fixes. Coerced first: these are client-supplied, and a string
@@ -209,6 +208,18 @@ async def handle_text(channel: Channel, session: Session, raw: str) -> None:
             return
         if gaps:
             logger.info("playback stuttered: %d gaps, %d ms of silence", gaps, gap_ms)
+        return
+
+    if kind == "interrupted":
+        # Client-supplied, so coerced: anything but a finite, non-negative
+        # number of milliseconds means "nothing was playing".
+        played, interrupt_id = payload.get("played_ms"), payload.get("id")
+        valid = isinstance(played, int | float) and not isinstance(played, bool)
+        if isinstance(interrupt_id, int) and not isinstance(interrupt_id, bool):
+            session.heard(
+                interrupt_id,
+                float(played) if valid and math.isfinite(played) and played >= 0 else None,
+            )
         return
 
     if kind in ("listen_start", "listen_stop"):

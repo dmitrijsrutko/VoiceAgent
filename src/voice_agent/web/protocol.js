@@ -8,6 +8,11 @@ export const listenStart = () => JSON.stringify({ type: "listen_start" });
 
 export const listenStop = () => JSON.stringify({ type: "listen_stop" });
 
+// How much of an interrupted reply was played, in milliseconds; null if none was
+// playing. Carries the interrupt's id, so a late answer cannot settle the next one.
+export const interrupted = (id, playedMs) =>
+  JSON.stringify({ type: "interrupted", id, played_ms: playedMs });
+
 // `report` carries playback telemetry (gaps) when playback ends.
 export const playback = (active, report = {}) =>
   JSON.stringify({ type: "playback", active, ...report });

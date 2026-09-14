@@ -3,9 +3,10 @@
 
 import { buildMic, warmUpMicPermission } from "./mic.js";
 import { createPlayer } from "./player.js";
-import { listenStart, listenStop, playback, userMessage } from "./protocol.js";
+import { interrupted, listenStart, listenStop, playback, userMessage } from "./protocol.js";
 import {
-  add, form, input, listen, meta, ms, mute, note, paintListening as paint, setEnabled, status, stick,
+  add, dimUnheard, form, input, listen, meta, ms, mute, note, paintListening as paint, setEnabled,
+  status, stick,
 } from "./ui.js";
 
 const key = location.pathname.split("/").pop();
@@ -14,7 +15,8 @@ let bubble = null;         // the agent reply still being written, if any
 let reply = null;          // the latest agent bubble — whatever audio arrives is its voice
 let live = null;           // the user bubble being transcribed into, if any
 let listening = false;
-let speaking = false;      // half-duplex gate: don't let the agent hear itself
+let speaking = false;      // the agent's voice is audible
+let cut = null;            // the reply the user talked over; its late audio is ignored until the next reply
 let mic = null;            // { context, node, stream } once built
 let sampleRate = 16000;
 
@@ -28,7 +30,7 @@ function setSpeaking(active, report = {}) {
   // Transition-guarded, and the only place `speaking` is assigned. A clip that
   // replaces another fires no `onended` for the one it replaced, so a naive
   // "tell the server on every play" leaks a hold the server never gets back —
-  // and a stuck hold means the microphone is muted forever with nothing said.
+  // and a stuck hold keeps the idle timer suspended with nothing said.
   if (speaking === active) return;
   speaking = active;
   if (ws.readyState === WebSocket.OPEN) ws.send(playback(active, report));
@@ -55,9 +57,10 @@ const player = createPlayer({
 });
 
 function sendFrame(pcm) {
-  // Half-duplex: while the agent is talking, its own voice is reaching this
-  // microphone. Drop those frames rather than transcribing the agent.
-  if (listening && !speaking && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+  // Full duplex: sent while the agent talks too, so the user can talk over it.
+  // The browser's echo cancellation (requested in mic.js) is what keeps the
+  // agent's own voice out of these frames.
+  if (listening && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
 }
 
 async function prepareMic() {
@@ -94,13 +97,18 @@ ws.onmessage = (event) => {
     reply = add(msg.text, "msg agent");
 
   } else if (msg.type === "reply_start") {
+    cut = null;
     bubble = reply = add("", "msg agent cursor");
 
   } else if (msg.type === "delta") {
     if (bubble) stick(() => { bubble.textContent += msg.text; });
 
   } else if (msg.type === "reply_end") {
-    if (bubble) {
+    if (bubble && msg.interrupted) {
+      bubble.classList.remove("cursor");
+      if (!bubble.textContent) bubble.remove();
+      else if (!cut) note(bubble, "✋ interrupted before it was spoken");
+    } else if (bubble) {
       bubble.classList.remove("cursor");
       // Tokens only when the provider reported them: a missing count shown as
       // "0 tokens" would read as a measurement.
@@ -123,7 +131,27 @@ ws.onmessage = (event) => {
     bubble = null;
     setEnabled(true);
 
+  } else if (msg.type === "interrupt") {
+    // Silence first; everything else can wait. Frames carry no reply id, so
+    // audio of this reply still in flight is ignored until the next one starts.
+    cut = reply;
+    player.stop((playedMs) => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      // Less what is still on its way to the speaker: pulled from the queue is
+      // not the same as out of the speaker.
+      const latency = (player.outputLatency?.() ?? 0) * 1000;
+      ws.send(interrupted(msg.id, playedMs === null ? null : Math.max(0, Math.round(playedMs - latency))));
+    });
+
+  } else if (msg.type === "truncated") {
+    if (cut) {
+      dimUnheard(cut, msg.heard_chars);
+      const guess = msg.estimated ? " (estimated)" : msg.timed ? "" : " (approximate)";
+      note(cut, `✋ interrupted after ${ms(msg.played_ms)} · heard ${msg.heard_chars} of ${msg.chars} chars${guess} · stopped ${ms(msg.stop_ms)} after the interruption was noticed`);
+    }
+
   } else if (msg.type === "audio_start") {
+    if (cut) return;  // the rest of a reply the user talked over
     // Speech streams while the reply is still being written, so this can come
     // before `reply_end` — the text keeps arriving into the same bubble.
     player.start(reply);

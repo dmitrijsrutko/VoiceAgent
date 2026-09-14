@@ -60,8 +60,7 @@ for the full log and the reasoning behind each step.
   borrowed from ElevenLabs Scribe's own VAD — zero VAD code, and a cost
   recorded in the CHANGELOG. The agent is **bi-capable**: typing and speaking
   enter through the same door, and nothing downstream knows which was used.
-  Half-duplex on purpose — the mic mutes while the agent speaks, and removing
-  that is the barge-in chapter.
+  Half-duplex on purpose — the mic muted while the agent spoke, until Chapter 8.
 - **Chapter 4 — acting before the turn ends.** Partial transcripts feed a
   LocalAgreement filter; text the recognizer has said twice is treated as
   settled, and the reasoning engine is prefilled on it while you are still
@@ -97,6 +96,12 @@ for the full log and the reasoning behind each step.
   live, a 35-second answer starts speaking 460-800 ms before the reply has
   finished, and first audio fell from 1.7-1.9 s to 1.0-1.2 s (measured with a 50-char first piece, since raised to 120 for a natural first phrase). Its `auto_mode`,
   fed tokens, voiced every token as a separate utterance, which is why it is off.
+- **Chapter 8 — barge-in.** Talk over the agent and it stops. The mic stays
+  open while it speaks, the first recognized word stops the voice and any reply
+  still being written, and the history keeps only what you heard — worked out
+  from ElevenLabs' per-character timing and how much audio the page played.
+  Measured live, ~0.85–1.6 s from starting to speak
+  to the stop, all of it recognizer lag: the baseline a local VAD has to beat.
 
 ## Requirements
 
@@ -163,8 +168,9 @@ prompts/
 src/voice_agent/
   cli.py                  chapter 1: `uv run voice-agent` (entry point)
   server.py               chapter 1: routes, the socket's receive loop
-  session.py              one connected conversation: starts, queues and cancels turns
-  turn.py                 chapter 1/2/6/7: one exchange — the reply spoken while it is written
+  session.py              one connected conversation: starts, interrupts and cancels turns
+  turn.py                 chapter 1/2/6/7/8: one exchange — the reply spoken while it is written
+  heard.py                chapter 8: what the user actually heard of an interrupted reply
   channel.py              serialized writes to the socket, shared audio framing
   mic.py                  chapter 3: one listening session — transcripts, expiry, keepalive
   greeting.py             chapter 2: the opening line, synthesised once and cached on disk
@@ -179,7 +185,7 @@ src/voice_agent/
   web/                    the browser client: native ES modules, no framework, no build step
     index.html            markup and styles; loads app.js as a module
     app.js                wiring: the socket, message handling, shared page state
-    player.js             streaming playback rules: the half-duplex gate, autoplay, replacement (tested in node)
+    player.js             streaming playback rules: stop on interrupt, autoplay, replacement (tested in node)
     playback-worklet.js   the audio-thread queue that plays PCM seamlessly and counts gaps (tested in node)
     mic.js                microphone permission and the capture graph
     capture-worklet.js    the audio-thread processor that emits PCM16 frames
@@ -211,9 +217,9 @@ turn — the order will change as earlier chapters teach us things.
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version: the latency
 arithmetic, the themes behind these chapters, and the alternatives considered.
 
-Barge-in: letting the user interrupt, which means undoing Chapter 3's
-half-duplex gate, and recording what the caller actually *heard* rather than
-what the agent meant to say. Semantic turn detection, to replace the single
+A local voice detector in the page, so barge-in pauses the agent in a few
+hundred milliseconds rather than the recognizer's second, and resumes on a cough.
+Semantic turn detection, to replace the single
 silence threshold and take endpointing back from the vendor — currently 1.3 s
 of a 2.9 s round trip, and not measurable from inside the project.
 Speculative synthesis: the first sentence voiced before the turn commits and

@@ -21,21 +21,49 @@ def pcm_seconds(n_bytes: int) -> float:
     return n_bytes / (SAMPLE_RATE * BYTES_PER_SAMPLE)
 
 
-async def whole_samples(chunks: AsyncIterator[bytes]) -> AsyncIterator[bytes]:
+@dataclass(frozen=True, slots=True)
+class Alignment:
+    """Which characters a stretch of audio voices, and when each one ends.
+
+    `ends_ms[i]` is when the sound of `chars[i]` is over, in milliseconds from
+    the start of the chunk this arrived with. It may reach past that chunk's
+    own audio: ElevenLabs times a whole generated segment on its first message
+    and sends the rest of that segment's audio untimed.
+    """
+
+    chars: str
+    ends_ms: tuple[float, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AudioChunk:
+    """PCM in this module's format, and — where the backend can say — the text
+    it voices. Timing is what makes "what did the user actually hear" answerable
+    after an interruption; a backend without it leaves that to an estimate."""
+
+    pcm: bytes
+    alignment: Alignment | None = None
+
+
+async def whole_samples(chunks: AsyncIterator[AudioChunk]) -> AsyncIterator[AudioChunk]:
     """Re-cut a provider's byte stream so that no chunk splits a sample.
 
     HTTP chunking knows nothing about 16-bit samples, and an odd-length chunk
     is ordinary. Played as it arrives, a split sample shifts every sample after
     it by one byte — the rest of the reply becomes full-scale noise. A trailing
-    odd byte is held back and prepended to the next chunk instead.
+    odd byte is held back and prepended to the next chunk instead; timing that
+    arrives on a chunk too short to send rides on the next one.
     """
     carry = b""
+    pending: Alignment | None = None
     async for chunk in chunks:
-        data = carry + chunk
+        data = carry + chunk.pcm
+        pending = chunk.alignment or pending
         cut = len(data) - len(data) % BYTES_PER_SAMPLE
         carry = data[cut:]
         if cut:
-            yield data[:cut]
+            yield AudioChunk(data[:cut], pending)
+            pending = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,8 +86,9 @@ class TTS(Protocol):
     Both ends stream. Text is handed over as the reasoning engine writes it, in
     fragments of no particular shape — half a word, a comma, a sentence — and
     the backend decides when it has enough to say something aloud. Every chunk
-    out is PCM in the format above and holds whole samples, so a consumer may
-    play each one the moment it arrives.
+    out holds PCM in the format above in whole samples, so a consumer may play
+    each one the moment it arrives, and says which text it voices when the
+    backend knows.
 
     A blank text is spoken as nothing: no chunks, and no error.
     """
@@ -70,7 +99,7 @@ class TTS(Protocol):
     @property
     def voice(self) -> str: ...
 
-    def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         """Raises `ProviderError` — possibly after some chunks have already
         been yielded, which a consumer that has started playing must handle."""
         ...

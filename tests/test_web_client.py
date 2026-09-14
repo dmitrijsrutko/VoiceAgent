@@ -59,6 +59,7 @@ BROWSER_GLOBALS = {
     "Date",
     "Error",
     "Float32Array",
+    "Map",
     "Int16Array",
     "JSON",
     "Math",
@@ -275,14 +276,21 @@ def test_the_capture_pipeline_is_present() -> None:
     assert 'registerProcessor("capture"' in worklet
 
 
-def test_the_half_duplex_gate_is_still_in_the_send_path() -> None:
-    """Without `!speaking` the agent transcribes its own voice."""
+def test_the_microphone_is_sent_while_the_agent_speaks() -> None:
+    """Chapter 8 removed the half-duplex gate: with `!speaking` back in the send
+    path, the user can never be heard over the agent, and barge-in is dead."""
     app = source("app.js")
     send_path = re.search(r"function sendFrame\(.*?\n\}", app, re.DOTALL)
 
     assert send_path, "the microphone send path is gone"
-    assert "!speaking" in send_path.group(0)
-    assert "buildMic(sampleRate, sendFrame)" in app, "the mic sends without the gate"
+    assert "speaking" not in without_comments(send_path.group(0))
+    assert "buildMic(sampleRate, sendFrame)" in app
+
+
+def test_the_microphone_asks_the_browser_to_cancel_the_agent_s_echo() -> None:
+    """Full duplex rests on it: without echo cancellation the recognizer hears
+    the agent's own voice, and the agent interrupts itself."""
+    assert "echoCancellation: true" in source("mic.js")
 
 
 def test_speaking_is_assigned_in_exactly_one_place() -> None:

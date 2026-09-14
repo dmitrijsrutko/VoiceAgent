@@ -95,6 +95,11 @@ the agent not listening. The loop:
   the user).
 - **False positives are the practical problem**: a cough, a door, a dog. Worth
   measuring against real recordings before tuning by intuition.
+- *Built in Chapter 8, with the trigger deliberately naive:* the recognizer's
+  first words stop the agent, measured at 0.85–1.6 s from speech onset — all
+  recognizer lag. What was heard comes from ElevenLabs' per-character
+  alignment and the samples the page actually played. The faster, trigger-happy
+  detector argued for below is still to build.
 - **The subtle part is state, not audio.** Conversation history must record
   *what the caller actually heard* — the truncated utterance — not what the
   agent intended to say. Getting this wrong means every subsequent turn

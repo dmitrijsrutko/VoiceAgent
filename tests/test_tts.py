@@ -14,7 +14,14 @@ from websockets.http11 import Response
 
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.tts import create_tts, elevenlabs_tts
-from voice_agent.tts.base import SAMPLE_RATE, once, pcm_seconds, whole_samples
+from voice_agent.tts.base import (
+    SAMPLE_RATE,
+    Alignment,
+    AudioChunk,
+    once,
+    pcm_seconds,
+    whole_samples,
+)
 from voice_agent.tts.elevenlabs_tts import (
     CHUNK_LENGTH_SCHEDULE,
     DEFAULT_VOICE,
@@ -26,13 +33,13 @@ from voice_agent.tts.openai_tts import RESPONSE_FORMAT, OpenAITTS
 from voice_agent.turn import closing
 
 
-async def chunks_of(*parts: bytes) -> AsyncIterator[bytes]:
+async def chunks_of(*parts: bytes | AudioChunk) -> AsyncIterator[AudioChunk]:
     for part in parts:
-        yield part
+        yield part if isinstance(part, AudioChunk) else AudioChunk(part)
 
 
-async def collect(stream: AsyncIterator[bytes]) -> list[bytes]:
-    return [chunk async for chunk in stream]
+async def collect(stream: AsyncIterator[AudioChunk]) -> list[bytes]:
+    return [chunk.pcm async for chunk in stream]
 
 
 async def test_no_chunk_splits_a_sample() -> None:
@@ -43,6 +50,19 @@ async def test_no_chunk_splits_a_sample() -> None:
     assert all(len(chunk) % 2 == 0 for chunk in out)
     assert b"".join(out) == b"abcdefgh", "a byte was lost or reordered"
     assert b"" not in out, "an empty chunk would announce audio that is not there"
+
+
+async def test_timing_survives_being_re_cut_into_whole_samples() -> None:
+    """Timing on a chunk too short to send must ride on the next one rather
+    than vanish — lost, what the user heard of those words is unknowable."""
+    timing = Alignment("Hi", (40.0, 90.0))
+    out = [
+        chunk async for chunk in whole_samples(chunks_of(AudioChunk(b"a", timing), b"bcd", b"ef"))
+    ]
+
+    assert [chunk.pcm for chunk in out] == [b"abcd", b"ef"]
+    assert out[0].alignment == timing
+    assert all(chunk.alignment is None for chunk in out[1:])
 
 
 def test_pcm_duration_follows_from_its_size() -> None:
@@ -235,8 +255,10 @@ class StreamInput:
             self.closed.set()
 
 
-async def send_audio(connection: ServerConnection, data: bytes) -> None:
-    payload = {"audio": base64.b64encode(data).decode(), "isFinal": None, "alignment": None}
+async def send_audio(
+    connection: ServerConnection, data: bytes, alignment: dict[str, object] | None = None
+) -> None:
+    payload = {"audio": base64.b64encode(data).decode(), "isFinal": None, "alignment": alignment}
     await connection.send(json.dumps(payload))
 
 
@@ -309,7 +331,7 @@ async def test_audio_arrives_while_text_is_still_being_sent(endpoint: Serve) -> 
 
     async for chunk in tts.stream(slow_text()):
         if not finished:
-            heard_before_the_end.append(chunk)
+            heard_before_the_end.append(chunk.pcm)
 
     assert heard_before_the_end == [b"ab"]
 
@@ -446,3 +468,37 @@ async def test_an_openai_connection_lost_mid_stream_is_a_provider_error() -> Non
 
     with pytest.raises(ProviderError, match="interrupted"):
         await collect(OpenAITTS(client=openai_client(create)).stream(once("hello")))  # type: ignore[arg-type]
+
+
+async def test_the_service_s_character_timing_comes_with_the_audio(endpoint: Serve) -> None:
+    """Measured live: `alignment` spells out the text as sent, timed from the
+    start of the audio message it arrives on, and most messages carry none."""
+
+    async def timing(connection: ServerConnection) -> None:
+        async for raw in connection:
+            if json.loads(raw)["text"] == "":
+                timed = {
+                    "chars": ["H", "i", " "],
+                    "charStartTimesMs": [0, 50, 120],
+                    "charDurationsMs": [50, 70, 30],
+                }
+                # What the service also sends, and what must not be read: its
+                # rewritten spelling.
+                await send_audio(connection, b"\x01\x02", timed)
+                await send_audio(connection, b"\x03\x04")
+                await connection.send(json.dumps({"audio": None, "isFinal": True}))
+
+    tts = await endpoint(timing)
+    chunks = [chunk async for chunk in tts.stream(once("Hi "))]
+
+    assert chunks[0].alignment == Alignment("Hi ", (50.0, 120.0, 150.0))
+    assert chunks[1].alignment is None
+
+
+def test_malformed_timing_is_ignored_rather_than_trusted() -> None:
+    assert elevenlabs_tts.alignment(None) is None
+    assert (
+        elevenlabs_tts.alignment({"chars": ["a"], "charStartTimesMs": [], "charDurationsMs": []})
+        is None
+    )
+    assert elevenlabs_tts.alignment({"chars": "ab"}) is None

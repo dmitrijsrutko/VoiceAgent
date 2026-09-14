@@ -26,7 +26,7 @@ from elevenlabs.core import ApiError
 
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.tts.base import Voice, whole_samples
+from voice_agent.tts.base import Alignment, AudioChunk, Voice, whole_samples
 
 HINTS = {
     "paid_plan_required": (
@@ -105,6 +105,32 @@ tokens, it voiced each one as an utterance of its own — "Da · ug · ava" — 
 sentences, which this one does not."""
 
 
+def alignment(raw: object) -> Alignment | None:
+    """The service's character timing, relative to the audio it arrived with.
+
+    `alignment`, not `normalizedAlignment`: measured, the first spells out
+    exactly the text that was sent, while the second rewrites it ("—" as "--",
+    a leading space) and would not match the reply the conversation records.
+    Most audio messages carry none — only the first of each generated segment,
+    timed across the whole segment.
+    """
+    if not isinstance(raw, dict):
+        return None
+    chars, starts, durations = (
+        raw.get("chars"),
+        raw.get("charStartTimesMs"),
+        raw.get("charDurationsMs"),
+    )
+    if not (isinstance(chars, list) and isinstance(starts, list) and isinstance(durations, list)):
+        return None
+    if not chars or not len(chars) == len(starts) == len(durations):
+        return None
+    return Alignment(
+        chars="".join(str(c) for c in chars),
+        ends_ms=tuple(float(s) + float(d) for s, d in zip(starts, durations, strict=True)),
+    )
+
+
 class ElevenLabsTTS:
     def __init__(
         self,
@@ -125,7 +151,7 @@ class ElevenLabsTTS:
             {"model_id": self.model, "output_format": OUTPUT_FORMAT}
         )
 
-    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         async def pump(socket: websockets.ClientConnection) -> None:
             # A single space opens the stream and carries its settings.
             await socket.send(
@@ -174,13 +200,13 @@ class ElevenLabsTTS:
         except (websockets.WebSocketException, OSError) as exc:
             raise ProviderError(f"elevenlabs synthesis interrupted: {exc}") from exc
 
-    async def _audio(self, socket: websockets.ClientConnection) -> AsyncIterator[bytes]:
+    async def _audio(self, socket: websockets.ClientConnection) -> AsyncIterator[AudioChunk]:
         async for raw in socket:
             payload = json.loads(raw)
             if not isinstance(payload, dict):
                 continue
             if audio := payload.get("audio"):
-                yield base64.b64decode(audio)
+                yield AudioChunk(base64.b64decode(audio), alignment(payload.get("alignment")))
             elif "error" in payload or "message" in payload:
                 raise ProviderError(describe(payload, "the stream was refused"))
             if payload.get("isFinal"):

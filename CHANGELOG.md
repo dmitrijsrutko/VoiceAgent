@@ -14,6 +14,182 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 8 — Barge-in: the user can talk over the agent, and the history keeps what was heard
+
+Since Chapter 3 the agent was half-duplex. The page dropped microphone audio for
+as long as a reply played, so the only way to stop a 30-second answer was to
+wait for it to end. Chapter 7 made that worse by starting to speak sooner. This
+chapter removes the gate. The user talks over the agent, the agent stops, and
+the conversation records the part of the reply the user **heard**, not the part
+the model wrote.
+
+That last part is the hard one, and it is not audio work. The model writes
+15–45× faster than the voice speaks, so when someone interrupts, the whole reply
+usually already exists and is already in the history. Left there, every later
+turn reasons about sentences nobody heard. The answer needs two facts held in
+two places. Only the browser knows how much audio it played. Only the server
+knows which characters that audio was, from the per-character timing ElevenLabs
+sends with its audio and Chapter 7 threw away.
+
+**What changed**
+
+- **One rule, in `session.py`:** a new turn from the user stops whatever the
+  agent is still doing with the last one — writing it, speaking it, or both.
+  `interrupt()` is reached three ways:
+  - a partial transcript with words in it while the agent is audible (the early
+    trigger, from a new `Mic` callback);
+  - a typed message;
+  - a committed transcript while the agent is still thinking. That cancels the
+    reply; the user's earlier question stays, so two user messages in a row.
+- **`interrupt()` sends `interrupt {id}` to the page first**, then stops the
+  turns in flight, then cuts the reply down in the background. The page reports
+  back `interrupted {id, played_ms}`; an answer with another id is ignored, so
+  one arriving after its own timeout cannot settle the next interruption. The next turn waits for the cut, up to 1 s,
+  before its question joins the history. Without an answer it falls back to the
+  server's own estimate and says so (`estimated`).
+- **`heard.py` (new):** `Spoken` records what a stretch of speech voices and when
+  each character ends. `heard()` returns the text whose sound had ended, cut
+  back to the last whole word — judged against the written reply, because
+  speech can stop mid-word ("The Millennium Priz" was one live segment). The
+  reply becomes just those words, or is removed if not a word of it was heard,
+  or is left alone if the page says nothing was playing any more. `Conversation.replace` rewrites a message by
+  identity.
+- **`tts/base.py`:** `TTS.stream` yields `AudioChunk(pcm, alignment)` instead of
+  bytes. `elevenlabs_tts.py` fills `alignment`; OpenAI has none.
+  `whole_samples` carries timing across a re-cut.
+- **A turn is one record** (`Turn`: its text, voice, interruption, the cut it
+  waits for, and whether it has started). A turn already running is cancelled;
+  one still waiting for the turn before it is not — it records its question
+  and returns. Cancelling it there, outside `run_turn`, lost the question.
+- **`turn.py`:** a turn cancelled *because it was talked over* keeps its question
+  and records what was written, then returns normally (`Interruption`,
+  `uncancel()`). Cancelled because the conversation ended or the socket closed,
+  it still drops the question, as before. `reply_end` gains `interrupted`.
+- **The greeting** returns its `Spoken`, so it can be interrupted too.
+- **The page:**
+  - Microphone frames are sent while the agent speaks; the browser's echo
+    cancellation (already requested) is what keeps the agent's voice out.
+  - On `interrupt`, `player.stop()` silences the reply and the worklet reports
+    the samples it actually pulled for the speaker, less `outputLatency`.
+    Leftover audio of that reply is ignored until the next `reply_start`.
+  - On `truncated`, the unheard part of the reply is dimmed, with a note:
+    played time, heard vs written characters, and time to stop.
+
+**Design decisions**
+
+- **The trigger is the recognizer's words, not our own VAD.** Scribe realtime
+  sends no speech-started event (checked against its SDK message types) and the
+  TTS socket knows nothing about the microphone, so the options were Scribe's
+  first partial or a voice detector of our own in the page. Words are slow
+  (below) but ignore coughs and doors, and need no new component. A fast local
+  VAD that pauses first and lets words confirm is the next increment; it also
+  gives turn detection the speech-end timestamp this server cannot see today.
+- **Any word interrupts**, including "mm-hmm". One rule to measure before
+  filtering by intuition.
+- **Words while the agent is still thinking do not cancel it; a commit does.**
+  A partial can be noise that never commits, and cancelling on it would leave
+  the user with no answer at all.
+- **Timing from ElevenLabs, not a proportional guess.** Measured live with one
+  probe: `alignment` spells out exactly the text sent (`normalizedAlignment`
+  rewrites it: "—" as "--", a leading space). It arrives on the first audio
+  message of each generated segment, timed from that message's start, and
+  covers the untimed messages after it. A proportional estimate is still used
+  where there is no timing — OpenAI and the cached greeting — and is crude:
+  speaking rate is not constant.
+- **No marker in the reply; the system prompt explains instead.** The first
+  version appended `… [interrupted]` to the cut reply, so the model would know
+  the rest went unheard. Listened to live, after two interruptions DeepSeek
+  began ending its *own* replies with that marker — breaking a story off early
+  and having the voice say "interrupted" where nobody had. A reply's text is
+  the model's own past output and it imitates it. The history now holds only
+  the heard words (as OpenAI Realtime's truncation and LiveKit do), and
+  `prompts/system_prompt.md` gains one rule: a reply that stops mid-sentence is
+  where the user cut in. With nothing heard, the reply is removed. Replaying
+  that live conversation to DeepSeek five times each: with the marker, 4 of 5
+  replies ended "… [interrupted]" of their own accord; with heard words and the
+  prompt rule, 0 of 5.
+- **The page is told before the reply is stopped.** Cancelling the synthesizer
+  can wait up to 1 s for its socket to close, and silence is the part the user
+  notices.
+- **"Audible" ends only when the page says so** (`playback` false after true),
+  or on interruption. A reply the page finished long ago can therefore still
+  draw an `interrupt`; the page answers "nothing playing" and nothing is cut.
+  A false positive costs one message; a false negative would talk over the user.
+- **Cost:** Scribe now also bills for the audio sent while the agent speaks.
+
+**Latency impact**
+
+Live: a scripted browser against the real server (DeepSeek, ElevenLabs flash,
+Scribe). It asks for a ~40-second answer and, 2.5 s or 5 s into playback, streams
+a pre-recorded "Wait, stop. Tell me about Tallinn instead." as microphone audio.
+Measured from the recorded speech's first voiced sample:
+
+| Run | Speech onset → `interrupt` sent | Of which the server's own reaction |
+| --- | --- | --- |
+| 1–5 | **850, 1161, 1249, 1643 ms** (one run's figure was not captured) | 0 ms (`stop_ms`) |
+
+- **All of it is the recognizer.** The interrupt goes out in the same moment the
+  first partial with words arrives. Up to ~1.6 s of the agent talking over the
+  user is well past the ~200 ms a human expects; it is the baseline the local
+  VAD chapter has to beat.
+- **What was heard, live:** 3.8 s in, the history kept "Riga was founded in
+  1201 by Bishop Albert, a German cleric who" (62 of 611
+  characters); 5.9 s in, 102 of 592. Both read as what that much speech says.
+- **Not measured:** time from `interrupt` to silence in a real browser, and
+  self-interruption on laptop speakers. The scripted client has no speaker, so
+  it cannot hear its own echo.
+
+**Deliberately not done**
+
+- A local VAD that pauses on speech and resumes on a false alarm — next.
+- An echo guard that ignores partials matching the agent's own words: only if
+  self-interruption is observed on speakers.
+- Backchannel filtering ("mm-hmm" does not interrupt).
+- Anything about billing for text sent to the synthesizer but never played.
+
+**Verification**
+
+- `uv run verify` passes: ruff, format, mypy strict, 250 tests; the page's node
+  tests pass (31).
+- New tests:
+  - Words over the agent stop it: the reply and the voice are no longer being
+    made, the question stays, the answer becomes the heard words and
+    nothing more, and `interrupt` goes out before `reply_end`.
+  - The system prompt says what a reply that stops mid-sentence means.
+  - Nothing heard removes the answer; nothing playing keeps it whole; words
+    after the page reported the end are not an interruption.
+  - Words while thinking do not cancel; a new question while thinking replaces
+    the answer and keeps both questions.
+  - A typed message interrupts, and the next turn's context holds the cut reply.
+  - A page that never answers falls back to an estimate; ending mid-settle still
+    ends last; no guess is started over the agent's voice; an interrupted
+    greeting is cut by estimate.
+  - A turn overtaken before it began keeps its question; a late answer to one
+    interruption does not settle the next.
+  - `heard()`: part of a word is not heard, including a word the voice stopped
+    halfway through; punctuation stays; segments are offset by the audio
+    before them. The adapter reads `alignment` and ignores
+    malformed timing. The worklet reports samples played on stop, and answers
+    for a stream that already finished; the player releases the gate on stop.
+- **Sixteen sabotages, all caught** (one only after its test was fixed: it had
+  been passing on the running-turn guard instead). They are: no truncation; a
+  running turn not cancelled; a waiting turn cancelled; the page's answer
+  matched without its id; the word boundary judged on voiced text; `uncancel` skipped; partials never interrupting; the next
+  turn not waiting for the cut; partials during thinking cancelling; the page
+  told after the stop; a partial word counted as heard; segment timing not
+  offset; the half-duplex gate restored; the worklet counting nothing; a guess
+  over the agent's voice; timing lost in a re-cut.
+- A pre-commit review found three of those by reproducing them — the lost
+  question, the half word (a cut reply ending "one two thre") and the unmatched
+  answer — before any test existed for them.
+- Live, as above: two runs at each of two interruption points, then one more
+  after the review fixes, with the server log checked each time. Clean after
+  the fix below.
+
+**Fixes**
+
+- A turn that dies on its own on a closed socket is logged, not printed as "Task exception was never retrieved" (seen live, pre-existing since Chapter 7).
+
 ## Chapter 7 — Streaming synthesis input: the voice starts while the reply is still being written
 
 Chapter 6 streamed synthesis *output*, but the text still went in whole, after

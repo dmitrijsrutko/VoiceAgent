@@ -45,10 +45,23 @@ export function setEnabled(on) {
   if (on) input.focus();
 }
 
+// Split a bubble's text at what was heard, dimming the rest. The bubble's
+// telemetry notes are elements after the text and are left where they are.
+export function dimUnheard(el, heardChars) {
+  const text = el.firstChild;
+  if (!text || text.nodeType !== Node.TEXT_NODE || heardChars >= text.data.length) return;
+  const rest = text.splitText(heardChars);
+  const span = document.createElement("span");
+  span.className = "unheard";
+  span.title = "not heard: you interrupted";
+  el.replaceChild(span, rest);
+  span.appendChild(rest);
+}
+
 export function ms(v) { return v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }
 
 export function paintListening(listening, speaking) {
   listen.classList.toggle("on", listening);
   listen.textContent = listening ? "⏹ stop" : "🎤 listen";
-  status.textContent = !listening ? "" : speaking ? "· muted while speaking" : "· listening";
+  status.textContent = !listening ? "" : speaking ? "· listening — talk to interrupt" : "· listening";
 }

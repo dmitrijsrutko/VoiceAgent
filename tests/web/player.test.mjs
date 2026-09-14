@@ -240,3 +240,47 @@ test("a reply's samples are counted even though posting transfers them away", as
   assert.equal(lastSpeaking(h), false);
   assert.equal(h.finished[0].sent, 480);
 });
+
+test("stopping silences the reply, releases the gate, and reports how much was played", async () => {
+  const h = harness();
+  await h.player.ready();
+  h.player.start("reply");
+  h.player.chunk(CHUNK());  // 20 ms
+  h.render(2);              // 256 samples ≈ 10.7 ms played
+  assert.equal(lastSpeaking(h), true);
+
+  const reports = [];
+  h.player.stop((ms) => reports.push(ms));
+  h.player.chunk(CHUNK());  // the rest of the reply, still arriving
+  h.render(8);
+
+  assert.equal(lastSpeaking(h), false, "the gate stayed closed after the user interrupted");
+  assert.equal(reports.length, 1);
+  assert.ok(Math.abs(reports[0] - (256 * 1000) / 24000) < 0.01, `reported ${reports[0]} ms`);
+  assert.equal(h.finished.length, 0, "a stopped reply reported itself finished");
+});
+
+test("stopping with nothing playing answers at once: nothing to cut", () => {
+  const h = harness();
+  const reports = [];
+  h.player.stop((ms) => reports.push(ms));
+
+  assert.deepEqual(reports, [null]);
+});
+
+test("a stop that crosses the reply finishing still gets its answer", async () => {
+  const h = harness();
+  await h.player.ready();
+  h.player.start("reply");
+  h.player.chunk(CHUNK());
+  h.player.end();
+  // The worklet finishes the stream, but its report has not reached the page.
+  const held = [];
+  h.node.port.onmessage = ((deliver) => (event) => held.push(() => deliver(event)))(h.node.port.onmessage);
+  h.render(8);
+  const reports = [];
+  h.player.stop((ms) => reports.push(ms));
+  held.forEach((deliver) => deliver());
+
+  assert.deepEqual(reports, [null], "the page waited forever for an answer about a finished reply");
+});

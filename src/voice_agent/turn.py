@@ -13,8 +13,9 @@ import time
 from collections.abc import AsyncIterator
 
 from voice_agent.channel import Channel, audio_start
-from voice_agent.conversation import Conversation
+from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import VoiceAgentError
+from voice_agent.heard import Spoken
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
 from voice_agent.timing import elapsed_ms
@@ -41,6 +42,19 @@ async def closing[T](stream: AsyncIterator[T]) -> AsyncIterator[AsyncIterator[T]
             await aclose()
 
 
+class Interruption:
+    """Whether a turn being cancelled was talked over rather than torn down.
+
+    The two end differently. A conversation that ends, or a socket that closes,
+    drops a question left without its answer. A user who talks over the reply
+    has asked the question and heard some of the answer, so both stay — the
+    answer cut down, later, to what was heard.
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+
+
 async def run_turn(
     channel: Channel,
     conversation: Conversation,
@@ -51,20 +65,25 @@ async def run_turn(
     fragments: AsyncIterator[str] | None = None,
     report: dict[str, object] | None = None,
     usage: Usage | None = None,
+    voice: Spoken | None = None,
+    interruption: Interruption | None = None,
 ) -> float | None:
-    """Returns how much of the spoken reply is still to play when this returns —
-    the window during which the browser stays muted and the user cannot be
-    heard."""
+    """Returns how much of the spoken reply is still to play when this returns.
+
+    `voice` is filled with what the reply's speech says and when, so that
+    whoever interrupts it can work out what was heard.
+    """
     conversation.add_user(text)
     await channel.send_json({"type": "reply_start"})
 
     started = time.perf_counter()
     # Started before the first token, so that connecting to the synthesizer
     # happens while the reasoning engine is still thinking rather than after.
-    speech = Speech(channel, speaker, started) if speaker is not None else None
+    speech = Speech(channel, speaker, started, voice) if speaker is not None else None
+    produced: list[str] = []
+    reply: Message | None = None
     try:
         first_token_at: float | None = None
-        produced: list[str] = []
         # A claimed speculation is already generating — possibly already finished.
         # Everything after this point is identical either way, which is the point:
         # a turn does not know whether its reply was guessed at.
@@ -94,26 +113,22 @@ async def run_turn(
             logger.warning("turn failed for session %s: %s", conversation.id, exc)
             await channel.send_json({"type": "error", "message": str(exc)})
             return None
-        except asyncio.CancelledError:
-            # Cancelled before a reply existed — the socket closed, or the user
-            # ended the conversation. The same rule: no question without an answer.
-            # Nothing more is sent, so whatever ended the turn is the last word.
-            conversation.messages.pop()
-            raise
 
         if speech is not None:
             speech.finish()
-        reply = "".join(produced)
+        written = "".join(produced)
         # Falls back to "now" when nothing streamed, so an empty reply reports its
         # whole duration as time-to-first-token rather than as zero of everything.
         generation_started = first_token_at if first_token_at is not None else time.perf_counter()
-        conversation.add_assistant(reply)
+        reply = conversation.add_assistant(written)
+        if speech is not None:
+            speech.voice.message = reply
         await channel.send_json(
             {
                 **(report or {}),
                 "type": "reply_end",
-                "text": reply,
-                "chars": len(reply),
+                "text": written,
+                "chars": len(written),
                 # Split at the first token, because the halves mean different
                 # things. `ttft_ms` is dead air the user actually experiences and
                 # is the number the latency budget targets; `generation_ms` is
@@ -131,12 +146,46 @@ async def run_turn(
             }
         )
         return await speech.done() if speech is not None else None
+    except asyncio.CancelledError:
+        if interruption is None or not interruption.requested:
+            # The socket closed, or the user ended the conversation. Cancelled
+            # before a reply existed, the same rule as a failure: no question
+            # without an answer. Nothing more is sent, so whatever ended the
+            # turn is the last word.
+            if reply is None:
+                conversation.messages.pop()
+            raise
+        # Talked over. This cancellation was the interruption asking the turn to
+        # stop, not to disappear, so it is absorbed here rather than propagated.
+        current = asyncio.current_task()
+        if current is not None:
+            current.uncancel()
+        if reply is None:
+            await _record_interrupted(channel, conversation, "".join(produced), speech)
+        return None
     finally:
         # The one guarantee that the voice never outlives its turn, however the
         # turn ends: finished (a no-op), failed, or cancelled at any await —
         # including the `reply_end` write, which queues behind audio frames.
         if speech is not None:
             await speech.cancel()
+
+
+async def _record_interrupted(
+    channel: Channel, conversation: Conversation, written: str, speech: "Speech | None"
+) -> None:
+    """Keep what was written of a reply the user talked over.
+
+    With a voice it is recorded whole and cut down once the browser says how
+    much it played. Without one, what was on screen is what was received.
+    """
+    if written.strip():
+        reply = conversation.add_assistant(written if speech is not None else written.rstrip())
+        if speech is not None:
+            speech.voice.message = reply
+    await channel.send_json(
+        {"type": "reply_end", "interrupted": True, "text": written, "chars": len(written)}
+    )
 
 
 class Speech:
@@ -147,7 +196,10 @@ class Speech:
     whatever interleaving the two produce.
     """
 
-    def __init__(self, channel: Channel, speaker: TTS, turn_started: float) -> None:
+    def __init__(
+        self, channel: Channel, speaker: TTS, turn_started: float, voice: Spoken | None = None
+    ) -> None:
+        self.voice = voice if voice is not None else Spoken()
         self._channel = channel
         self._speaker = speaker
         self._turn_started = turn_started
@@ -200,8 +252,11 @@ class Speech:
                         # and a blank reply announces nothing at all.
                         await self._channel.send_json(audio_start())
                         self._first_sent_at = time.perf_counter()
-                    await self._channel.send_bytes(chunk)
-                    self._sent += len(chunk)
+                    # Recorded before the write: a chunk being written when the
+                    # user interrupts may already be playing.
+                    self.voice.add(chunk)
+                    await self._channel.send_bytes(chunk.pcm)
+                    self._sent += len(chunk.pcm)
                     self._chunks += 1
         except VoiceAgentError as exc:
             # The reply itself is fine; only its voice failed. Degrade to text
@@ -210,7 +265,7 @@ class Speech:
             logger.warning("synthesis failed: %s", exc)
             if self._first_sent_at is not None:
                 # Audio already began, so close it: the browser plays what it
-                # has, and the mute window still covers it.
+                # has, and its playback hold still covers it.
                 await self._end_audio()
             await self._channel.send_json({"type": "audio_error", "message": str(exc)})
             return

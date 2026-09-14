@@ -38,8 +38,9 @@ KEEPALIVE_GAP_SECONDS = 10.0
 
 Measured against the real service: Scribe closes a realtime session after
 roughly 15 seconds with no audio — and closes it *normally*, code 1000, so the
-stream simply ends rather than raising. The browser stops sending while a reply
-plays, so any answer longer than ~15 s silently killed the ears.
+stream simply ends rather than raising. Until Chapter 8 the browser stopped
+sending while a reply played, so any answer longer than ~15 s silently killed
+the ears; it now sends throughout, and this covers a browser that does not.
 
 The first version filled *every* gap, sending silence five times a second. That
 is continuous real-time audio to a service metered by audio duration, and it
@@ -75,9 +76,8 @@ class Mic:
 
     Listening is metered, so it also expires: after `idle_timeout` with no
     speech, or `session_cap` in total. The watchdog is paused while a turn is
-    in progress — during the agent's own reply the browser stops sending audio
-    (half-duplex), so no transcript can arrive and an unpaused timer would
-    punish the user for the agent talking.
+    in progress — the user is not expected to speak while the agent talks, and
+    an unpaused timer would punish them for the agent talking.
     """
 
     def __init__(
@@ -87,6 +87,7 @@ class Mic:
         on_final: Callable[[str], Awaitable[None]],
         on_partial: Callable[[str, bool], Awaitable[None]] | None = None,
         on_session: Callable[[], Awaitable[None]] | None = None,
+        on_speech: Callable[[], Awaitable[None]] | None = None,
         extra_report: Callable[[], dict[str, object]] | None = None,
         idle_timeout: float | None = None,
         session_cap: float | None = None,
@@ -96,6 +97,7 @@ class Mic:
         self._on_final = on_final
         self._on_partial = on_partial
         self._on_session = on_session
+        self._on_speech = on_speech
         self._extra_report = extra_report
         self._agreement = StablePrefix()
         self.idle_timeout = IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout
@@ -154,8 +156,8 @@ class Mic:
         """Do not start counting the user's silence until the agent has stopped
         talking.
 
-        The browser mutes its microphone for as long as a reply plays, so the
-        user *cannot* be heard during it. Deriving that window from the clip we
+        The user is not expected to speak while a reply plays — talking over it
+        interrupts it, which releases the hold. Deriving that window from the clip we
         just sent, rather than from a message the browser promises to send when
         playback ends, means a lost or missing message cannot produce the worst
         outcome available here: stopping the microphone and blaming the user
@@ -330,6 +332,10 @@ class Mic:
             self._heard_speech_at = time.perf_counter()
             self._client_frames = 0
             if not transcript.is_final:
+                if transcript.text.strip() and self._on_speech is not None:
+                    # First, before anything else is sent: this is the earliest
+                    # sign the user is talking, and it may be over the agent.
+                    await self._on_speech()
                 # The recognizer will rewrite this text; agreement decides which
                 # of it is safe to act on before the turn is over. `repeated`
                 # says the recognizer found nothing new this time, which is the

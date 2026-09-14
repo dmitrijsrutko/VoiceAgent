@@ -8,9 +8,10 @@ from pathlib import Path
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation
 from voice_agent.errors import VoiceAgentError
+from voice_agent.heard import Spoken
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
-from voice_agent.tts.base import BYTES_PER_SAMPLE, MEDIA_TYPE, once, pcm_seconds
+from voice_agent.tts.base import BYTES_PER_SAMPLE, MEDIA_TYPE, AudioChunk, once, pcm_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -89,7 +90,7 @@ class Greeting:
         try:
             # Joined, not streamed: nobody is waiting on it yet, and a partial
             # greeting cached to disk would be replayed truncated forever.
-            pcm = b"".join([chunk async for chunk in self._speaker.stream(once(self.text))])
+            pcm = b"".join([chunk.pcm async for chunk in self._speaker.stream(once(self.text))])
         except VoiceAgentError as exc:
             # An agent that cannot greet must still be able to converse.
             logger.warning("could not prepare the greeting: %s", exc)
@@ -101,20 +102,25 @@ class Greeting:
         self._save(pcm)
         logger.info("greeting synthesised in %d ms and cached", self._synthesis_ms)
 
-    async def deliver(self, channel: Channel, conversation: Conversation) -> None:
-        """Greet a conversation that has not started yet."""
+    async def deliver(self, channel: Channel, conversation: Conversation) -> Spoken | None:
+        """Greet a conversation that has not started yet. Returns the greeting's
+        voice, which the user can talk over like any other."""
         if not self.text:
-            return
+            return None
         await self.prepare()  # only does anything if startup could not
         # Checked *after* the await, and with nothing awaited between here and
         # the append: two tabs opening the same link would otherwise both pass
         # an earlier check, both wait, and both greet.
         if conversation.messages or conversation.ended:
-            return
-        conversation.add_assistant(self.text)
+            return None
+        message = conversation.add_assistant(self.text)
         await channel.send_json({"type": "greeting", "text": self.text})
         if self._pcm is None:
-            return
+            return None
+        # Untimed: cached as bare PCM, so what an interrupted greeting was heard
+        # of is estimated. It is one short sentence.
+        voice = Spoken(message=message)
+        voice.add(AudioChunk(self._pcm))
         # The same start / frames / end shape as a live reply, so the browser
         # has one audio path rather than a special case for the greeting.
         await channel.send_json(audio_start())
@@ -129,3 +135,4 @@ class Greeting:
                 "cached": True,
             }
         )
+        return voice

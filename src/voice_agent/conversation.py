@@ -36,5 +36,20 @@ class Conversation:
         self.messages.append(message)
         return message
 
+    def replace(self, message: Message, content: str | None) -> None:
+        """Rewrite a message already recorded, or remove it with `None`.
+
+        By identity, not by position: a reply is recorded when its text is
+        written, and learns how much of it was heard only later — after other
+        messages may have followed it.
+        """
+        for index, existing in enumerate(self.messages):
+            if existing is message:
+                if content is None:
+                    del self.messages[index]
+                else:
+                    self.messages[index] = Message(role=message.role, content=content)
+                return
+
     def end(self) -> None:
         self.ended = True

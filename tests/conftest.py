@@ -11,7 +11,7 @@ from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Usage, Warmth
 from voice_agent.stt.base import Transcript
-from voice_agent.tts.base import Voice
+from voice_agent.tts.base import Alignment, AudioChunk, Voice
 
 
 class FakeLLM:
@@ -87,6 +87,24 @@ def pcm_for(text: str) -> bytes:
     return data + b"\x00" * (len(data) % 2)
 
 
+def ms_for(text: str) -> float:
+    """How far into the fake voice's audio `text` has been fully spoken.
+
+    The fake "speaks" one byte of PCM per character, so a character ends where
+    its byte does: at 48 bytes a millisecond of 24 kHz 16-bit audio.
+    """
+    return len(text.encode("latin-1")) / 48
+
+
+def timed(data: bytes) -> AudioChunk:
+    """A chunk of the fake voice, timed the way ElevenLabs times its own:
+    from the start of the chunk the timing arrives with."""
+    return AudioChunk(
+        data + b"\x00" * (len(data) % 2),
+        Alignment(data.decode("latin-1"), tuple((i + 1) / 48 for i in range(len(data)))),
+    )
+
+
 class FakeTTS:
     """A synthesizer that streams deterministic PCM and records its input.
 
@@ -108,7 +126,7 @@ class FakeTTS:
         self.active = 0
         """Syntheses still running — one outliving its turn keeps billing."""
 
-    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[bytes]:
+    async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         index = len(self.spoken)
         self.spoken.append("")
         if self.fail:
@@ -123,11 +141,11 @@ class FakeTTS:
                 while len(pending) >= 4:
                     if self.fail_after is not None and sent == self.fail_after:
                         raise ProviderError("synthesizer exploded mid-reply")
-                    yield pending[:4]
+                    yield timed(pending[:4])
                     pending = pending[4:]
                     sent += 1
             if pending:
-                yield pending + b"\x00" * (len(pending) % 2)
+                yield timed(pending)
         finally:
             self.active -= 1
 
