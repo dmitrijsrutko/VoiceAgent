@@ -156,7 +156,15 @@ prompts/
   system_prompt.md        the voice agent's own runtime system prompt
 src/voice_agent/
   cli.py                  chapter 1: `uv run voice-agent` (entry point)
-  server.py               chapter 1/3: routes, the socket, Channel, Mic, the turn
+  server.py               chapter 1: routes, the socket's receive loop
+  session.py              one connected conversation: starts, queues and cancels turns
+  turn.py                 chapter 1/2/6: one exchange — streamed reply, then streamed speech
+  channel.py              serialized writes to the socket, shared audio framing
+  mic.py                  chapter 3: one listening session — transcripts, expiry, keepalive
+  greeting.py             chapter 2: the opening line, synthesised once and cached on disk
+  warming.py              chapter 4: prefill on agreed-stable text
+  speculation.py          chapter 5: answering before the question finishes
+  timing.py               stage timings on one monotonic clock
   conversation.py         chapter 1: Message + Conversation — the context itself
   sessions.py             chapter 1: in-memory store, one conversation per link
   config.py               chapter 1: env settings + system-prompt loading

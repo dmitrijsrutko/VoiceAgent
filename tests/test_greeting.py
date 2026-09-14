@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeLLM, FakeTTS, pcm_for, receive
-from voice_agent import server
+from voice_agent import greeting as greeting_module
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
 from voice_agent.tts.base import MEDIA_TYPE
@@ -28,7 +28,7 @@ class SilentChannel:
 def disposable_cache(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The greeting cache is on disk by design; tests must not share one, and
     must not write into the working tree."""
-    monkeypatch.setattr(server, "GREETING_CACHE", tmp_path / "cache")
+    monkeypatch.setattr(greeting_module, "GREETING_CACHE", tmp_path / "cache")
 
 
 @pytest.fixture
@@ -125,6 +125,8 @@ def test_an_empty_greeting_opens_in_silence(store: SessionStore) -> None:
             socket.receive_json()
             socket.send_json({"type": "user_message", "text": "hello"})
             assert socket.receive_json()["type"] == "reply_start"
+            while receive(socket)["type"] != "audio_end":
+                pass
 
     assert tts.spoken == ["Sure thing. "], "only the reply should have been spoken"
     assert store.get(key).messages[0].role == "user", "something greeted anyway"
@@ -161,7 +163,7 @@ async def test_the_greeting_survives_a_restart(tmp_path: Path) -> None:
     """A fixed sentence re-synthesised on every `uv run voice-agent` bills for
     bytes we already have. On a free plan that is a meaningful slice of a
     month's quota spent on words that never change."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     first, second = FakeTTS(), FakeTTS()
     await Greeting(HELLO, first, cache_dir=tmp_path).prepare()
@@ -172,7 +174,7 @@ async def test_the_greeting_survives_a_restart(tmp_path: Path) -> None:
 
 
 def test_changing_the_greeting_does_not_serve_the_old_one(tmp_path: Path) -> None:
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     speaker = FakeTTS()
     original = Greeting("first version", speaker, cache_dir=tmp_path)
@@ -184,7 +186,7 @@ def test_changing_the_greeting_does_not_serve_the_old_one(tmp_path: Path) -> Non
 async def test_a_failed_greeting_is_not_retried_for_every_visitor(tmp_path: Path) -> None:
     """An exhausted quota makes every attempt fail. Retrying per page load adds
     a doomed round trip to each one, for a greeting that will be text anyway."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     speaker = FakeTTS(fail=True)
     opening = Greeting(HELLO, speaker, cache_dir=tmp_path)
@@ -199,7 +201,7 @@ async def test_two_tabs_opening_the_same_link_greet_once(tmp_path: Path) -> None
     """Preparation is awaited, so a check made before it is stale by the time
     the greeting is appended. Two tabs on one link would both greet."""
     from voice_agent.conversation import Conversation
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     class SlowTTS(FakeTTS):
         async def stream(self, text: str) -> AsyncIterator[bytes]:
@@ -225,11 +227,11 @@ def test_a_cache_in_another_audio_format_is_not_played(
     """Read back as PCM, a greeting cached as MP3 by an earlier chapter does
     not fail — it plays as noise. The format is part of the key, so a cache in
     any other format is simply not found."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     speaker = FakeTTS()
     current = Greeting(HELLO, speaker, cache_dir=tmp_path)._cache_file
-    monkeypatch.setattr(server, "MEDIA_TYPE", "audio/mpeg")
+    monkeypatch.setattr(greeting_module, "MEDIA_TYPE", "audio/mpeg")
     other = Greeting(HELLO, speaker, cache_dir=tmp_path)._cache_file
 
     assert current != other
@@ -238,7 +240,7 @@ def test_a_cache_in_another_audio_format_is_not_played(
 async def test_a_greeting_that_dies_mid_synthesis_is_not_cached(tmp_path: Path) -> None:
     """A truncated greeting written to disk would be replayed, truncated, on
     every visit from then on."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     await Greeting(HELLO, FakeTTS(fail_after=2), cache_dir=tmp_path).prepare()
     fresh = FakeTTS()
@@ -262,7 +264,7 @@ def listing(directory: Path) -> list[str]:
 async def test_a_damaged_cache_file_is_resynthesised_not_replayed(tmp_path: Path) -> None:
     """Raw PCM has no structure to fail on: a file cut short loads as a shorter
     greeting and would be replayed, truncated, on every visit."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     speaker = FakeTTS()
     opening = Greeting(HELLO, speaker, cache_dir=tmp_path)
@@ -277,7 +279,7 @@ async def test_a_damaged_cache_file_is_resynthesised_not_replayed(tmp_path: Path
 async def test_the_cache_is_written_atomically(tmp_path: Path) -> None:
     """Written aside and renamed, so an interrupted write never leaves a
     truncated greeting under the real name."""
-    from voice_agent.server import Greeting
+    from voice_agent.greeting import Greeting
 
     opening = Greeting(HELLO, FakeTTS(), cache_dir=tmp_path)
     await opening.prepare()

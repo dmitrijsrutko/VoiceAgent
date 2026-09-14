@@ -24,8 +24,23 @@ from voice_agent.conversation import Message
 from voice_agent.errors import VoiceAgentError
 from voice_agent.llm.base import LLM, Usage
 from voice_agent.stt.agreement import same_words
+from voice_agent.timing import elapsed_ms
 
 logger = logging.getLogger(__name__)
+
+SPECULATE = True
+"""Whether to start the real reply on a prefix the user has not finished saying.
+
+The bet: when a partial adds no new words the speaker has probably stopped, and
+the ~0.8 s the reasoning engine needs can be spent now rather than after the
+recognizer gets round to committing. Worth min(head start, time-to-first-token)
+— measured at 0.27 s and 0.80 s on two real utterances, so 0.3-0.8 s, not the
+1.0-1.7 s an earlier estimate claimed by counting the network floor separately
+from the head start that contains it.
+
+Losing the bet costs only what the generation produced before it was cancelled.
+That is only true while the agent has no tools: a speculation that could send a
+message or move money is not a bet, it is an action."""
 
 
 class Speculation:
@@ -89,3 +104,61 @@ class Speculation:
         if finished and (failure := self._task.exception()) is not None:
             logger.warning("speculation failed unexpectedly: %r", failure)
         return self.chars
+
+
+class Speculator:
+    """The guess for the utterance in progress, and what guessing cost.
+
+    Reported rather than assumed. Chapter 4 shipped a warm that fired seven
+    times for one turn and cached nothing, and the only reason that was ever
+    noticed is that the count was on screen.
+    """
+
+    def __init__(self, engine: LLM, system: str) -> None:
+        self._engine = engine
+        self._system = system
+        self._guess: Speculation | None = None
+        self.discarded = 0
+        self.wasted_chars = 0
+        self.adopted = False
+        self.lead_ms = 0
+
+    def on_settled(self, stable: str, history: Sequence[Message]) -> None:
+        """The recognizer found nothing new: bet that the speaker has stopped."""
+        if SPECULATE and self._guess is None:
+            self._guess = Speculation(self._engine, self._system, history, stable)
+
+    async def abandon(self) -> None:
+        """Drop a guess the recognizer has just proved premature."""
+        if self._guess is None:
+            return
+        stale, self._guess = self._guess, None
+        self._discard(await stale.abandon())
+
+    async def claim(self, committed: str) -> Speculation | None:
+        """Keep the guess if the turn that arrived is the one it answered."""
+        if self._guess is None:
+            return None
+        candidate, self._guess = self._guess, None
+        if not candidate.answers(committed):
+            self._discard(await candidate.abandon())
+            return None
+        self.adopted = True
+        self.lead_ms = elapsed_ms(candidate.started_at)
+        return candidate
+
+    def _discard(self, chars: int) -> None:
+        self.discarded += 1
+        self.wasted_chars += chars
+
+    def report(self) -> dict[str, object]:
+        return {
+            "speculated": self.adopted,
+            "speculation_lead_ms": self.lead_ms,
+            "speculations_discarded": self.discarded,
+            "speculation_wasted_chars": self.wasted_chars,
+        }
+
+    def reset(self) -> None:
+        self.discarded = self.wasted_chars = self.lead_ms = 0
+        self.adopted = False

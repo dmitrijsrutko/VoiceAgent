@@ -12,8 +12,9 @@ from collections.abc import AsyncIterator
 
 import pytest
 
-from voice_agent import server
-from voice_agent.server import Mic
+from tests.conftest import FakeSTT
+from voice_agent import mic as mic_module
+from voice_agent.mic import Mic
 from voice_agent.stt.base import Transcript
 
 WAIT_TIMEOUT = 2.0
@@ -69,7 +70,7 @@ async def never_called(text: str) -> None:  # pragma: no cover - asserted unused
 
 @pytest.fixture(autouse=True)
 def fast_watchdog(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "WATCHDOG_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
 
 
 async def running_mic(channel: RecordingChannel, **kwargs: float) -> Mic:
@@ -123,7 +124,7 @@ async def test_a_hold_that_is_never_released_expires_by_itself(
 ) -> None:
     """A tab that closes mid-clip must not mute the microphone forever — and
     silently, since a suspended timer announces nothing."""
-    monkeypatch.setattr(server, "MAX_HOLD_SECONDS", 0.1)
+    monkeypatch.setattr(mic_module, "MAX_HOLD_SECONDS", 0.1)
     channel = RecordingChannel()
     mic = await running_mic(channel, idle_timeout=0.05, session_cap=60.0)
 
@@ -139,7 +140,7 @@ async def test_a_long_reply_s_playback_hold_is_not_mistaken_for_a_stuck_one(
     """A 156-second reply held playback past the one-minute ceiling, the hold was
     declared lost, the idle clock was reset to *now* — and listening stopped with
     the agent still talking. The server already knows the reply's length."""
-    monkeypatch.setattr(server, "MAX_HOLD_SECONDS", 0.1)
+    monkeypatch.setattr(mic_module, "MAX_HOLD_SECONDS", 0.1)
     channel = RecordingChannel()
     mic = await running_mic(channel, idle_timeout=0.1, session_cap=60.0)
 
@@ -156,7 +157,7 @@ async def test_a_long_reply_s_playback_hold_is_not_mistaken_for_a_stuck_one(
 async def test_the_hard_cap_is_not_pausable(monkeypatch: pytest.MonkeyPatch) -> None:
     """A cap a stuck hold can defeat is not a cap, and a stuck hold is exactly
     what it most needs to catch."""
-    monkeypatch.setattr(server, "MAX_HOLD_SECONDS", 60.0)
+    monkeypatch.setattr(mic_module, "MAX_HOLD_SECONDS", 60.0)
     channel = RecordingChannel()
     mic = await running_mic(channel, idle_timeout=60.0, session_cap=0.1)
 
@@ -275,7 +276,7 @@ async def test_silence_is_sent_when_the_browser_goes_quiet(
 ) -> None:
     """The root cause: while a reply plays, the browser sends nothing, and
     ~15 s of that ends the recognizer's session. The gap gets filled."""
-    monkeypatch.setattr(server, "KEEPALIVE_GAP_SECONDS", 0.1)
+    monkeypatch.setattr(mic_module, "KEEPALIVE_GAP_SECONDS", 0.1)
     channel = RecordingChannel()
 
     class Counting:
@@ -296,3 +297,44 @@ async def test_silence_is_sent_when_the_browser_goes_quiet(
     await mic.stop()
 
     assert Counting.frames >= 2, "the recognizer was left with no audio at all"
+
+
+async def test_stopping_from_a_transcript_drains_cleanly() -> None:
+    """A spoken "bye" stops the microphone from inside its own task, with
+    frames still queued behind the one that carried the word."""
+    channel = RecordingChannel()
+    stt = FakeSTT(script=[Transcript("bye", is_final=True)])
+
+    async def stop_on_final(text: str) -> None:
+        await mic.stop()
+
+    mic = Mic(stt, channel, stop_on_final)  # type: ignore[arg-type]
+    await mic.start()
+    task = mic._task
+    assert task is not None
+    for _ in range(3):
+        mic.feed(b"\x00\x00")
+
+    async with asyncio.timeout(WAIT_TIMEOUT):
+        await asyncio.wait({task})
+    assert task.exception() is None
+
+
+async def test_a_recognizer_defect_is_reported_not_silent() -> None:
+    """Only provider errors were caught. Anything else ended the listening task
+    without a word, leaving a page that says "listening" to nobody."""
+    channel = RecordingChannel()
+
+    class BrokenSTT(SilentSTT):
+        async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+            async for _ in audio:
+                raise RuntimeError("unexpected payload")
+            for transcript in self.nothing:
+                yield transcript
+
+    mic = Mic(BrokenSTT(), channel, never_called)  # type: ignore[arg-type]
+    await mic.start()
+    mic.feed(b"\x00\x00")
+
+    await channel.wait_for(type="listen_error")
+    assert not mic.listening

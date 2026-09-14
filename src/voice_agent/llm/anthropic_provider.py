@@ -1,14 +1,21 @@
-"""Anthropic, whose API differs from the OpenAI wire format in two ways.
+"""Anthropic, whose API differs from the OpenAI wire format in three ways.
 
-The system prompt is a top-level parameter rather than the first message, and
-the SDK exposes streaming as an async context manager with a text-only view of
-the event stream. Both are handled here so nothing above this module notices.
+The system prompt is a top-level parameter rather than the first message; the
+conversation must open with a user turn, where ours opens with the greeting;
+and the SDK exposes streaming as an async context manager with a text-only view
+of the event stream. All three are handled here so nothing above this module
+notices.
 """
 
 from collections.abc import AsyncIterator, Sequence
 
 from anthropic import AnthropicError, AsyncAnthropic
-from anthropic.types import MessageParam, OutputConfigParam, TextBlockParam
+from anthropic.types import (
+    CacheControlEphemeralParam,
+    MessageParam,
+    OutputConfigParam,
+    TextBlockParam,
+)
 
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
@@ -24,20 +31,33 @@ the supported way to shorten it — disabling thinking outright is documented to
 cause the model to narrate tool calls and leak reasoning tags into the reply."""
 
 
-def cacheable(system: str) -> list[TextBlockParam]:
-    """Mark the system prompt as a cache breakpoint.
+CACHE_THROUGH_LAST: CacheControlEphemeralParam = {"type": "ephemeral"}
+"""Passed top-level, which marks the last block of the request as a breakpoint.
 
-    Unlike the OpenAI-compatible backends, Anthropic caches only what is
-    explicitly marked. Without this the warming call would prefill a prompt
-    that the real call could not read back, which is worse than not warming at
-    all: the cost with none of the benefit.
-    """
+Unlike the OpenAI-compatible backends, Anthropic caches only what is explicitly
+marked. With only the system prompt marked, every turn re-processed the whole
+conversation, and a warm prefilled history the real call could not read back —
+the cost of warming with none of the benefit."""
+
+OPENING = "(call connected)"
+"""The user turn the API requires before the agent's greeting. Fixed text, so
+the start of every conversation's cached prefix is identical."""
+
+
+def cacheable(system: str) -> list[TextBlockParam]:
+    """Mark the system prompt as a breakpoint of its own, so it is shared by
+    every conversation rather than cached only as the start of each one."""
     return [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
 
 
 def to_anthropic_messages(messages: Sequence[Message]) -> list[MessageParam]:
     """The conversation only. The system prompt is passed separately."""
-    return [{"role": message.role, "content": message.content} for message in messages]
+    payload: list[MessageParam] = [
+        {"role": message.role, "content": message.content} for message in messages
+    ]
+    if payload and payload[0]["role"] == "assistant":
+        payload.insert(0, {"role": "user", "content": OPENING})
+    return payload
 
 
 class AnthropicLLM:
@@ -56,6 +76,7 @@ class AnthropicLLM:
                 system=cacheable(system),
                 output_config=EFFORT,
                 messages=to_anthropic_messages(messages),
+                cache_control=CACHE_THROUGH_LAST,
             ) as stream:
                 async for text in stream.text_stream:
                     yield text
@@ -73,12 +94,14 @@ class AnthropicLLM:
 
     async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
         try:
+            # Zero output tokens: prefill only, the documented way to warm.
             message = await self._client.messages.create(
                 model=self.model,
-                max_tokens=1,
+                max_tokens=0,
                 system=cacheable(system),
                 output_config=EFFORT,
                 messages=to_anthropic_messages(messages),
+                cache_control=CACHE_THROUGH_LAST,
             )
         except AnthropicError as exc:
             raise ProviderError(f"{self.provider} warm failed: {exc}") from exc

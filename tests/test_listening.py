@@ -3,12 +3,13 @@
 import asyncio
 import threading
 import time
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, receive
-from voice_agent import server
+from voice_agent import mic as mic_module
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Warmth
 from voice_agent.server import create_app
@@ -236,8 +237,8 @@ def test_listening_expires_after_a_silent_stretch(
 ) -> None:
     """Streamed silence is billed, and a backgrounded tab keeps the microphone
     running, so an abandoned session has to close itself."""
-    monkeypatch.setattr(server, "IDLE_TIMEOUT_SECONDS", 0.05)
-    monkeypatch.setattr(server, "WATCHDOG_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(mic_module, "IDLE_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
     client = build(store, FakeSTT(script=[]))  # ears that hear only silence
     key = start(client)
 
@@ -257,8 +258,8 @@ def test_listening_expires_after_a_silent_stretch(
 def test_speaking_keeps_the_session_alive(
     store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(server, "IDLE_TIMEOUT_SECONDS", 0.4)
-    monkeypatch.setattr(server, "WATCHDOG_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(mic_module, "IDLE_TIMEOUT_SECONDS", 0.4)
+    monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
     stt = FakeSTT(script=[Transcript(f"word {i}", is_final=False) for i in range(6)])
     client = build(store, stt)
     key = start(client)
@@ -278,9 +279,9 @@ def test_the_session_cap_stops_even_a_talkative_room(
     store: SessionStore, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The case the idle timer cannot catch: continuous partials forever."""
-    monkeypatch.setattr(server, "IDLE_TIMEOUT_SECONDS", 60.0)
-    monkeypatch.setattr(server, "SESSION_CAP_SECONDS", 0.05)
-    monkeypatch.setattr(server, "WATCHDOG_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(mic_module, "IDLE_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(mic_module, "SESSION_CAP_SECONDS", 0.05)
+    monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
     client = build(store, FakeSTT())
     key = start(client)
 
@@ -306,8 +307,8 @@ def test_the_agent_talking_does_not_count_against_the_user(
     the frames up to `reply_end` would pass even with the pause removed. This
     test was verified to fail when `Mic.busy` is disabled.
     """
-    monkeypatch.setattr(server, "IDLE_TIMEOUT_SECONDS", 0.1)
-    monkeypatch.setattr(server, "WATCHDOG_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(mic_module, "IDLE_TIMEOUT_SECONDS", 0.1)
+    monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
     stt = FakeSTT(
         script=[
             Transcript("hello there", is_final=True),
@@ -392,7 +393,7 @@ def test_the_commit_reports_whether_the_agreed_prefix_held(store: SessionStore) 
         socket.receive_json()
         for _ in range(3):
             socket.send_bytes(FRAME)
-        frames = []
+        frames: list[dict[str, Any]] = []
         while True:
             frame = receive(socket)
             frames.append(frame)
@@ -627,3 +628,34 @@ def test_a_warm_that_does_not_land_in_time_is_still_counted(store: SessionStore)
 
     assert frame["warms"] == 0, "a warm that never returned was reported as landed"
     assert frame["warms_attempted"] == 1, "the warm that was paid for is invisible"
+
+
+def test_stopping_the_mic_mid_reply_neither_waits_for_nor_cuts_the_reply(
+    store: SessionStore,
+) -> None:
+    """A spoken turn used to run *inside* the microphone's task, so stopping
+    the microphone had to wait for the whole reply — and after five seconds
+    cancelled it, leaving a question with no answer in the history."""
+    words = "one two three four five six seven eight nine ten"
+    llm = FakeLLM(replies=[words], pace=0.05)
+    client = build(store, FakeSTT(), llm)
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "listen_start"})
+        socket.receive_json()
+        for _ in range(3):
+            socket.send_bytes(FRAME)
+        while socket.receive_json()["type"] != "reply_start":
+            pass
+        socket.send_json({"type": "listen_stop"})
+
+        frames: list[dict[str, Any]] = []
+        while not {"reply_end", "listening"} <= {f["type"] for f in frames}:
+            frames.append(receive(socket))
+
+    kinds = [f["type"] for f in frames]
+    assert kinds.index("listening") < kinds.index("reply_end")
+    assert frames[kinds.index("reply_end")]["text"].split() == words.split()
+    assert [m.role for m in store.get(key).messages] == ["user", "assistant"]

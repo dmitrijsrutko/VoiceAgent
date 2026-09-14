@@ -14,6 +14,76 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Refactor — A turn gets its own task, and `server.py` its own modules
+
+By this point `server.py` was 1,192 lines, more than half the source. Its
+socket handler was a 200-line closure whose speculation and warming state lived
+in `nonlocal` variables, each with a separate stats class next to it. The
+structural problem was **where a turn ran**: on whichever coroutine produced
+its text. A spoken turn ran inside the microphone's task and a typed one inside
+the receive loop, so for the length of a reply neither could read anything.
+That was a bug as well as a shape. Pressing stop listening mid-reply was not
+seen until the whole reply and its audio had gone out. If the reply took more
+than five seconds, `Mic.stop()` cancelled it mid-stream, leaving a question with
+no answer in the history and an `audio_start` with no `audio_end`. The session
+cap could do the same. Barge-in has to cancel a turn while still reading audio,
+so this had to change before that chapter.
+
+**What changed**
+
+- `session.py`: `Session` owns one connection. `submit()` starts a turn in its
+  own task and returns at once; turns queue behind a lock rather than overlap.
+  Exit commands are recognised here only (they were checked in three places).
+  Ending the conversation or closing the socket cancels any turn in flight.
+- `warming.py`: `Warmer` owns the warm task, the growth throttle and the report
+  (it merges `Warmings` with the closure state). `speculation.py`: `Speculator`
+  does the same for the guess (it merges `Guesses` with the closure state).
+- `turn.py`, `mic.py`, `greeting.py`, `channel.py`, `timing.py`: moved out of
+  `server.py` unchanged. `server.py` keeps the routes and the receive loop.
+- `run_turn` drops the user message when it is cancelled before a reply exists,
+  the same fail-closed rule it already applied to provider errors. It also closes
+  the LLM and TTS streams explicitly, however the turn stops.
+- A transcript that arrives after the conversation ended starts no turn, and
+  `ended` is sent only after the turns it stops are gone.
+
+**Design decisions**
+
+- Queue, not reject, a turn that arrives while one is running. This matches
+  what the lock did before; barge-in is the chapter that decides otherwise.
+- No speculation while a turn is running: that turn's reply is not in the
+  history yet, and a guess adopted without it answers the wrong conversation.
+  Warming carries on, because a prefill cannot be adopted as a reply. The old
+  shape never had to decide this, since no partial could arrive during a turn.
+- A socket that closes mid-turn now cancels the turn rather than finishing a
+  reply nobody will receive.
+- Provider streams are closed explicitly rather than trusted to cancellation.
+  A cancel usually lands in a socket write *between* fragments, which leaves the
+  generator suspended, and with it the provider's HTTP stream open and billed
+  until garbage collection. `Speculation` is unaffected, because its task is
+  only ever suspended inside the generator.
+- `tests/test_session.py` drives `Session` against a channel whose writes take
+  time. A fake write that never suspends is what hid the ordering bugs above.
+
+**Latency impact**
+
+- None on the critical path. Transcripts and control messages are no longer
+  delayed by the length of a reply.
+
+**Deliberately not done**
+
+- Two tabs on one link still take turns without a shared lock, so a failed
+  turn's `pop()` can remove the other tab's message. That belongs with
+  persistence.
+
+**Verification**
+
+- `uv run verify`: 203 passed. The regression test (stop listening
+  mid-reply → the stop is acknowledged before `reply_end`, the reply is
+  complete, and the history alternates) failed on the old shape. Each test for
+  this entry's edge cases (late commit, `ended` last, streams closed, no guess
+  mid-turn, the mic stopping itself) fails when its fix is reverted.
+- Not exercised with a real microphone yet.
+
 ## Instrumentation — how many chunks, fragments and tokens a turn was
 
 Every turn already reported its timings and its size in characters and bytes.
@@ -705,6 +775,8 @@ discarded token could be happening.
   duration, and it consumed most of a month's quota on silence.
 - The greeting is cached to disk, so restarting the server no longer
   re-synthesises a sentence that never changes.
+- Anthropic: a greeted conversation opens with a fixed user turn, since the API requires one first. Unit-tested only; no Anthropic key was available to test against the live API.
+- Anthropic: the whole conversation is cached, not only the system prompt, and a warm bills no output (`max_tokens=0`). Unit-tested only; the cache hit on the second turn is not yet measured.
 
 ## Chapter 3 — Ears: the agent listens, and turn detection is borrowed
 
@@ -899,6 +971,7 @@ currently see that number from the inside.
 - Blank committed transcripts are not reported at all.
 - An orderly close of the recognizer socket is no longer reported as a failure.
 - `stop()` no longer deadlocks when called from the task it waits on.
+- An unexpected error in the recognizer loop is reported as `listen_error` rather than silently ending listening.
 - The chat log scrolls again (`min-height: 0` on a flex child), and the
   telemetry line at the end of each turn is now scrolled into view.
 - The browser client gained static tests and a `node --check` pass, after an

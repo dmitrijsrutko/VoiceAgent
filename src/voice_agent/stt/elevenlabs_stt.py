@@ -126,9 +126,9 @@ class ElevenLabsSTT:
                         payload = json.loads(raw)
                         kind = payload.get("message_type")
                         if kind == PARTIAL:
-                            yield Transcript(text=payload["text"], is_final=False)
+                            yield Transcript(text=str(payload.get("text", "")), is_final=False)
                         elif kind == COMMITTED:
-                            yield Transcript(text=payload["text"], is_final=True)
+                            yield Transcript(text=str(payload.get("text", "")), is_final=True)
                         elif isinstance(kind, str) and "error" in kind:
                             raise ProviderError(explain(payload))
                 finally:

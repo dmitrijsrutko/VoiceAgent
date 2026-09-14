@@ -7,7 +7,12 @@ import pytest
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError
 from voice_agent.llm import create_llm
-from voice_agent.llm.anthropic_provider import AnthropicLLM, to_anthropic_messages
+from voice_agent.llm.anthropic_provider import (
+    CACHE_THROUGH_LAST,
+    OPENING,
+    AnthropicLLM,
+    to_anthropic_messages,
+)
 from voice_agent.llm.base import Usage
 from voice_agent.llm.openai_compatible import (
     DEEPSEEK,
@@ -37,6 +42,18 @@ def test_anthropic_wire_carries_history_only_the_system_prompt_is_separate() -> 
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
         {"role": "user", "content": "and again"},
+    ]
+
+
+def test_anthropic_wire_opens_with_a_user_turn_before_the_greeting() -> None:
+    """The API rejects a conversation whose first message is the assistant's,
+    and every conversation here opens with the agent's greeting."""
+    greeted = [Message("assistant", "Hi, how can I help?"), Message("user", "hello")]
+
+    assert to_anthropic_messages(greeted) == [
+        {"role": "user", "content": OPENING},
+        {"role": "assistant", "content": "Hi, how can I help?"},
+        {"role": "user", "content": "hello"},
     ]
 
 
@@ -189,3 +206,31 @@ async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> N
 
     assert text == ["Hi", " there"]
     assert usage == Usage(prompt_tokens=1050, cached_tokens=1000, output_tokens=7)
+
+
+async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() -> None:
+    """Only what is marked is cached. With the system prompt alone marked,
+    every turn re-read the whole history and a warm cached nothing a turn
+    could use."""
+    calls: dict[str, dict[str, Any]] = {}
+    final = SimpleNamespace(
+        input_tokens=1, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0
+    )
+
+    def stream(**kwargs: Any) -> FakeAnthropicStream:
+        calls["stream"] = kwargs
+        return FakeAnthropicStream(["ok"], final)
+
+    async def create(**kwargs: Any) -> SimpleNamespace:
+        calls["warm"] = kwargs
+        return SimpleNamespace(usage=final)
+
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream, create=create))
+    llm = AnthropicLLM(client=client)  # type: ignore[arg-type]
+
+    [_ async for _ in llm.stream("s", CONVERSATION, Usage())]
+    await llm.warm("s", CONVERSATION)
+
+    assert calls["stream"]["cache_control"] == CACHE_THROUGH_LAST
+    assert calls["warm"]["cache_control"] == CACHE_THROUGH_LAST
+    assert calls["warm"]["max_tokens"] == 0, "a warm should bill no output"

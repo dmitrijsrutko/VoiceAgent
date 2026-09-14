@@ -6,7 +6,8 @@ from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
 from voice_agent.config import load_system_prompt
-from voice_agent.server import create_app, is_exit_command
+from voice_agent.server import create_app
+from voice_agent.session import is_exit_command
 from voice_agent.sessions import SessionStore
 from voice_agent.tts.base import MEDIA_TYPE
 
@@ -394,7 +395,7 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     import time
     from collections.abc import AsyncIterator
 
-    from voice_agent import server
+    from voice_agent import turn
 
     clock = [100.0]
     monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
@@ -410,6 +411,6 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
 
         async def send_bytes(self, data: bytes) -> None: ...
 
-    left = await server.speak(Sink(), OneSecondTTS(), "hello", clock[0])  # type: ignore[arg-type]
+    left = await turn.speak(Sink(), OneSecondTTS(), "hello", clock[0])  # type: ignore[arg-type]
 
     assert left == pytest.approx(0.7), "a 1 s reply, 0.3 s into playing it"
