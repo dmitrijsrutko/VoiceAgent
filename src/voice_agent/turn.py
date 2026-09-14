@@ -254,7 +254,18 @@ class Speech:
                         self._first_sent_at = time.perf_counter()
                     # Recorded before the write: a chunk being written when the
                     # user interrupts may already be playing.
-                    self.voice.add(chunk)
+                    if ends_ms := self.voice.add(chunk):
+                        # Ahead of the audio they time, so the page never plays
+                        # a word it cannot yet place in the text.
+                        await self._channel.send_json(
+                            {
+                                "type": "marks",
+                                # Where this audio starts: earlier marks are capped
+                                # there on the page, as in the server's own timeline.
+                                "from_ms": round(pcm_seconds(self._sent) * 1000),
+                                "ends_ms": [round(end) for end in ends_ms],
+                            }
+                        )
                     await self._channel.send_bytes(chunk.pcm)
                     self._sent += len(chunk.pcm)
                     self._chunks += 1

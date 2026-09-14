@@ -2,10 +2,11 @@
 // Each module below owns one job; this file owns the state they share.
 
 import { buildMic, warmUpMicPermission } from "./mic.js";
+import { addMarks, spokenChars } from "./karaoke.js";
 import { createPlayer } from "./player.js";
 import { interrupted, listenStart, listenStop, playback, userMessage } from "./protocol.js";
 import {
-  add, dimUnheard, form, input, listen, meta, ms, mute, note, paintListening as paint, setEnabled,
+  add, form, input, listen, meta, ms, mute, note, paintListening as paint, paintText, setEnabled,
   status, stick,
 } from "./ui.js";
 
@@ -18,6 +19,43 @@ let listening = false;
 let speaking = false;      // the agent's voice is audible
 let cut = null;            // the reply the user talked over; its late audio is ignored until the next reply
 let mic = null;            // { context, node, stream } once built
+
+// Karaoke: per agent bubble, its text, each character's end time, and how far
+// the voice has got. `shown` is fixed once the reply finishes (all of it) or
+// is cut (what was heard); until then it follows the audio actually played.
+const spoken = new WeakMap();  // bubble -> { text, ends, playedMs, shown }
+const repaint = new Set();
+let frame = 0;
+
+function speechOf(el) {
+  let s = spoken.get(el);
+  if (!s) {
+    // Only the text itself: `textContent` would include telemetry notes.
+    const own = el.firstChild?.nodeType === Node.TEXT_NODE ? el.firstChild.data : "";
+    s = { text: own, ends: [], playedMs: 0, shown: null };
+    spoken.set(el, s);
+  }
+  return s;
+}
+
+function paintSpeech(el) {
+  const s = speechOf(el);
+  // Muted, nothing plays and nothing would light the words up: shown whole.
+  // Decided here rather than by dropping marks, so unmuting mid-reply still
+  // has the full timeline — marks skipped while muted misaligned every later one.
+  const following = !mute.checked;
+  paintText(el, s.text, s.shown ?? (following ? spokenChars(s.text, s.ends, s.playedMs) : s.text.length));
+}
+
+function schedule(el) {
+  // Positions arrive every ~40 ms; the text is repainted at most once a frame.
+  repaint.add(el);
+  frame ||= requestAnimationFrame(() => {
+    frame = 0;
+    for (const bubble of repaint) paintSpeech(bubble);
+    repaint.clear();
+  });
+}
 let sampleRate = 16000;
 
 const proto = location.protocol === "https:" ? "wss:" : "ws:";
@@ -52,7 +90,19 @@ const player = createPlayer({
   // of listening or speaking, which would wipe the one message explaining silence.
   onError: (err) => add("audio unavailable: " + err.message, "error"),
   onFinished: (s) => {
+    if (s.bubble) {
+      // Played to the end — or muted, with nothing to follow: all of it is out.
+      const speech = speechOf(s.bubble);
+      speech.shown = speech.text.length;
+      schedule(s.bubble);
+    }
     if (s.gaps && s.bubble) note(s.bubble, `⚠ ${s.gaps} gap${s.gaps > 1 ? "s" : ""} · ${ms(s.gapMs)} of silence mid-reply`);
+  },
+  onPosition: (bubble, playedMs) => {
+    if (!bubble) return;
+    // Less what is still on its way to the speaker, as for an interruption.
+    speechOf(bubble).playedMs = playedMs - player.outputLatency() * 1000;
+    schedule(bubble);
   },
 });
 
@@ -95,13 +145,24 @@ ws.onmessage = (event) => {
 
   } else if (msg.type === "greeting") {
     reply = add(msg.text, "msg agent");
+    spoken.set(reply, { text: msg.text, ends: [], playedMs: 0, shown: null });
 
   } else if (msg.type === "reply_start") {
     cut = null;
     bubble = reply = add("", "msg agent cursor");
+    spoken.set(bubble, { text: "", ends: [], playedMs: 0, shown: null });
 
   } else if (msg.type === "delta") {
-    if (bubble) stick(() => { bubble.textContent += msg.text; });
+    if (bubble) {
+      speechOf(bubble).text += msg.text;
+      stick(() => paintSpeech(bubble));
+    }
+
+  } else if (msg.type === "marks") {
+    if (reply && !cut) {
+      addMarks(speechOf(reply).ends, msg.from_ms, msg.ends_ms);
+      schedule(reply);
+    }
 
   } else if (msg.type === "reply_end") {
     if (bubble && msg.interrupted) {
@@ -145,7 +206,8 @@ ws.onmessage = (event) => {
 
   } else if (msg.type === "truncated") {
     if (cut) {
-      dimUnheard(cut, msg.heard_chars);
+      speechOf(cut).shown = msg.heard_chars;
+      schedule(cut);
       const guess = msg.estimated ? " (estimated)" : msg.timed ? "" : " (approximate)";
       note(cut, `✋ interrupted after ${ms(msg.played_ms)} · heard ${msg.heard_chars} of ${msg.chars} chars${guess} · stopped ${ms(msg.stop_ms)} after the interruption was noticed`);
     }

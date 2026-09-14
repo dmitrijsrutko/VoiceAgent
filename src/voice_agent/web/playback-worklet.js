@@ -80,6 +80,11 @@ export class PcmQueue {
   }
 }
 
+// How often a playing stream reports how far it has got: every 8 render quanta,
+// ~43 ms at 24 kHz. Often enough for words to light up as they are said; each
+// report is one small message across threads.
+export const POSITION_QUANTA = 8;
+
 // The processor's behaviour, independent of AudioWorkletProcessor. `post` sends
 // a message back to the page; `rate` is the context's sample rate.
 //
@@ -87,6 +92,7 @@ export class PcmQueue {
 //                stop {stream}
 // Here -> page:  playing {stream} once audio is audible · finished {stream, gaps, gapMs}
 //                stopped {stream, played} — samples played, or null if it had already finished
+//                position {stream, played} — samples played so far, while playing
 export function createPlayback(post, rate) {
   let stream = null;  // { id, queue, playing, played }
 
@@ -94,7 +100,7 @@ export function createPlayback(post, rate) {
     message(msg) {
       if (msg.type === "start") {
         // A new stream replaces whatever was playing, immediately.
-        stream = { id: msg.stream, queue: new PcmQueue(), playing: false, played: 0 };
+        stream = { id: msg.stream, queue: new PcmQueue(), playing: false, played: 0, quanta: 0 };
         return;
       }
       if (msg.type === "stop") {
@@ -125,6 +131,11 @@ export function createPlayback(post, rate) {
       if (written > 0 && !s.playing) {
         s.playing = true;
         post({ type: "playing", stream: s.id });
+      }
+      // Counted in samples played, not time passed: a stream that ran dry
+      // mid-reply has not moved on, and the words must not either.
+      if (written > 0 && ++s.quanta % POSITION_QUANTA === 0) {
+        post({ type: "position", stream: s.id, played: s.played });
       }
       if (s.queue.drained) {
         stream = null;

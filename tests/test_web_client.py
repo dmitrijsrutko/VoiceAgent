@@ -60,6 +60,7 @@ BROWSER_GLOBALS = {
     "Error",
     "Float32Array",
     "Map",
+    "WeakMap",
     "Int16Array",
     "JSON",
     "Math",

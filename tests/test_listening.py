@@ -32,7 +32,12 @@ def text_frame(socket: object) -> dict[str, Any]:
     """The next frame that is not the reply's audio. Speech now streams while
     the reply is still being written, so its frames interleave with the text
     these tests are about, in an order that depends on scheduling."""
-    while (frame := receive(socket))["type"] in ("audio_bytes", "audio_start", "audio_end"):
+    while (frame := receive(socket))["type"] in (
+        "audio_bytes",
+        "audio_start",
+        "audio_end",
+        "marks",
+    ):
         pass
     return frame
 

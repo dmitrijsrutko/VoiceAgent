@@ -262,6 +262,30 @@ def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tt
     assert audio_bytes == pcm_for("Sure thing. ")
 
 
+def test_each_word_s_timing_reaches_the_page_before_its_audio(
+    client: TestClient, tts: FakeTTS
+) -> None:
+    """What the page lights the text up by. A mark arriving after its audio
+    would leave a word playing that the page cannot yet place."""
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "say something"})
+        _, frames = drain(socket)
+
+    types = [f["type"] for f in frames]
+    ends = [end for f in frames if f["type"] == "marks" for end in f["ends_ms"]]  # type: ignore[attr-defined]
+    assert len(ends) == len(tts.spoken[0]), "a character of the reply has no timing"
+    assert ends == sorted(ends), "a later character ends before an earlier one"
+    # The fake voice times every chunk, so each audio frame must have had its
+    # own marks sent first.
+    for i, kind in enumerate(types):
+        if kind == "audio_bytes":
+            seen = types[: i + 1]
+            assert seen.count("marks") >= seen.count("audio_bytes"), "audio sent ahead of its marks"
+
+
 def test_the_voice_starts_before_the_reply_has_finished_being_written(
     store: SessionStore, tts: FakeTTS
 ) -> None:
@@ -505,3 +529,39 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     left = await speech.done()
 
     assert left == pytest.approx(0.7), "a 1 s reply, 0.3 s into playing it"
+
+
+async def test_marks_are_timed_from_the_reply_s_first_sample() -> None:
+    """ElevenLabs times each segment from its own start. Sent as it arrives,
+    the second segment's words would light up during the first."""
+    from voice_agent import turn
+    from voice_agent.tts.base import Alignment
+
+    class TwoSegments(FakeTTS):
+        async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
+            async for _ in text:
+                pass
+            half_second = b"\x00" * 24_000
+            yield AudioChunk(half_second, Alignment("ab", (250.0, 500.0)))
+            yield AudioChunk(half_second, Alignment("cd", (250.0, 500.0)))
+
+    class Sink:
+        def __init__(self) -> None:
+            self.marks: list[object] = []
+            self.starts: list[object] = []
+
+        async def send_json(self, payload: dict[str, object]) -> None:
+            if payload["type"] == "marks":
+                self.marks.extend(payload["ends_ms"])  # type: ignore[arg-type]
+                self.starts.append(payload["from_ms"])
+
+        async def send_bytes(self, data: bytes) -> None: ...
+
+    sink = Sink()
+    speech = turn.Speech(sink, TwoSegments(), 0.0)  # type: ignore[arg-type]
+    speech.say("abcd")
+    speech.finish()
+    await speech.done()
+
+    assert sink.marks == [250, 500, 750, 1000]
+    assert sink.starts == [0, 500], "the page cannot cap earlier marks without the start"

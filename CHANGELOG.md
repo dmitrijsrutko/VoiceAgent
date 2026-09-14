@@ -14,6 +14,78 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Karaoke — the reply lights up word by word as it is spoken
+
+The text of a reply is on screen long before the voice reaches it: the model
+writes 15–45× faster than it speaks. Chapter 8 already dimmed the part of an
+interrupted reply that was never heard. This extends that one visual idea to
+the whole of playback: words not yet spoken are dimmed and brighten as the
+voice reaches them, and an interruption simply freezes them where they stopped.
+
+It was cheap because the hard parts already existed. ElevenLabs' per-character
+timing is recorded for barge-in, and the worklet already counts the samples it
+plays. This change only puts the two in front of the page.
+
+**What changed**
+
+- `turn.py`: before each timed audio chunk, a `marks` message with its
+  characters' end times (from the reply's first sample) and `from_ms`, where
+  that audio starts. Untimed voices — the cached greeting, OpenAI — send none.
+- `playback-worklet.js`: a playing stream posts `position` every 8 quanta
+  (~43 ms); `player.js` passes it on as `onPosition(bubble, ms)`.
+- `web/karaoke.js` (new, tested in node): `spokenChars` — how much of the text
+  has been spoken, snapped back to a whole word — and `addMarks`.
+- The page keeps each reply as text plus timeline, and repaints at most once a
+  frame into a text span ahead of the telemetry notes. That replaces
+  `textContent +=`, which also wiped a note landing mid-reply. Finished (or
+  muted) reveals everything; `truncated` freezes at what was heard.
+
+**Design decisions**
+
+- **The clock is samples played, not time passed.** A stream that runs dry
+  mid-reply has not moved on, so neither do the words; and it is the same count
+  the page reports when interrupted.
+- **One word rule on both sides.** `karaoke.js` mirrors `heard.py`, with tests
+  written as the same cases, so the highlight freezes exactly where the history
+  is cut.
+- **A segment's timing is capped where the next segment's audio starts.**
+  Measured live: the first generated segment is timed about twice as long as
+  its own audio — 14 characters "ending" at 1022 ms with the next segment's
+  audio at 499 ms, and 987 ms against 499 ms in an earlier probe — while every
+  later segment fits its audio and the last mark lands within the reply's
+  length. Uncapped, the timeline runs backwards there, and every word after
+  it waits until the inflated end. The server's `Spoken` applies the same cap,
+  which corrects Chapter 8's cut too (see its Fixes).
+- **No highlight without timing**, rather than an even sweep that would run
+  visibly ahead of or behind the voice.
+- **Dimming starts with the first marks,** so typed and silent replies look as
+  before. While muted the text is shown whole; marks are still recorded, so
+  unmuting mid-reply lines up (skipping them misaligned every later mark —
+  found in review).
+
+**Latency impact**
+
+- None on the audio path: marks are small JSON frames sent between audio
+  frames. Measured live, about 1 kB of marks for an 11-second reply.
+
+**Verification**
+
+- `uv run verify` passes: 255 tests, including the page's node tests.
+- New tests: marks precede their audio, cover the reply's characters, and are
+  offset by the audio before them; position is reported only for samples
+  actually played and only for the current stream; the word rule mirrors
+  `heard.py`; capping earlier marks at a new segment's start, on both sides.
+- **Seven sabotages, all caught:** marks after the audio; marks not offset
+  (first missed — the fake voice's sub-millisecond timings rounded to zero —
+  until a test with coarse timings was added); no word snap; position counting
+  starved quanta; no-timing text dimmed; the cap removed on the server; the cap
+  removed on the page. Not automatable: the page revealing everything when a
+  reply finishes, which lives in `app.js`.
+- Live, real ElevenLabs: marks arrive before the first audio, the page's own
+  `addMarks` over them yields a timeline that never runs backwards, it covers
+  the reply's characters, and the greeting sends none. Whether the highlight
+  *looks* in step with the voice is for a listener in a browser, not yet done.
+
 ## Chapter 8 — Barge-in: the user can talk over the agent, and the history keeps what was heard
 
 Since Chapter 3 the agent was half-duplex. The page dropped microphone audio for
@@ -189,6 +261,7 @@ Measured from the recorded speech's first voiced sample:
 **Fixes**
 
 - A turn that dies on its own on a closed socket is logged, not printed as "Task exception was never retrieved" (seen live, pre-existing since Chapter 7).
+- The first segment's inflated timing is capped where the next segment starts, so an early interruption no longer undercounts what was heard (found building karaoke).
 
 ## Chapter 7 — Streaming synthesis input: the voice starts while the reply is still being written
 

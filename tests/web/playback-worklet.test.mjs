@@ -4,7 +4,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { PcmQueue, createPlayback } from "../../src/voice_agent/web/playback-worklet.js";
+import { POSITION_QUANTA, PcmQueue, createPlayback } from "../../src/voice_agent/web/playback-worklet.js";
 
 const quantum = () => new Float32Array(4);
 const samples = (...values) => Float32Array.from(values);
@@ -207,4 +207,25 @@ test("stopping a stream that already finished still answers, with nothing to cut
   p.message({ type: "stop", stream: 1 });
 
   assert.deepEqual(posted.at(-1), { type: "stopped", stream: 1, played: null });
+});
+
+test("a playing stream reports how far it has got, in samples actually played", () => {
+  const { p, posted } = processor();
+  p.message({ type: "start", stream: 1 });
+  p.message({ type: "chunk", stream: 1, samples: new Float32Array(4 * POSITION_QUANTA) });
+  for (let i = 0; i < POSITION_QUANTA; i++) p.process(quantum());
+
+  assert.deepEqual(posted.filter((m) => m.type === "position"), [
+    { type: "position", stream: 1, played: 4 * POSITION_QUANTA },
+  ]);
+});
+
+test("a stream that has run dry does not report moving on", () => {
+  // Starved quanta play silence, not the reply: its words must wait too.
+  const { p, posted } = processor();
+  p.message({ type: "start", stream: 1 });
+  p.message({ type: "chunk", stream: 1, samples: new Float32Array(4) });
+  for (let i = 0; i < 4 * POSITION_QUANTA; i++) p.process(quantum());
+
+  assert.deepEqual(posted.filter((m) => m.type === "position"), []);
 });

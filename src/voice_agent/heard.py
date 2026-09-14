@@ -41,16 +41,28 @@ class Spoken:
     """The browser has said it stopped: played to the end, or cut off."""
     interrupted_at: float | None = None
 
-    def add(self, chunk: AudioChunk) -> None:
+    def add(self, chunk: AudioChunk) -> list[float]:
+        """Record a chunk about to be sent. Returns the end times it adds to
+        the timeline, from the reply's first sample: what the page needs to
+        light each word up as it is spoken."""
         if self.started_at is None:
             self.started_at = time.perf_counter()
+        added: list[float] = []
         if chunk.alignment is not None:
             # Timed from the start of the chunk it came with, which is however
             # much audio was sent before it.
             offset = pcm_seconds(self.sent_bytes) * 1000
+            # Nothing said earlier can still be sounding once this audio starts.
+            # Measured: the first segment's timing runs about twice as long as
+            # its own audio (14 characters "ending" at 1022 ms, with the next
+            # segment starting at 499 ms), while every later segment fits.
+            # Uncapped, it holds back every word after it until 1022 ms.
+            self.ends_ms[:] = [min(end, offset) for end in self.ends_ms]
+            added = [offset + end for end in chunk.alignment.ends_ms]
             self.chars.extend(chunk.alignment.chars)
-            self.ends_ms.extend(offset + end for end in chunk.alignment.ends_ms)
+            self.ends_ms.extend(added)
         self.sent_bytes += len(chunk.pcm)
+        return added
 
     @property
     def audible(self) -> bool:

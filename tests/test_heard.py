@@ -102,3 +102,15 @@ def test_a_message_is_replaced_by_identity_not_by_equal_content() -> None:
     conversation.replace(first, None)
 
     assert conversation.messages == [Message("user", "q"), Message("assistant", "cut")]
+
+
+def test_a_segment_timed_past_the_next_one_s_start_is_capped_there() -> None:
+    """Measured live: the first segment's timing ran to 1022 ms while the next
+    segment's audio began at 499 ms. Uncapped, no word after it could count as
+    heard until 1022 ms."""
+    voice = Spoken(message=Message("assistant", "one two three"))
+    voice.add(AudioChunk(b"\x00" * (500 * 48), Alignment("one ", (250.0, 500.0, 750.0, 1000.0))))
+    voice.add(AudioChunk(b"\x00" * (500 * 48), Alignment("two ", (100.0, 200.0, 300.0, 400.0))))
+
+    assert voice.ends_ms == sorted(voice.ends_ms)
+    assert voice.heard(900) == "one two"

@@ -102,6 +102,9 @@ for the full log and the reasoning behind each step.
   from ElevenLabs' per-character timing and how much audio the page played.
   Measured live, ~0.85–1.6 s from starting to speak
   to the stop, all of it recognizer lag: the baseline a local VAD has to beat.
+- **Karaoke.** While the agent speaks, words not yet spoken are dimmed and
+  light up as the voice reaches them — from the same per-character timing and
+  played-sample count barge-in uses, so an interruption freezes them at the cut.
 
 ## Requirements
 
@@ -189,7 +192,8 @@ src/voice_agent/
     playback-worklet.js   the audio-thread queue that plays PCM seamlessly and counts gaps (tested in node)
     mic.js                microphone permission and the capture graph
     capture-worklet.js    the audio-thread processor that emits PCM16 frames
-    ui.js                 the chat log: append, scroll, enable
+    karaoke.js            which words have been spoken, from timing and samples played (tested in node)
+    ui.js                 the chat log: append, scroll, enable, paint spoken text
     protocol.js           the messages the page sends
   llm/
     base.py               the LLM protocol every reasoning backend implements

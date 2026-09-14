@@ -45,17 +45,22 @@ export function setEnabled(on) {
   if (on) input.focus();
 }
 
-// Split a bubble's text at what was heard, dimming the rest. The bubble's
-// telemetry notes are elements after the text and are left where they are.
-export function dimUnheard(el, heardChars) {
-  const text = el.firstChild;
-  if (!text || text.nodeType !== Node.TEXT_NODE || heardChars >= text.data.length) return;
-  const rest = text.splitText(heardChars);
-  const span = document.createElement("span");
-  span.className = "unheard";
-  span.title = "not heard: you interrupted";
-  el.replaceChild(span, rest);
-  span.appendChild(rest);
+// A reply's text, spoken part as normal and the rest dimmed. Kept in its own
+// first child so telemetry notes, appended after it, are never overwritten —
+// `textContent +=` on the bubble itself wiped a note that landed mid-reply.
+export function paintText(el, text, shown) {
+  let body = el.firstElementChild?.classList.contains("text") ? el.firstElementChild : null;
+  if (!body) {
+    body = document.createElement("span");
+    body.className = "text";
+    // A bubble made with its text already in place (the greeting, history).
+    if (el.firstChild?.nodeType === Node.TEXT_NODE) el.firstChild.remove();
+    el.prepend(body);
+  }
+  const rest = document.createElement("span");
+  rest.className = "unheard";
+  rest.textContent = text.slice(shown);
+  body.replaceChildren(document.createTextNode(text.slice(0, shown)), rest);
 }
 
 export function ms(v) { return v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }

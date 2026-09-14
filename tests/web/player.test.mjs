@@ -284,3 +284,19 @@ test("a stop that crosses the reply finishing still gets its answer", async () =
 
   assert.deepEqual(reports, [null], "the page waited forever for an answer about a finished reply");
 });
+
+test("the reply's position reaches the page with its bubble, in milliseconds", async () => {
+  const positions = [];
+  const h = harness();
+  const player = createPlayer({
+    makeContext: () => h.ctx, makeNode: async () => h.node, isMuted: () => false,
+    onSpeaking() {}, onWaiting() {}, onFinished() {}, onError() {},
+    onPosition: (bubble, ms) => positions.push([bubble, ms]),
+  });
+  await player.ready();
+  player.start("reply");
+  h.node.port.onmessage({ data: { type: "position", stream: 1, played: 2400 } });
+  h.node.port.onmessage({ data: { type: "position", stream: 99, played: 9600 } });  // a stream since replaced
+
+  assert.deepEqual(positions, [["reply", 100]]);
+});

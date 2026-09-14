@@ -27,6 +27,7 @@ async function playbackNode(context) {
 
 export function createPlayer({
   makeContext, makeNode = playbackNode, isMuted, onSpeaking, onWaiting, onFinished, onError,
+  onPosition,
 }) {
   let output = null;       // the AudioContext speech plays through, made on first use
   let ready = null;        // resolves once the worklet node is wired
@@ -82,6 +83,9 @@ export function createPlayer({
       // the gate is never held for audio nobody can hear.
       speech.waiting = false;
       onSpeaking(true);
+    } else if (msg.type === "position") {
+      // Milliseconds of this reply played so far, for lighting up its words.
+      onPosition?.(speech.bubble, (msg.played * 1000) / rate);
     } else if (msg.type === "finished") {
       // Sent only once the server has closed the stream *and* the last sample
       // has played: either alone would release the gate while audio is still
