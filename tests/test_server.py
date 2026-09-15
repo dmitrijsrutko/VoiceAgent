@@ -1,6 +1,7 @@
 """End-to-end tests over a real WebSocket; only the provider is faked."""
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
+from voice_agent import turn as turn_module
 from voice_agent.config import load_system_prompt
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
@@ -452,12 +454,70 @@ def test_the_reasoning_stage_reports_its_own_timings(client: TestClient) -> None
     assert reply_end["output_tokens"] == 4
     assert reply_end["prompt_tokens"] == 101
     assert reply_end["cached_tokens"] == 64
+    assert reply_end["connect_ms"] is None, "a reused connection was reported as opened"
+    assert reply_end["accepted_ms"] == 40
+    assert reply_end["attempts"] == 1
 
     # The number the project is judged on covers the whole turn up to the
     # first chunk — and so includes the provider's own wait for it.
     first_audio = int(audio["first_audio_ms"])  # type: ignore[call-overload]
     assert first_audio >= int(audio["synthesis_first_byte_ms"])  # type: ignore[call-overload]
     assert int(audio["synthesis_ms"]) >= int(audio["synthesis_first_byte_ms"])  # type: ignore[call-overload]
+
+
+def test_a_turn_that_opened_a_connection_says_what_it_cost(store: SessionStore) -> None:
+    llm = FakeLLM()
+    llm.connect_ms = 27
+    client = TestClient(create_app(llm=llm, store=store, voice=False, ears=False, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "hello"})
+        _, frames = drain(socket, audio=False)
+
+    assert next(f for f in frames if f["type"] == "reply_end")["connect_ms"] == 27
+
+
+def test_a_slow_first_token_is_logged_with_where_the_time_went(
+    store: SessionStore, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The page's notes are gone with the tab; the terminal keeps this one."""
+    monkeypatch.setattr(turn_module, "SLOW_FIRST_TOKEN_MS", 50)
+    client = TestClient(
+        create_app(llm=FakeLLM(delay=0.1), store=store, voice=False, ears=False, greeting="")
+    )
+    key = start(client)
+
+    with caplog.at_level(logging.WARNING), client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "hello"})
+        drain(socket, audio=False)
+
+    assert "slow first token" in caplog.text
+    assert "accepted at 40 ms, 1 attempt(s)" in caplog.text
+
+
+def test_the_reasoning_engine_is_connected_at_startup_not_on_the_first_question(
+    store: SessionStore,
+) -> None:
+    llm = FakeLLM()
+
+    with TestClient(create_app(llm=llm, store=store, voice=False, ears=False, greeting="")):
+        assert llm.connects == 1
+        assert llm.seen == [], "connecting billed a real call"
+
+
+def test_an_engine_that_cannot_connect_at_startup_still_starts(store: SessionStore) -> None:
+    """The connection is a head start, not a precondition: the first turn opens
+    one anyway, and reports the failure itself if it persists."""
+    llm = FakeLLM(fail=True)
+
+    with TestClient(
+        create_app(llm=llm, store=store, voice=False, ears=False, greeting="")
+    ) as client:
+        assert client.get("/", follow_redirects=False).status_code == 303
+    assert llm.connects == 1
 
 
 def test_an_empty_reply_reports_its_whole_duration_as_time_to_first_token(

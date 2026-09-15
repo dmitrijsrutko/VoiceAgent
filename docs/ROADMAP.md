@@ -300,28 +300,37 @@ than what was documented.
 
 Not a commitment — the order will change as earlier chapters teach us things.
 
-1. **Give it a voice** — TTS on the reply, provider-agnostic. *(Chapter 2)*
-2. **Give it ears** — browser mic capture, audio frames over the existing socket.
-3. **Streaming STT** — partial and final transcripts, with finals shown live.
-4. **Endpointing v1** — VAD plus a fixed silence threshold. Deliberately the
-   naive version, so the next chapter has a baseline to beat.
-5. **Measure everything** — per-stage timing spans, a real latency report.
-   Nothing after this point may claim a speedup without a before and after.
-6. **Streaming TTS** — synthesize from the first clause, overlapping generation
-   with speech.
-7. **Barge-in** — AEC, fast VAD, cancel synthesis, and record what the caller
-   actually heard.
-8. **Semantic turn detection** — replace the fixed threshold; report FEC / MSC /
-   OVER / NDS.
-9. **Golden conversation suite** — replay a fixed set on every change, with
-   latency and pronunciation as explicit gates.
-10. **Off the critical path** — prompt-cache warming on finalized segments,
-    cached greeting audio, parallel retrieval.
-11. **Speculative generation** — with a hard side-effect boundary.
-12. **Cost accounting** — per-call cost sheet; small-model routing.
-13. **Telephony transport** — 8 kHz mono, jitter, drops, resume.
-14. **A duplex speech-to-speech backend** behind the same interface, to A/B
-    against the cascade.
+**Shipped, in the order it actually happened** (see CHANGELOG): a voice (batched
+TTS), ears (streaming STT with the vendor's endpointing), acting before the turn
+ends (prefill warming), speculation, streaming synthesis, synthesis while the
+reply is written, barge-in with what was heard, karaoke, and an LLM latency
+bench with connections kept between turns. The original list put measurement
+fifth and speculation eleventh; in practice instrumentation grew chapter by
+chapter, and speculation came early because it was cheap to try.
+
+**Where the time goes now**, measured: the recognizer takes 1.3 s from the end
+of speech to a committed turn and 0.85–1.6 s to notice barge-in; time to first
+token is ~0.5–0.9 s depending on provider; first audio after the first words is
+164–313 ms; connection setup is ~0 per turn. Network hops are not a significant
+term here (see §5).
+
+**Next, in order:**
+
+1. **A voice detector in the page** — Silero or WebRTC VAD on the capture
+   worklet's frames. Barge-in in a few hundred milliseconds, a true end-of-speech
+   timestamp (the one number the project still cannot measure from inside), no
+   recognizer billing for silence, and a way to see self-interruption from echo.
+   The trigger-happy detector §2B and §5 argue for.
+2. **Semantic turn detection** — our own end-of-turn decision from VAD silence
+   plus transcript completeness, instead of waiting for the vendor's commit.
+   Reports FEC / MSC / OVER / NDS. Needs 1.
+3. **Golden conversation suite** — replay scripted audio (Chapter 8's scripted
+   client already does this) with latency and pronunciation gates.
+4. **Cost accounting** — per-call cost sheet; small-model routing, gated by 3.
+5. **Deployment / telephony transport** — 8 kHz mono, jitter, drops, resume;
+   colocation and WebRTC; the server-in-the-media-path question.
+6. **A duplex speech-to-speech backend** behind the same interface, to A/B
+   against the cascade.
 
 ## 4. Build-order instinct worth keeping
 
@@ -362,3 +371,22 @@ The source material is broadly sound. Points where I would qualify it:
 - **`max_tokens=1` cache-warming costs a full prefill every time.** It is only
   a win if the warmed prefix is genuinely reused before it expires. Measure
   cache-read tokens before assuming it helps.
+- **"Hop cost beats hop count" holds, and here the hops are already cheap.**
+  A common ordering for latency work is: instrument every leg, colocate, keep
+  connections warm, stream with zero buffering, take your server out of the
+  media path — and only then model-layer work such as semantic endpointing.
+  Measured from this project, TCP handshakes to DeepSeek, ElevenLabs, OpenAI and
+  Anthropic all complete in 7–15 ms at nearby CDN edges, and the server is
+  localhost to the browser, so the first four were nearly free or already true.
+  (Keeping connections warm hid a real bug — every streamed call reconnected —
+  which only per-call instrumentation found.) What remains is behind the edges:
+  the recognizer's commit and the model's first token. That puts semantic
+  endpointing *first* for this project, not last. The ordering is right for a
+  deployed system whose server sits far from users or vendors, and it becomes
+  relevant again with the telephony chapter.
+- **Removing the server from the media path** (browser straight to the vendor
+  with short-lived tokens) saves ~nothing on localhost and costs the server its
+  view of the audio: no server-side VAD, recording or telephony, heard-text
+  timing arriving at the browser instead, and partial transcripts relayed back
+  for speculation. Production voice stacks mostly keep the agent in the media
+  path but *at the edge*, next to the vendors, with WebRTC to the user.

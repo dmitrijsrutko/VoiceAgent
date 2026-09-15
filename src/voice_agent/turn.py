@@ -24,6 +24,10 @@ from voice_agent.tts.base import pcm_seconds
 
 logger = logging.getLogger(__name__)
 
+SLOW_FIRST_TOKEN_MS = 3000
+"""A first token this late is logged. Measured TTFT runs ~0.5-1.2 s; one turn
+took 8.5 s and nothing afterwards could say where it went."""
+
 
 @contextlib.asynccontextmanager
 async def closing[T](stream: AsyncIterator[T]) -> AsyncIterator[AsyncIterator[T]]:
@@ -123,6 +127,7 @@ async def run_turn(
         reply = conversation.add_assistant(written)
         if speech is not None:
             speech.voice.message = reply
+        ttft_ms = elapsed_ms(started, first_token_at)
         await channel.send_json(
             {
                 **(report or {}),
@@ -135,7 +140,7 @@ async def run_turn(
                 # throughput, which streaming already hides behind text appearing
                 # on screen. A single "reply took N ms" would blur the one that
                 # matters into the one that does not.
-                "ttft_ms": elapsed_ms(started, first_token_at),
+                "ttft_ms": ttft_ms,
                 "generation_ms": elapsed_ms(generation_started),
                 # Events the provider sent, and what it says they cost. Not the same
                 # number: a fragment is often one token but not by contract.
@@ -143,8 +148,26 @@ async def run_turn(
                 "output_tokens": usage.output_tokens,
                 "prompt_tokens": usage.prompt_tokens,
                 "cached_tokens": usage.cached_tokens,
+                # Set only when this call had to open a connection first; a
+                # reused one costs nothing, so a steady stream of these means
+                # connections are not being kept between turns.
+                "connect_ms": usage.connect_ms,
+                # Splits a slow first token: a late accept or several attempts
+                # is the network or a refusal; a quick accept then a long wait
+                # is the provider queueing.
+                "accepted_ms": usage.accepted_ms,
+                "attempts": usage.attempts,
             }
         )
+        if ttft_ms >= SLOW_FIRST_TOKEN_MS:
+            # On the terminal too, since the page's notes are gone with the tab.
+            logger.warning(
+                "slow first token for session %s: %d ms (accepted at %s ms, %d attempt(s))",
+                conversation.id,
+                ttft_ms,
+                usage.accepted_ms,
+                usage.attempts,
+            )
         return await speech.done() if speech is not None else None
     except asyncio.CancelledError:
         if interruption is None or not interruption.requested:

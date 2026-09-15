@@ -14,6 +14,151 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Measurement — LLM latency by provider, and connections kept between turns
+
+A small step between chapters. The roadmap's next large items (a local voice
+detector, then semantic turn detection) attack the recognizer's 0.85–1.6 s. Before
+them it was worth knowing the other large term: time to first token, which
+Chapter 4 measured on DeepSeek alone as a ~716 ms floor. This adds a repeatable
+way to compare providers from here, fixes the connection handling the
+comparison exposed, and makes connection cost visible per turn.
+
+The finding that shaped the fixes was not the one expected. Raising the SDKs'
+5-second keep-alive was meant to save a reconnect after a pause. But **every
+streamed DeepSeek call opened a new connection, even back to back**. The OpenAI
+SDK stops reading at `data: [DONE]` and closes the response with the body's last
+bytes unread, and a connection closed mid-body cannot go back to the pool.
+Keep-alive alone would have changed nothing.
+
+**What changed**
+
+- `llm/http.py` (new): both SDKs' own default clients, with idle connections kept
+  300 s instead of 5 s, and each call's connection setup (TCP, DNS inside it,
+  TLS) recorded against that call through httpcore's `trace` extension.
+- `llm/openai_compatible.py`: the stream is read to the end of the body, one
+  event per `data:` line, instead of through the SDK's iterator. An error event
+  inside the stream, and a connection lost mid-reply (raw `httpx2`), both fail as
+  `ProviderError`, closing the gap Chapter 6 noted for the LLM adapters.
+- `LLM.connect()`: opens the connection at server startup, alongside the
+  greeting, without billing anything. A failure is logged, not fatal.
+- `llm/anthropic_provider.py`: `connect()` asks the Models API whether the model
+  accepts `effort`, and it is sent only if so. **`--model claude-haiku-4-5` failed
+  every turn**: Haiku 4.5 rejects the parameter with a 400.
+- `reply_end` gains `connect_ms` (null when a connection was reused),
+  `accepted_ms` (call to response headers) and `attempts` (HTTP requests the
+  call took). The 💭 note reads "thought for 933 ms (accepted at 320 ms)", and
+  adds "🔌 opened a connection first" or "↻ sent 3×" only when that happened.
+  A first token later than 3 s is also logged on the terminal with the same
+  split. Prompted by a live turn that "thought for 8.5 s", and nothing on the
+  page could say whether that was the network, a retry or the provider.
+- `uv run voice-agent --bench-llm [PROVIDER[:MODEL] ...]` (`bench.py`): each target
+  connects as the agent does, then takes five short streamed turns with the real
+  system prompt, round-robin. It reports connect time, accept and TTFT medians,
+  TTFT range, total, reconnects, retries and tokens. A target without a key is
+  skipped.
+- `tts/openai_tts.py`: caught `httpx.HTTPError`, but the OpenAI SDK now raises
+  `httpx2` errors, so a connection lost mid-synthesis escaped as a crash.
+  `httpx2` is declared as the runtime dependency it actually is. `httpx` moves
+  to dev, since only the test client still uses it.
+
+**Design decisions**
+
+- **Read the body ourselves rather than drain after the SDK.** The SDK closes the
+  response inside its own iterator, so nothing can be read after it. Parsing
+  `data:` lines is ~15 lines, and it is the wire format both providers use.
+- **Connection cost goes in `Usage`,** the per-call record a turn already
+  receives, and one a claimed speculation already hands over. It is recorded
+  in a `ContextVar` set per call, so a warm, a guess and a turn running at once
+  are each charged only for their own connections (tested).
+- **Capabilities from the Models API, not a list of model names.** Which models
+  accept `effort` changes every release. The lookup replaces the free startup
+  request rather than adding one, and an unknown model name now shows up at startup.
+- **300 s, not forever.** Measured idle, DeepSeek's, OpenAI's and Anthropic's edges
+  all kept a connection for 150 s. At 290 s DeepSeek's had closed and the others
+  had not. A closed one is noticed by the pool and replaced at the old cost.
+- **Accept time and attempts are traced from the HTTP layer, not the adapters.**
+  Response headers and each attempt pass through the same hook and `trace`
+  extension that time connections. So SDK retries, which run inside one
+  adapter call and are otherwise invisible, are counted in both providers alike.
+- **The split works for DeepSeek, not for Anthropic.** DeepSeek sends headers in
+  ~300–390 ms and then generates, so a slow first token after a quick accept is
+  its queue. Anthropic holds headers until the first token (572 vs 575 ms
+  median), so there the two numbers coincide and say nothing more.
+- **The bench connects first,** because the agent does now. A "cold call on a
+  fresh client" would measure a situation no turn is in any more.
+- **Taking the server out of the media path: considered, not done.** Browser to
+  server is localhost here, and every vendor's TCP handshake completes in 7–15 ms
+  at a nearby edge. The legs that cost are behind those edges and inside the
+  vendors, which no routing change reaches. It becomes a real question with
+  deployment or telephony (docs/ROADMAP.md).
+
+**Latency impact**
+
+TTFT by provider, two runs of five turns each after connecting, short question
+with the real system prompt, from Riga:
+
+| Target | TTFT p50 | Range | Total p50 | Reconnects |
+| --- | --- | --- | --- | --- |
+| DeepSeek `deepseek-chat` | 930 / 718 ms | 565–1024 ms | 954–1213 ms | 0 of 10 |
+| Claude Haiku 4.5 | **523 / 552 ms** | 409–647 ms | 728–765 ms | 0 of 10 |
+| Claude Opus 5, effort low | 759 / 716 ms | 574–800 ms | 1767–1810 ms | 0 of 10 |
+| Claude Sonnet 5, effort low | 1164 ms | 1027–1257 ms | 1706 ms | 0 of 5 |
+| OpenAI `gpt-4o-mini` | not measured: no key | | | |
+
+- **Haiku 4.5 is ~200–400 ms faster to first token than DeepSeek**, and steadier:
+  its spread is under 250 ms, DeepSeek's more than 450 ms. The default provider is
+  unchanged; that trades answer quality, and is a separate decision.
+- **Opus 5 at low effort starts about as soon as DeepSeek** but writes slower. With
+  Chapter 7 speaking while writing, TTFT is the number the user waits on.
+- **Connections:** before, 25–32 ms of setup on every streamed DeepSeek call, and
+  the first request in a process ~250 ms more than later ones. After, none per turn:
+  live through the server, both the first turn and one after 8 s idle reported no
+  connection opened. Small next to TTFT, but paid on every turn.
+- **The 8.5-second turn** (DeepSeek, right after a barge-in) was not reproduced:
+  ten calls with the same question afterwards were accepted in ~320 ms and
+  answered in 570–1220 ms. It opened no new connection: the page was running the
+  new script and showed no 🔌. That leaves provider queueing or an SDK retry
+  after a refusal, which the new fields now tell apart.
+- Measured with a one-line conversation. TTFT grows with context: Chapter 4
+  measured +88 ms at 1.1k tokens and +390 ms at 11k on DeepSeek.
+
+**Deliberately not done**
+
+- Changing the default provider or model.
+- OpenAI, Groq and Gemini in the comparison: OpenAI has an adapter and needs only
+  a key; the other two would be new registry entries.
+- Pre-opening the ElevenLabs socket before `reply_start` (~70 ms, which already
+  overlaps TTFT), and anything about the recognizer's socket, which is already
+  held open for a whole listening session.
+- A TTFT percentile across real conversations rather than a bench: the golden
+  conversation suite's job.
+
+**Verification**
+
+- `uv run verify` passes: 281 tests. New tests drive both real SDK clients against a local
+  HTTP server that counts accepted connections: a second reply reuses the first's
+  connection; connecting ahead leaves a reply nothing to open; the idle limit is
+  300 s; concurrent calls are charged separately; usage from both providers'
+  wire formats; an error event and a connection cut mid-body fail as
+  `ProviderError`; two refusals (503, `retry-after-ms`) retried by either SDK
+  count as three attempts; a model lookup a turn makes itself is not counted as
+  a retry. Also: the slow-first-token log line. Also: effort only for models that accept it, connect at
+  startup (and a failed one still starts), `connect_ms` in `reply_end`, bench
+  ordering, skipping and reporting.
+- **Twelve sabotages, eleven caught:** the SDK's iterator restored; a 5-s
+  keep-alive; connect cost unreported in either adapter; effort always sent; no
+  startup connect; `connect_ms` dropped from the frame; one record shared across
+  calls; the bench not connecting; stream errors ignored; `httpx2` errors
+  unmapped. Missed: counting TLS completion as a second connection, which has no
+  observable effect, since only whether one was opened is reported.
+- **Six more for the accept/attempt split, all caught:** attempts not counted;
+  accept time never recorded; the Anthropic lookup counted as a retry (first
+  missed, then a test added); no slow-turn log; `accepted_ms` dropped from the
+  frame; the bench's retries column zeroed.
+- Live: the bench above against real DeepSeek and Anthropic; typed turns through the
+  server (`accepted_ms` 296, `attempts` 1, first token 895 ms); the reconnect on
+  every streamed call reproduced before the fix.
+
 ## Karaoke — the reply lights up word by word as it is spoken
 
 The text of a reply is on screen long before the voice reaches it: the model

@@ -41,6 +41,13 @@ class FakeLLM:
         # keeps billing, so "nothing is still generating" is a thing to assert.
         self.active = 0
         self.systems: list[str] = []
+        self.connects = 0
+        self.connect_ms: int | None = None
+
+    async def connect(self) -> None:
+        self.connects += 1
+        if self.fail:
+            raise ProviderError("provider exploded")
 
     async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
         """Records what it was asked to warm. `warmed` is the point of it: the
@@ -72,6 +79,9 @@ class FakeLLM:
                 usage.output_tokens = 2 * len(words)
                 usage.prompt_tokens = sum(len(m.content.split()) for m in messages) + 100
                 usage.cached_tokens = 64
+                usage.connect_ms = self.connect_ms
+                usage.accepted_ms = 40
+                usage.attempts = 1
         finally:
             self.active -= 1
 

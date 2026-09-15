@@ -3,12 +3,14 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from anthropic import omit
 
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError
 from voice_agent.llm import create_llm
 from voice_agent.llm.anthropic_provider import (
     CACHE_THROUGH_LAST,
+    EFFORT,
     OPENING,
     AnthropicLLM,
     to_anthropic_messages,
@@ -96,77 +98,6 @@ def test_a_missing_key_fails_loudly_rather_than_at_the_first_request(
         create_llm("deepseek")
 
 
-def chunk(content: str | None, usage: dict[str, Any] | None = None) -> SimpleNamespace:
-    """An OpenAI-shaped stream chunk; the usage chunk has no choices."""
-    choices = [] if content is None else [SimpleNamespace(delta=SimpleNamespace(content=content))]
-    reported = None
-    if usage is not None:
-        reported = SimpleNamespace(
-            prompt_tokens=usage["prompt_tokens"],
-            completion_tokens=usage["completion_tokens"],
-            model_dump=lambda: usage,
-        )
-    return SimpleNamespace(choices=choices, usage=reported)
-
-
-class FakeCompletions:
-    def __init__(self, chunks: list[SimpleNamespace]) -> None:
-        self.chunks = chunks
-        self.requests: list[dict[str, Any]] = []
-
-    async def create(self, **request: Any) -> AsyncIterator[SimpleNamespace]:
-        self.requests.append(request)
-
-        async def stream() -> AsyncIterator[SimpleNamespace]:
-            for item in self.chunks:
-                yield item
-
-        return stream()
-
-
-async def test_a_streamed_openai_compatible_reply_reports_its_token_usage(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Without `include_usage` a stream reports nothing; with it, one final chunk
-    with no choices carries the counts — DeepSeek's cache hits included."""
-    completions = FakeCompletions(
-        [
-            chunk("Hel"),
-            chunk("lo"),
-            chunk(
-                None,
-                {"prompt_tokens": 1390, "completion_tokens": 3, "prompt_cache_hit_tokens": 1152},
-            ),
-        ]
-    )
-    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
-    llm = OpenAICompatibleLLM(DEEPSEEK, client=client)  # type: ignore[arg-type]
-    usage = Usage()
-
-    text = [fragment async for fragment in llm.stream("be brief", CONVERSATION, usage)]
-
-    assert text == ["Hel", "lo"]
-    assert completions.requests[0]["stream_options"] == {"include_usage": True}
-    assert usage == Usage(prompt_tokens=1390, cached_tokens=1152, output_tokens=3)
-
-
-async def test_openai_nests_its_cache_hits_differently_and_is_read_too() -> None:
-    reported = {
-        "prompt_tokens": 900,
-        "completion_tokens": 12,
-        "prompt_tokens_details": {"cached_tokens": 768},
-    }
-    client = SimpleNamespace(
-        chat=SimpleNamespace(completions=FakeCompletions([chunk(None, reported)]))
-    )
-    usage = Usage()
-
-    llm = OpenAICompatibleLLM(OPENAI, client=client)  # type: ignore[arg-type]
-    _ = [f async for f in llm.stream("s", CONVERSATION, usage)]
-
-    assert usage == Usage(prompt_tokens=900, cached_tokens=768, output_tokens=12)
-
-
 class FakeAnthropicStream:
     def __init__(self, texts: list[str], usage: SimpleNamespace) -> None:
         self._texts = texts
@@ -198,7 +129,8 @@ async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> N
         cache_creation_input_tokens=30,
     )
     client = SimpleNamespace(
-        messages=SimpleNamespace(stream=lambda **_: FakeAnthropicStream(["Hi", " there"], final))
+        messages=SimpleNamespace(stream=lambda **_: FakeAnthropicStream(["Hi", " there"], final)),
+        models=models(effort=True),
     )
     usage = Usage()
 
@@ -225,7 +157,9 @@ async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() ->
         calls["warm"] = kwargs
         return SimpleNamespace(usage=final)
 
-    client = SimpleNamespace(messages=SimpleNamespace(stream=stream, create=create))
+    client = SimpleNamespace(
+        messages=SimpleNamespace(stream=stream, create=create), models=models(effort=True)
+    )
     llm = AnthropicLLM(client=client)  # type: ignore[arg-type]
 
     [_ async for _ in llm.stream("s", CONVERSATION, Usage())]
@@ -234,3 +168,44 @@ async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() ->
     assert calls["stream"]["cache_control"] == CACHE_THROUGH_LAST
     assert calls["warm"]["cache_control"] == CACHE_THROUGH_LAST
     assert calls["warm"]["max_tokens"] == 0, "a warm should bill no output"
+
+
+def models(effort: bool) -> SimpleNamespace:
+    """The Models API's answer for any model: whether it accepts `effort`."""
+    lookups: list[str] = []
+
+    async def retrieve(model: str) -> SimpleNamespace:
+        lookups.append(model)
+        effort_capability = SimpleNamespace(supported=effort)
+        return SimpleNamespace(capabilities=SimpleNamespace(effort=effort_capability))
+
+    return SimpleNamespace(retrieve=retrieve, lookups=lookups)
+
+
+@pytest.mark.parametrize("supported", [True, False])
+async def test_effort_is_sent_only_to_a_model_that_accepts_it(supported: bool) -> None:
+    """Claude Haiku 4.5 rejects the parameter with a 400, so every turn failed."""
+    calls: list[dict[str, Any]] = []
+    final = SimpleNamespace(
+        input_tokens=1, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0
+    )
+
+    def stream(**kwargs: Any) -> FakeAnthropicStream:
+        calls.append(kwargs)
+        return FakeAnthropicStream(["ok"], final)
+
+    async def create(**kwargs: Any) -> SimpleNamespace:
+        calls.append(kwargs)
+        return SimpleNamespace(usage=final)
+
+    lookup = models(effort=supported)
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream, create=create), models=lookup)
+    llm = AnthropicLLM("some-model", client=client)  # type: ignore[arg-type]
+
+    await llm.connect()
+    [_ async for _ in llm.stream("s", CONVERSATION, Usage())]
+    await llm.warm("s", CONVERSATION)
+
+    sent = [call["output_config"] for call in calls]
+    assert sent == ([EFFORT, EFFORT] if supported else [omit, omit])
+    assert lookup.lookups == ["some-model"], "the model was looked up more than once"

@@ -28,7 +28,8 @@ class Warmth:
 
 @dataclass(slots=True)
 class Usage:
-    """What the provider says one streamed reply cost, in tokens.
+    """What one streamed reply cost: the tokens the provider says it used, and
+    what its HTTP request went through before the first token.
 
     Filled in by the adapter as its stream finishes, so it reads zero until
     then — and stays zero for a provider that reports nothing, which the page
@@ -40,6 +41,20 @@ class Usage:
     prompt_tokens: int = 0
     cached_tokens: int = 0
     output_tokens: int = 0
+    connect_ms: int | None = None
+    """TCP and TLS setup before the request could go out; None when an open
+    connection was reused, or the adapter cannot tell."""
+    accepted_ms: int | None = None
+    """From the call to the response's headers: the provider has accepted the
+    request. What follows, up to the first token, is the provider queueing and
+    prefilling — a long wait after a quick accept is on the provider's side.
+    Only where the provider answers before generating: measured, DeepSeek
+    accepts in ~320-390 ms, while Anthropic holds its headers until the first
+    token is ready, so there the two numbers are the same."""
+    attempts: int = 0
+    """HTTP requests the call took. More than one means the SDK retried after a
+    refusal (429, 5xx) or a dropped connection, with a backoff in between. Zero
+    when the adapter cannot tell."""
 
 
 class LLM(Protocol):
@@ -68,6 +83,15 @@ class LLM(Protocol):
 
         Not `async def`: an implementation is an async *generator* function, so
         calling it returns the iterator without awaiting.
+        """
+        ...
+
+    async def connect(self) -> None:
+        """Open a connection before the first call needs one.
+
+        Free: it lists models, which no provider bills. The first request in a
+        process also pays for DNS and TLS setup — measured at ~250 ms more than
+        any request after it — and the first question is the worst time for it.
         """
         ...
 

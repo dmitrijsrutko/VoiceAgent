@@ -49,6 +49,13 @@ def main() -> None:
         action="store_true",
         help="list the voices this account can actually use, then exit",
     )
+    parser.add_argument(
+        "--bench-llm",
+        nargs="*",
+        metavar="PROVIDER[:MODEL]",
+        help="time to first token per provider, over a few short billed calls, then exit "
+        "(default: deepseek, openai, anthropic:claude-haiku-4-5, anthropic)",
+    )
     args = parser.parse_args()
 
     # create_app() reads these back out of the environment, so the flags and
@@ -64,6 +71,12 @@ def main() -> None:
         os.environ["VOICE_AGENT_VOICE"] = args.voice
     if args.vad_silence:
         os.environ["VOICE_AGENT_VAD_SILENCE"] = str(args.vad_silence)
+
+    if args.bench_llm is not None:
+        from voice_agent.bench import main as bench
+
+        bench(args.bench_llm)
+        return
 
     if args.list_voices:
         list_voices(args.tts)

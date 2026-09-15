@@ -5,7 +5,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 
-import httpx
+import httpx2
 import pytest
 from elevenlabs.core import ApiError
 from websockets.asyncio.server import ServerConnection, serve
@@ -422,7 +422,7 @@ class FakeStreamingResponse:
     async def iter_bytes(self) -> AsyncIterator[bytes]:
         for index, part in enumerate(self._parts):
             if index == self._drop_after:
-                raise httpx.RemoteProtocolError("peer closed connection")
+                raise httpx2.RemoteProtocolError("peer closed connection")
             yield part
 
 

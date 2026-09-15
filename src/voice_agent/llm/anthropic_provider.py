@@ -9,7 +9,7 @@ notices.
 
 from collections.abc import AsyncIterator, Sequence
 
-from anthropic import AnthropicError, AsyncAnthropic
+from anthropic import AnthropicError, AsyncAnthropic, DefaultAsyncHttpxClient, Omit, omit
 from anthropic.types import (
     CacheControlEphemeralParam,
     MessageParam,
@@ -21,6 +21,7 @@ from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, Warmth
+from voice_agent.llm.http import http_client, record_call
 
 DEFAULT_MODEL = "claude-opus-5"
 
@@ -28,7 +29,11 @@ EFFORT: OutputConfigParam = {"effort": "low"}
 """Thinking is on by default on this model family. Reasoning before the first
 token is exactly what a spoken conversation cannot afford, and low effort is
 the supported way to shorten it — disabling thinking outright is documented to
-cause the model to narrate tool calls and leak reasoning tags into the reply."""
+cause the model to narrate tool calls and leak reasoning tags into the reply.
+
+Sent only to a model that accepts it. Claude Haiku 4.5 rejects the parameter
+outright (400, "This model does not support the effort parameter"), which made
+`--model claude-haiku-4-5` fail every turn."""
 
 
 CACHE_THROUGH_LAST: CacheControlEphemeralParam = {"type": "ephemeral"}
@@ -64,20 +69,47 @@ class AnthropicLLM:
     def __init__(self, model: str | None = None, client: AsyncAnthropic | None = None) -> None:
         self.provider = "anthropic"
         self.model = model or DEFAULT_MODEL
-        self._client = client or AsyncAnthropic(api_key=require_env("ANTHROPIC_API_KEY"))
+        self._client = client or AsyncAnthropic(
+            api_key=require_env("ANTHROPIC_API_KEY"),
+            http_client=http_client(DefaultAsyncHttpxClient),
+        )
+
+        self._supports_effort: bool | None = None
+
+    async def connect(self) -> None:
+        await self._effort()
+
+    async def _effort(self) -> OutputConfigParam | Omit:
+        """Asked of the Models API rather than written down per model name, since
+        which models accept `effort` changes with every release. Asked once: at
+        startup, or by the first call if connecting then failed."""
+        if self._supports_effort is None:
+            try:
+                info = await self._client.models.retrieve(self.model)
+            except AnthropicError as exc:
+                raise ProviderError(f"{self.provider} connect failed: {exc}") from exc
+            self._supports_effort = bool(info.capabilities and info.capabilities.effort.supported)
+        return EFFORT if self._supports_effort else omit
 
     async def stream(
         self, system: str, messages: Sequence[Message], usage: Usage | None = None
     ) -> AsyncIterator[str]:
+        call = record_call()
         try:
+            effort = await self._effort()
+            # Only a turn whose startup connect failed looks the model up. A
+            # connection it opened is this turn's cost; its request is not.
+            call.restart()
             async with self._client.messages.stream(
                 model=self.model,
                 max_tokens=MAX_OUTPUT_TOKENS,
                 system=cacheable(system),
-                output_config=EFFORT,
+                output_config=effort,
                 messages=to_anthropic_messages(messages),
                 cache_control=CACHE_THROUGH_LAST,
             ) as stream:
+                if usage is not None:
+                    call.fill(usage)
                 async for text in stream.text_stream:
                     yield text
                 if usage is not None:
@@ -99,7 +131,9 @@ class AnthropicLLM:
                 model=self.model,
                 max_tokens=0,
                 system=cacheable(system),
-                output_config=EFFORT,
+                # The same as the reply's: a different effort is a different
+                # cache, and the warm would prefill one the reply cannot read.
+                output_config=await self._effort(),
                 messages=to_anthropic_messages(messages),
                 cache_control=CACHE_THROUGH_LAST,
             )

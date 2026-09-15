@@ -174,7 +174,14 @@ ws.onmessage = (event) => {
       // Tokens only when the provider reported them: a missing count shown as
       // "0 tokens" would read as a measurement.
       const tokens = msg.output_tokens ? ` · ${msg.output_tokens} tokens` : "";
-      note(bubble, `💭 thought for ${ms(msg.ttft_ms)} · ${msg.chars} chars${tokens} in ${msg.fragments} fragments · ${ms(msg.generation_ms)}`);
+      // When the provider accepted the request splits a slow first token into
+      // "on the way there" and "waiting on the provider". A guess was sent
+      // before the turn began, so its accept time is on another clock.
+      const accepted = msg.accepted_ms != null && !msg.speculated ? ` (accepted at ${ms(msg.accepted_ms)})` : "";
+      // Only when unusual: a reused connection and one attempt are the norm.
+      const connect = msg.connect_ms != null ? ` · 🔌 opened a connection first, ${ms(msg.connect_ms)}` : "";
+      const retried = msg.attempts > 1 ? ` · ↻ sent ${msg.attempts}× — refused or dropped before` : "";
+      note(bubble, `💭 thought for ${ms(msg.ttft_ms)}${accepted}${connect}${retried} · ${msg.chars} chars${tokens} in ${msg.fragments} fragments · ${ms(msg.generation_ms)}`);
       if (msg.prompt_tokens) {
         // What this turn resent as context, and how much the provider already
         // held — the number that grows every turn.

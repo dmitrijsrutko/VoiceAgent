@@ -15,6 +15,7 @@ agent speaks, and the user can talk over it. The browser's echo cancellation is
 what keeps the agent from hearing, and interrupting, its own voice.
 """
 
+import asyncio
 import contextlib
 import json
 import logging
@@ -32,7 +33,7 @@ from starlette.types import Scope
 from voice_agent.channel import Channel
 from voice_agent.config import load_settings, load_system_prompt
 from voice_agent.conversation import Message
-from voice_agent.errors import SessionNotFoundError
+from voice_agent.errors import SessionNotFoundError, VoiceAgentError
 from voice_agent.greeting import Greeting
 from voice_agent.llm import LLM, create_llm
 from voice_agent.session import Session
@@ -73,6 +74,15 @@ class PageModules(StaticFiles):
         return response
 
 
+async def connect(engine: LLM) -> None:
+    """Only a head start: a connection that cannot be opened now is opened by
+    the first turn instead, and that turn reports the failure if it persists."""
+    try:
+        await engine.connect()
+    except VoiceAgentError as exc:
+        logger.warning("could not connect to %s before the first turn: %s", engine.provider, exc)
+
+
 def create_app(
     llm: LLM | None = None,
     store: SessionStore | None = None,
@@ -102,8 +112,9 @@ def create_app(
         # Synthesised once, at startup, before anyone is waiting on it. The
         # first synthesis in a process took 3.1 s against 250-290 ms for every
         # one after, and paying that on someone's first question is the worst
-        # possible moment for it.
-        await opening.prepare()
+        # possible moment for it. The reasoning engine's connection is opened
+        # alongside, for the same reason.
+        await asyncio.gather(opening.prepare(), connect(engine))
         yield
 
     app = FastAPI(title="voice-agent", lifespan=lifespan)

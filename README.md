@@ -105,6 +105,11 @@ for the full log and the reasoning behind each step.
 - **Karaoke.** While the agent speaks, words not yet spoken are dimmed and
   light up as the voice reaches them — from the same per-character timing and
   played-sample count barge-in uses, so an interruption freezes them at the cut.
+- **Measurement — LLM latency by provider.** `--bench-llm` compares time to
+  first token through the real adapters: from here, Claude Haiku 4.5 ~520–580 ms,
+  DeepSeek ~720–930 ms. Connections are now kept between turns; they had been
+  reopened on every streamed call. Each turn shows when the provider accepted the
+  request, and whether a connection or a retry was needed.
 
 ## Requirements
 
@@ -138,6 +143,8 @@ uv run voice-agent --tts none               # no synthesis key needed
 uv run voice-agent --stt none               # typing only, no recognition
 uv run voice-agent --vad-silence 2.0        # wait longer before ending a turn
 uv run voice-agent --list-voices            # what this account can actually use
+uv run voice-agent --bench-llm              # time to first token per provider (a few billed calls)
+uv run voice-agent --bench-llm anthropic:claude-haiku-4-5 deepseek
 uv run voice-agent --port 9000
 ```
 
@@ -180,6 +187,7 @@ src/voice_agent/
   warming.py              chapter 4: prefill on agreed-stable text
   speculation.py          chapter 5: answering before the question finishes
   timing.py               stage timings on one monotonic clock
+  bench.py                `--bench-llm`: time to first token, provider by provider
   conversation.py         chapter 1: Message + Conversation — the context itself
   sessions.py             chapter 1: in-memory store, one conversation per link
   config.py               chapter 1: env settings + system-prompt loading
@@ -198,6 +206,7 @@ src/voice_agent/
   llm/
     base.py               the LLM protocol every reasoning backend implements
     registry.py           name -> backend
+    http.py               connections kept between turns, and what opening one cost
     openai_compatible.py  OpenAI and DeepSeek (same wire format)
     anthropic_provider.py Anthropic (system prompt and streaming differ)
   stt/                    chapter 3: speech recognition
@@ -221,24 +230,27 @@ turn — the order will change as earlier chapters teach us things.
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version: the latency
 arithmetic, the themes behind these chapters, and the alternatives considered.
 
-A local voice detector in the page, so barge-in pauses the agent in a few
-hundred milliseconds rather than the recognizer's second, and resumes on a cough.
-Semantic turn detection, to replace the single
-silence threshold and take endpointing back from the vendor — currently 1.3 s
-of a 2.9 s round trip, and not measurable from inside the project.
-Speculative synthesis: the first sentence voiced before the turn commits and
-held until it does, now that Chapter 7 speaks a reply as it is written. Then context
-management and prompt caching for the reasoning stage, which grows worse every
-turn.
+Measured so far, the round trip is dominated by two vendor-side waits, not by
+network hops: the recognizer (1.3 s to commit a turn, 0.85–1.6 s to notice
+barge-in) and time to first token (~0.5–0.9 s). So, in order:
 
-After that the work turns to making it feel human: barge-in and interruption
-handling, streaming every stage boundary so nothing waits for a complete
-result, speculative and partial-transcript execution, turn-detection quality
-beyond simple silence thresholds, backchannels and filler while the model
-thinks. Then the surrounding machinery: conversation memory, tool calling with
-confirmation boundaries, provider swapping and A/B comparison, an eval harness
-with recorded conversations, tracing and per-stage latency metrics, cost
-tracking, telephony transport, and deployment.
+1. **A voice detector in the page** (Silero or WebRTC VAD). Barge-in in a few hundred
+   milliseconds instead of the recognizer's second. It also gives the first honest
+   "user stopped speaking" timestamp, and stops paying the recognizer for silence.
+2. **Semantic turn detection.** The turn ends when the words sound finished,
+   not when the vendor commits, reported as FEC / MSC / OVER / NDS. It goes after
+   the largest term, and needs step 1's timestamps.
+3. **A golden conversation suite.** Scripted audio replayed through the whole pipeline,
+   with latency and pronunciation as gates, so later changes are measured
+   rather than felt.
+4. **Cost accounting and small-model routing**, made safe by step 3.
+5. **Deployment or telephony transport.** Colocation, WebRTC, and whether the
+   server belongs in the media path become real questions here, not on localhost.
+6. **A duplex speech-to-speech backend** behind the same interface, to A/B against
+   the cascade.
+
+Smaller along the way: choosing the default model from the bench's numbers;
+backchannels while the model thinks; tool calling with confirmation boundaries.
 
 See [CHANGELOG.md](CHANGELOG.md) for what has actually shipped.
 

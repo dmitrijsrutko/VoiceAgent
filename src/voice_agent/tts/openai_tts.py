@@ -14,7 +14,7 @@ side, would fix it; nothing here needs that yet.
 from collections.abc import AsyncIterator
 from typing import Literal
 
-import httpx
+import httpx2
 from openai import AsyncOpenAI, OpenAIError
 
 from voice_agent.config import require_env
@@ -82,9 +82,9 @@ class OpenAITTS:
                     yield chunk
         except OpenAIError as exc:
             raise ProviderError(f"openai synthesis failed: {exc}") from exc
-        except httpx.HTTPError as exc:
+        except httpx2.HTTPError as exc:
             # The SDK wraps failures to *connect*, but `iter_bytes` reads the
-            # body straight from httpx: a connection lost mid-reply arrives raw.
+            # body straight from httpx2: a connection lost mid-reply arrives raw.
             raise ProviderError(f"openai synthesis interrupted: {exc!r}") from exc
 
     async def list_voices(self) -> list[Voice]:
