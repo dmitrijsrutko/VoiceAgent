@@ -110,6 +110,42 @@ for the full log and the reasoning behind each step.
   DeepSeek ~720–930 ms. Connections are now kept between turns; they had been
   reopened on every streamed call. Each turn shows when the provider accepted the
   request, and whether a connection or a retry was needed.
+- **The agent's grammar matches its voice.** Russian and many other languages
+  put the *speaker's* gender on ordinary past-tense verbs, so the agent was
+  saying «я понял» — a man's form — in a woman's voice. `--voice-gender`
+  (`female` by default, `male`, or `neutral`) tells it which to use, and the
+  startup line shows it next to the voice so a mismatch is visible.
+- **Chapter 11 — the trace.** A machine-readable companion to the record:
+  `traces/<date>-<pid>.jsonl`, one JSON object per line, holding every reasoning
+  call with its whole prompt and reply, every synthesis, every recognizer event,
+  and every log line. It is a **span tree** — `conversation → turn → llm / tts` —
+  using OpenTelemetry's vocabulary and `gen_ai.*` attribute names without taking
+  the dependency, because a local file can hold a whole prompt and an OTLP
+  backend mostly will not. Spans are written as a start and an end, so a span
+  with no end is a hang. API keys are redacted by name and by shape. It also
+  brings the first logging configuration this project has ever had: until now
+  nothing configured it, so every `logger.info` call went nowhere.
+- **Chapter 10 — the record.** Every conversation writes itself to
+  `sessions/<date>-<id>.md` as it happens: turns, timings, decisions, what each
+  one cost. It is tapped off the one socket every frame already goes through, so
+  it cannot drift from what the page showed, and it prints whatever fields a
+  frame carries rather than re-phrasing them. No audio is ever written — binary
+  frames are counted and discarded. Nothing expires; `--purge-sessions` is the
+  delete, and it asks first.
+- **Chapter 9 — the clock.** The agent can speak first. Every turn before this
+  was started by the user; nothing in the process ever woke up on its own, so a
+  silence lasted forever. Now a ticker watches the silence and, at two points in
+  it, asks the agent whether there is anything worth saying — with an explicit
+  licence to answer "nothing", which is what it usually does. It only ever
+  speaks *into* silence, never over you: someone who starts talking mid-decision
+  makes the silence *shorter*, and that is the signal to hold back. After two
+  rungs it is quiet until you speak. The second withdraws — "I'm here whenever
+  you're ready" — and measured against a real model that is most of what it
+  does. Every consideration is drawn on the page, declines and failures
+  included, with what deciding cost, because an agent that keeps choosing not to
+  interrupt is the thing being built and it is invisible otherwise. A third rung
+  at seven seconds was built and then deleted: it never once fired, because its
+  job was to invite you in and the greeting had already done that.
 
 ## Requirements
 
@@ -139,9 +175,15 @@ uv run --env-file .env <command>
 uv run voice-agent                          # DeepSeek + ElevenLabs, on :8000
 uv run voice-agent --provider anthropic --model claude-sonnet-5
 uv run voice-agent --tts openai --voice nova
+uv run voice-agent --voice-gender male       # match how the agent refers to itself
 uv run voice-agent --tts none               # no synthesis key needed
 uv run voice-agent --stt none               # typing only, no recognition
 uv run voice-agent --vad-silence 2.0        # wait longer before ending a turn
+uv run voice-agent --initiative off         # never speak first; purely reactive
+uv run voice-agent --sessions off           # do not write conversations down
+uv run voice-agent --purge-sessions         # delete every recorded conversation
+uv run voice-agent --trace off               # no technical trace
+uv run voice-agent --initiative 5,20        # when to consider speaking into a silence
 uv run voice-agent --list-voices            # what this account can actually use
 uv run voice-agent --bench-llm              # time to first token per provider (a few billed calls)
 uv run voice-agent --bench-llm anthropic:claude-haiku-4-5 deepseek
@@ -186,6 +228,10 @@ src/voice_agent/
   greeting.py             chapter 2: the opening line, synthesised once and cached on disk
   warming.py              chapter 4: prefill on agreed-stable text
   speculation.py          chapter 5: answering before the question finishes
+  initiative.py           chapter 9: whether to speak into a silence, and when to stay quiet
+  streams.py              closing a provider's stream when whoever read it stops
+  record.py               chapter 10: the conversation, written down as it happens
+  trace.py                chapter 11: the span tree, the bodies, and the redaction
   timing.py               stage timings on one monotonic clock
   bench.py                `--bench-llm`: time to first token, provider by provider
   conversation.py         chapter 1: Message + Conversation — the context itself
@@ -207,6 +253,7 @@ src/voice_agent/
     base.py               the LLM protocol every reasoning backend implements
     registry.py           name -> backend
     http.py               connections kept between turns, and what opening one cost
+    traced.py             a span around every reasoning call, whoever makes it
     openai_compatible.py  OpenAI and DeepSeek (same wire format)
     anthropic_provider.py Anthropic (system prompt and streaming differ)
   stt/                    chapter 3: speech recognition
@@ -237,6 +284,12 @@ barge-in) and time to first token (~0.5–0.9 s). So, in order:
 1. **A voice detector in the page** (Silero or WebRTC VAD). Barge-in in a few hundred
    milliseconds instead of the recognizer's second. It also gives the first honest
    "user stopped speaking" timestamp, and stops paying the recognizer for silence.
+   Chapter 9 made this load-bearing rather than merely next. It is not only that
+   the clock measures silence from the recognizer's last output, which trails
+   real speech by several hundred milliseconds — it is that **nothing in the
+   agent can currently answer "is someone speaking right now?"** The clock
+   infers it from the silence getting shorter. A voice detector is the first
+   component that would simply know.
 2. **Semantic turn detection.** The turn ends when the words sound finished,
    not when the vendor commits, reported as FEC / MSC / OVER / NDS. It goes after
    the largest term, and needs step 1's timestamps.
@@ -249,8 +302,19 @@ barge-in) and time to first token (~0.5–0.9 s). So, in order:
 6. **A duplex speech-to-speech backend** behind the same interface, to A/B against
    the cascade.
 
+Then, continuing what Chapter 9 started — a **mixed-initiative** agent that
+holds a share of the initiative instead of waiting to be addressed:
+**backchannels** (a cached "mm-hm" placed *over* the user without claiming the
+floor — the first utterance that is not a turn), **transition-relevance-place
+detection** (the same classifier as semantic turn detection, asked "is this a
+place I could come in?"), a **graded floor policy** from backchannel through to
+the rare hard interrupt with a per-exchange budget and a concession rule, and
+**always-on judgement** with a line prepared and held ready. Evaluation for all
+of it is interruption precision, uptake, and sampled human ratings of
+intrusiveness — the decline log Chapter 9 draws is its first row.
+
 Smaller along the way: choosing the default model from the bench's numbers;
-backchannels while the model thinks; tool calling with confirmation boundaries.
+tool calling with confirmation boundaries.
 
 See [CHANGELOG.md](CHANGELOG.md) for what has actually shipped.
 

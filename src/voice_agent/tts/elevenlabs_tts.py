@@ -24,9 +24,10 @@ import websockets
 from elevenlabs.client import AsyncElevenLabs
 from elevenlabs.core import ApiError
 
+from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.tts.base import Alignment, AudioChunk, Voice, whole_samples
+from voice_agent.tts.base import MEDIA_TYPE, Alignment, AudioChunk, Voice, whole_samples
 
 HINTS = {
     "paid_plan_required": (
@@ -152,6 +153,23 @@ class ElevenLabsTTS:
         )
 
     async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
+        with trace.span(
+            "tts",
+            {"gen_ai.system": self.provider, "voice": self.voice, "media_type": MEDIA_TYPE},
+        ):
+            said: list[str] = []
+            chunks = 0
+            sent = 0
+            async for chunk in self._stream(text, said):
+                chunks += 1
+                sent += len(chunk.pcm)
+                yield chunk
+            trace.event(
+                "tts.spoken",
+                {"text": "".join(said), "chunks": chunks, "bytes": sent},
+            )
+
+    async def _stream(self, text: AsyncIterator[str], said: list[str]) -> AsyncIterator[AudioChunk]:
         async def pump(socket: websockets.ClientConnection) -> None:
             # A single space opens the stream and carries its settings.
             await socket.send(
@@ -165,6 +183,7 @@ class ElevenLabsTTS:
             async for fragment in text:
                 # Never an empty text: that is the message which ends the stream.
                 if fragment:
+                    said.append(fragment)
                     await socket.send(json.dumps({"text": fragment}))
             # "That is all": the service voices whatever it is still holding back,
             # however short, then ends the stream.

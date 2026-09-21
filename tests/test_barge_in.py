@@ -285,3 +285,22 @@ async def test_a_late_answer_does_not_settle_the_next_interruption(
     await channel.wait_for("truncated", count=2)
 
     assert ("assistant", "one two") in [(m.role, m.content) for m in conversation.messages[2:]]
+
+
+async def test_an_unprompted_line_talked_over_keeps_only_what_was_heard() -> None:
+    """The regression test for reusing `run_turn` rather than giving the clock
+    a path of its own: everything barge-in learned has to apply to a line
+    nobody asked for, with no new code and no user turn above it to lean on."""
+    session, channel, _, tts = talking_agent()
+    assert session.mic is not None
+    await session.mic.start()  # the clock only ever speaks from an open mic
+
+    await session.speak(SLOW_REPLY, rung=1)
+    await channel.wait_for("audio_bytes", count=3)
+    await speak_over(session, "sorry")
+    await channel.wait_for("interrupt")
+    answer(session, channel, ms_for("one two thr"))
+    await channel.wait_for("truncated")
+
+    assert tts.active == 0
+    assert session.conversation.messages == [Message("assistant", "one two")]

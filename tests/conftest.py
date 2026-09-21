@@ -86,6 +86,18 @@ class FakeLLM:
             self.active -= 1
 
 
+@pytest.fixture(autouse=True)
+def _sessions_in_tmp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test writes a conversation or a trace into the working tree.
+
+    Recording is on by default, so without this every test that opens a socket
+    leaves files in `sessions/` — 64 of them on the first run that had it.
+    A test that wants to look at one points at its own `tmp_path`.
+    """
+    monkeypatch.setenv("VOICE_AGENT_SESSIONS", str(tmp_path / "sessions"))
+    monkeypatch.setenv("VOICE_AGENT_TRACE", str(tmp_path / "traces"))
+
+
 @pytest.fixture
 def llm() -> FakeLLM:
     return FakeLLM()

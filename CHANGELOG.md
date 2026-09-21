@@ -14,6 +14,509 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 11 — The trace: a span tree, and the first logging this project has had
+
+Where Chapter 10 writes the conversation for a person to read, this writes what
+the machine did for a program to read: every reasoning call with its whole
+prompt and whole reply, every synthesis, every recognizer event, and every log
+line — in one JSONL file per run.
+
+**The finding that came first.** This project had *no logging configuration at
+all*. The only line touching it was `uvicorn.run(..., log_level="warning")`,
+which configures uvicorn's loggers and not ours, so all eight `logger.info`
+calls under `src/voice_agent/` had never been seen by anybody. That is how the
+initiative clock's provider failures stayed invisible in Chapter 9 until a
+deliberately broken key surfaced them. They are written down now.
+
+**What changed**
+- `src/voice_agent/trace.py`: new. The JSONL writer, the span `ContextVar`,
+  redaction, and a logging handler that puts `logger.*` calls in the same file.
+- `src/voice_agent/llm/traced.py`: new. `Traced` wraps any `LLM` and puts a span
+  around every call.
+- `src/voice_agent/server.py`: one `conversation` span per connection; the engine
+  wrapped in `Traced`.
+- `src/voice_agent/session.py`, `initiative.py`: the `turn` and
+  `initiative.consider` spans, the latter carrying the nudge text actually sent.
+- `src/voice_agent/tts/elevenlabs_tts.py`, `stt/elevenlabs_stt.py`: spans and
+  events at the vendor boundary.
+- `src/voice_agent/cli.py`: logging configured at last; `--trace`; `🔬` on the
+  startup line.
+
+**Design decisions**
+- **OpenTelemetry's shape, not its dependency.** AGENTS.md §7's latency table
+  *is* a span tree, so the vocabulary is theirs — `trace`, `span`, `parent`, and
+  `gen_ai.*` names where the semantic conventions have settled. The transport is
+  not, because this file's job is to hold whole prompts, and that is the one
+  thing OTel handles badly: the GenAI conventions moved prompts out of span
+  attributes into log events precisely because backends truncate them. A local
+  file has no such limit, needs no collector to read, and adds no dependency to
+  a project whose inner loop runs on localhost. Exporting this over OTLP when
+  the deployment chapter wants a real backend is a mapping, not a rewrite.
+- **Two lines per span, start and end.** A trace written for debugging has to
+  make a *hang* visible, and an unpaired start is exactly that. It also means a
+  process killed mid-turn still leaves everything up to that moment. Tested by
+  reading the file from inside a span, since a real death cannot be staged.
+- **The span wraps the seam, not the vendor.** The first version put it inside
+  both LLM adapters. A test with a faked provider then produced no `llm` span at
+  all — because `stream` is called from four places and implemented by two
+  adapters, and instrumentation inside the vendors could only ever be exercised
+  against the vendors. `Traced` wraps the protocol instead: one implementation
+  instead of two, every caller covered, and a fake traced exactly like a real
+  provider. Both adapters went back to byte-identical.
+- **The parent is found, not passed.** A `ContextVar`, which is how OTel
+  propagates context and what `llm/http.py` already does for `Call`. `asyncio`
+  copies the context into tasks, so the microphone's own task and each turn
+  attach to the conversation without being handed anything.
+- **Redaction is on the way out, and by shape as well as by name.** Doing it at
+  each call site is a thing that works until someone forgets once, and once is
+  enough. Keys are matched on precise substrings, plus a net that redacts any
+  lone value shaped like a credential whoever wrote it.
+
+**Latency impact**
+- Not measured, and expected to be unmeasurable: two buffered writes per span.
+  Nothing was added to the provider path — `Traced` forwards the same iterator.
+
+**Cost**
+- None. The trace is local; no call is made on its behalf.
+
+**Deliberately not done**
+- Drawing the waterfall. The schema carries start and end stamps and parent
+  links so that rendering it is a pure function over the file, but the drawing
+  is its own chapter.
+- An OTLP exporter, metrics, or sampling.
+
+**Verification**
+- `uv run verify` green — 377 tests, 24 of them new.
+- A live run against DeepSeek, ElevenLabs Scribe and ElevenLabs TTS produced
+  this tree, read back out of the file:
+
+```
+14:11:36.863 ┌ conversation
+14:11:36.869 · stt.session
+14:11:49.883   ┌ initiative.consider
+14:11:49.884     ┌ llm
+14:11:50.878     · llm.reply
+14:11:50.878     └ llm 994ms
+14:11:50.878   └ initiative.consider 995ms
+14:11:50.881   ┌ turn.unprompted
+14:11:50.882     ┌ tts
+14:11:51.284     · tts.spoken
+14:11:51.284     └ tts 403ms
+14:11:51.285   └ turn.unprompted 404ms
+14:11:55.135 · stt.committed
+```
+
+- The bodies are really there: the 8,273-character system prompt, the nudge as
+  sent, the reply, and `2255 in / 32 out / 1920 cached`.
+- Both live API key prefixes were grepped for across `traces/` and `sessions/`:
+  no match.
+- A redaction bug was found by its own test before it ever shipped — matching
+  `token` as a substring blanked `gen_ai.usage.output_tokens`, and so every
+  token count in the file. A rule that destroys the data it was protecting is
+  not a safe default; the hints are precise now, and a test pins each of
+  `prompt_tokens`, `max_tokens` and `gen_ai.usage.output_tokens` as readable.
+- **The console was checked last, and it was wrong.** Putting the `voice_agent`
+  logger at `DEBUG` so its records reach the trace also pushed every `INFO` line
+  to the terminal, because propagation consults *handler* levels and ignores
+  ancestor logger levels. Measured after the fix: a full live run printed one
+  line, the banner.
+- An interrupted reply was traced end to end: the `llm` and `tts` spans close
+  with `CancelledError`, which is both the proof that the provider's stream was
+  released and a useful thing to find in a trace.
+
+**Fixes**
+
+- The tracing wrapper no longer leaks the provider's stream. `async for` does
+  not close what it iterates, so `Traced` sat between `closing()` and the thing
+  `closing()` was written to protect, and an interrupted turn left the
+  provider's HTTP stream open and billed — the exact bug Chapter 7 fixed, one
+  layer up. `closing` now lives in `streams.py` with three callers instead of
+  two hand-rolled copies, and it finally has a test.
+- The console stays quiet: its handler has its own `WARNING` level rather than
+  inheriting the root logger's, so `voice_agent` can sit at `DEBUG` for the
+  trace without the terminal hearing it. A test pins the two apart.
+- Logging is configured before anything can log, and on the `--bench-llm`,
+  `--list-voices` and `--purge-sessions` paths, which all returned before
+  reaching it.
+- `trace.span` restores the previous span instead of `ContextVar.reset`, which
+  raises when an async generator is finalized in a context other than the one
+  that opened it.
+- The test suite pins `VOICE_AGENT_TRACE` as well as `VOICE_AGENT_SESSIONS`.
+
+## Chapter 10 — The record: every conversation writes itself down
+
+Nothing this agent did survived the tab. Conversations live in memory, the
+page's telemetry goes with a reload, and every bug in nine chapters has been
+found by someone copying a browser log into a chat window by hand — three of the
+last four fixes started exactly that way. This keeps it: one Markdown file per
+conversation, written as it happens, close enough to the page that "review the
+last conversation" is a thing you can say.
+
+The design bet is that it taps **`Channel`** rather than calling a logger from
+each interesting place. `Channel` is the one door every frame the browser
+receives goes through, so the file cannot drift from what the user actually saw,
+and a frame type added in a later chapter appears in the record without anyone
+remembering to record it.
+
+**What changed**
+- `src/voice_agent/record.py`: new. Opens the file, writes a turn per
+  text-bearing frame, attaches everything else as a note, flushes at each turn.
+- `src/voice_agent/channel.py`: an optional record; `send_json` writes the
+  frame, `send_bytes` counts it.
+- `src/voice_agent/server.py`: one record per conversation, named so the folder
+  sorts by time; typed input recorded on its own path.
+- `src/voice_agent/config.py`, `cli.py`: `VOICE_AGENT_SESSIONS`, `--sessions`,
+  `--purge-sessions`, and `📝` on the startup line.
+- `tests/conftest.py`: an autouse fixture pointing the recorder at `tmp_path`.
+
+**Design decisions**
+- **Tap the channel, not the call sites.** Rejected: a `record.turn(...)` call
+  beside each interesting event. That drifts the first time someone adds a frame
+  and forgets, and it cannot see what the browser was *actually* sent.
+- **Render the frame's own fields, not phrased prose.** The page turns
+  `reply_end` into "💭 thought for 492 ms · 56 chars"; writing that again in
+  Python would be a second renderer to keep in step, wrong within two chapters.
+  The record prints `key value · key value` from whatever the frame carries, so
+  a new field appears on its own and the numbers arrive unrounded. A test
+  asserts this property directly, because it is the whole bet.
+- **Falsy fields are omitted, so absence means zero.** Kept, every turn carried
+  `speculated no · speculation_lead_ms 0 · speculations_discarded 0 · ...` —
+  four fields saying nothing happened. Seen in the first real output and cut.
+- **No audio, ever.** Binary frames are counted and discarded. Voice is
+  biometric data under several regimes, a five-minute session is tens of
+  megabytes, and every bug so far was diagnosable from timings. A test asserts
+  no PCM reaches the file.
+- **Keep everything; deleting is a command, not a policy.** This is an archive
+  to look back over, and a retention rule that silently removes the conversation
+  you wanted is worse than a folder that grows. `--purge-sessions` is the whole
+  of the delete half, and it asks first — these are transcripts of things
+  somebody said out loud and there is no second copy.
+- **Resuming a link appends.** Reloading is the same conversation, so it is the
+  same file, under a `reconnected` heading rather than a second header.
+- **Buffered, flushed per turn.** A hard crash costs at most the turn in
+  progress and no frame costs a syscall. The writes are synchronous: a few
+  hundred bytes to page cache is not measurable beside a 300 ms provider call,
+  and a thread hop per frame would cost more than it saves.
+
+**Latency impact**
+- Not measured, and expected to be unmeasurable: a buffered write per frame,
+  flushed once per turn. Nothing was added to the provider path.
+
+**Deliberately not done**
+- The technical trace — provider bodies, params, span tree. That is Chapter 11,
+  and the header already carries the `trace` field it will fill in.
+- Any audio. See above.
+- Expiry, rotation, or a size cap.
+
+**Verification**
+- `uv run verify` green — 12 tests for the record, and 377 across the suite.
+- A real conversation against Anthropic, ElevenLabs Scribe and ElevenLabs TTS
+  produced a file holding the greeting, both initiative decisions with their
+  cost, the unprompted line, and every audio block's timings — 912 bytes for a
+  session that moved 194 kB of speech.
+- `--purge-sessions` exercised in all three paths: declined, accepted, and with
+  recording off.
+- The first run of the suite wrote 64 files into the working tree, which is
+  what the autouse fixture now prevents.
+
+**Fixes**
+
+- A field longer than 120 characters is cut short with an ellipsis rather than
+  dropped. Absence has to mean "the frame did not carry it", never "it was too
+  long to show" — and one live unprompted line came in at 113 characters.
+- The audio frame count belongs to one reply: a reply whose audio never closed
+  used to lend its count to the next one.
+- Reopening a conversation matches the file by its exact stem. The old glob,
+  `*-{id}.md`, would also have matched a conversation whose id merely ended with
+  this one.
+
+## The agent's grammar matches its voice
+
+Russian, Polish, Hebrew, Arabic and many others put the *speaker's* gender on
+ordinary past-tense verbs and adjectives, so "I understood" forces a choice
+every time it is said. The model defaulted to masculine while the default voice
+is a woman's, and the result was heard live: a woman's voice saying «я понял».
+In text that is a slip you might not notice. Out loud the voice and the grammar
+contradict each other inside one word, and a listener catches it immediately —
+which makes this a voice bug rather than a language one, and the reason it
+never came up in eight chapters of building the pipeline.
+
+**What changed**
+- `prompts/system_prompt.md`: a rule under "Speak the user's language" — speak
+  about yourself with the gender your voice has, consistently.
+- `src/voice_agent/config.py`: `VOICE_AGENT_VOICE_GENDER` (`female` by default,
+  `male`, or `neutral`), and `with_voice_gender`, which appends the one
+  sentence that names it.
+- `src/voice_agent/cli.py`: `--voice-gender`, and the marker beside the voice on
+  the startup line — `🔊 elevenlabs ♀` — because the mistake this guards against
+  is changing `--voice` and forgetting.
+
+**Design decisions**
+- **Configured, not derived from the voice id.** Asking the synthesizer which
+  gender a voice is would be the clever answer, and this project has already
+  learned that what a voice *is* on a given plan is neither stable nor
+  inferable — `--list-voices` exists for that reason. An explicit setting whose
+  default matches the default voice is honest about what it knows.
+- **`neutral` is a real option, not a hedge.** It tells the agent to prefer
+  wordings that avoid the choice, and to stay consistent where one is
+  unavoidable — which is what a person does with a voice that reads either way.
+- **Appended at the end of the system prompt**, fixed for the life of the
+  process, so the cached prefix above it is untouched (ROADMAP §2C).
+
+**Latency impact**
+- None. One sentence, in the part of the prompt the provider caches.
+
+**Verification**
+- `uv run verify` green — 341 tests.
+- Exercised against DeepSeek in Russian with prompts that force a past-tense
+  self-reference. Set to `female` the agent says «я поняла», «я собиралась»,
+  «я напомнила»; set to `male`, «я понял», «я хотел», «я сталкивался», «не
+  уверен». The startup line was read back with a real voice configured to
+  confirm the marker appears.
+
+## Chapter 9 — The clock: the agent can speak first
+
+Every turn this agent had ever taken was started by the user. There were exactly
+three entry points into `Session.submit` — typing, the recognizer committing a
+transcript, and the greeting, which is a one-shot at connect — and nothing in
+the process ever woke up on its own. If the user said nothing, nothing happened,
+forever. Streaming made the round trip fast; it never made the loop anything
+other than turn-based. This chapter adds the missing piece, which is not a
+model or a vendor but a **ticker**.
+
+The goal it serves is a **mixed-initiative** agent: one that holds a share of
+the initiative rather than waiting to be addressed. That is a long arc, and this
+is deliberately its safest first step — **speaking into silence the user has
+left, never over speech they are producing**. Silence-filling and talking over
+someone need the same machinery (a clock, a yield rule, a budget, a judgement
+about whether to speak at all), but only one of them can be embarrassing while
+the thresholds are being tuned. Overlap, backchannels and any notion of urgency
+are later chapters.
+
+The headline is not that the agent speaks unprompted. It is that **it considers
+speaking and usually decides not to.** The decline is the feature: the model is
+given an explicit veto, every consideration is drawn on the page whether it
+spoke or not, and the ratio is what this chapter is judged on in place of a
+latency number. There is no latency budget here at all — nobody is waiting for
+an unprompted line, because the agent chose the moment. That is the first thing
+in this project not answerable to §7, and it is what makes deciding first and
+speaking second affordable.
+
+**What changed**
+
+- `src/voice_agent/initiative.py`: new. `Rung` (when a nudge may fire, what it
+  is for, and how willing the agent should be to take it), `LADDER` (three of
+  them), and `Initiative` — one task per session that checks the ladder every
+  second, asks the model whether there is anything worth saying, and speaks it
+  if there is. Knows nothing about `Session`: what it can see arrives as a
+  `quiet` callable, what it can do as a `speak` callable.
+- `src/voice_agent/session.py`: owns the clock. `quiet_for()` is the yield rule
+  — the one place that can see every reason to hold back. `speak()` turns a
+  decided line into an ordinary turn. A user turn calls `reset()`, handing the
+  budget back.
+- `src/voice_agent/turn.py`: `text` may now be `None` — a turn the agent started
+  has an answer and no question. Everything after that point is unchanged, which
+  is the point.
+- `src/voice_agent/mic.py`: exposes `quiet_for` and `held`, read-only views of
+  state the idle watchdog already kept.
+- `prompts/system_prompt.md`: a "Speaking unprompted" section — the veto, the
+  one-sentence limit, no rewording an invitation already made, no narrating the
+  pause, and how to withdraw well.
+- `src/voice_agent/config.py`, `cli.py`: `VOICE_AGENT_INITIATIVE` and
+  `--initiative 15,28` / `--initiative off`. Malformed values are rejected at
+  startup rather than repaired.
+- `src/voice_agent/web/app.js`, `index.html`: every consideration is drawn as a
+  dim line — the verdict, the silence, the rung, what deciding took and what it
+  cost — and a spoken line is marked as unprompted on its own bubble.
+
+**Design decisions**
+
+- **An unprompted line goes through `run_turn`, not down a path of its own.**
+  Rejected: a separate "announce" path that just synthesises text. Reusing the
+  turn means barge-in, `heard.py` truncation, karaoke and cancellation all apply
+  to a nudge with no new code — and the proof is that the test asserting a nudge
+  talked over mid-sentence is recorded as only what was heard passed on the
+  first run, unmodified.
+- **The line is decided in one call and spoken in a second step**, rather than
+  streamed straight to the synthesizer. Streaming would risk voicing the veto
+  sentinel before it could be recognised as one, and an unprompted turn has no
+  latency budget to protect.
+- **The veto is a sentinel (`NOTHING`), not an empty reply.** "The model chose
+  silence" and "the call produced nothing" have to stay distinguishable: the
+  first is the feature and the second is a bug. Parsing errs towards silence — a
+  decline misread as a line is the one failure that gets spoken out loud.
+- **A rung is an opportunity, not a debt.** It is spent whether the model speaks
+  or declines, so a decline cannot leave the agent re-deciding the same rung
+  once a second for the rest of the silence.
+- **Two rungs, then quiet for good** until the user speaks. A hard ceiling, not
+  a soft preference. The first *offers something concrete* rather than asking
+  again — "are you there? … ARE YOU THERE?" is the needy pattern that makes
+  proactive agents unbearable — and the second is a withdrawal, because handing
+  control back explicitly is itself a social act and is what earns the licence
+  to speak first at all.
+- **There were three rungs, and the measurements deleted one.** A rung at seven
+  seconds was meant to leave the door open and invite the user in. It fired zero
+  times in eighteen considerations, and the reason turned out to be structural
+  rather than shy: the rules forbid rewording an invitation already made, and
+  the greeting *is* an invitation, so every move available to it was prohibited.
+  A rung with no legal move is not caution — it is a paid call with a foregone
+  conclusion. The rung that replaced it as first fires rarely (once in nine) but
+  genuinely, and where a person would: when the agent's own question has gone
+  unanswered, it offers an easier one. Rare is a judgement; never is a bug.
+- **The yield rule watches for the silence getting *shorter*, not for it
+  disappearing.** This is the subtle half, and the first version got it wrong.
+  Someone who starts talking mid-decision does not make the moment unavailable —
+  none of the conditions the session watches have changed yet — they restart the
+  silence, so it comes back smaller than it went in. Waiting for `None` meant
+  waiting for the recogniser to commit a second later, by which time the agent
+  was already speaking over them.
+- **The nudge is a transient user-role message appended after the history and
+  never recorded.** After, not before: ROADMAP §2C is explicit that a volatile
+  element early in the prompt invalidates the prefix cache from that point on.
+- **Only the delays are configurable, not the intents.** What each rung is for,
+  and how readily it should be taken, is what makes the agent tolerable to sit
+  with. That is not a knob.
+- **`quiet_for()` asks the microphone's holds, not `Spoken.audible`** — see the
+  first bug below. The two mean the same thing; only one of them expires.
+
+**Latency impact**
+
+None on the reactive path: nothing was added to it. An unprompted turn is the
+first thing in this project with no latency budget, since the agent picks the
+moment. Measured, deciding takes 540–820 ms against Claude Haiku 4.5, and the
+line then flows through the ordinary speech path with `ttft_ms` of 0 because it
+has already been written.
+
+**Cost**
+
+Two judged calls per stretch of silence, and then none until the user speaks —
+down from three when the ladder lost a rung. Measured live: ~2,080–2,100 input
+tokens per consideration, 5 output tokens for a decline and 11 for a line.
+**Nothing was served from cache** — the prompt sits just under Anthropic's
+minimum cacheable prefix for Haiku, so all ~2k tokens are re-prefilled each
+time. Exactly what ROADMAP §2C predicts for hosted APIs, and cheap enough at two
+calls per silence not to matter; it would matter a great deal for the always-on
+judgement of a later chapter.
+
+**Deliberately not done**
+
+- Anything that speaks **over** the user. That is the next arc.
+- Backchannels (`mm-hm`), which need the concept of an utterance that is not a
+  turn — no history entry, no hold, interrupting nothing. Its own chapter.
+- A real voice detector. The clock knowingly runs on the recognizer's lagged
+  signal (below), which is the next chapter.
+- Always-on judgement on every partial, and any notion of graded interruption
+  strength or urgency.
+
+**Verification**
+
+`uv run verify` green — 333 tests, 36 of them new.
+
+Exercised for real against Anthropic (Haiku 4.5), ElevenLabs Scribe and
+ElevenLabs TTS, with a scripted client sending real silence at real time as a
+muted browser would:
+
+```
+  0.0s  greeting · 2.5s of speech
+  0.0s  listening
+ 15.7s  rung 1/2  declined  after 15s quiet · 636 ms · 2083 in, 5 out
+ 29.4s  rung 2/2  spoke     after 29s quiet · 744 ms · 2097 in, 11 out
+                  "I'm here whenever you're ready."
+ 29.9s  1.4s of speech · reply_end carried initiative: 2, ttft_ms: 0
+```
+
+Listening was still open at 38 s: speaking the withdrawal restarts the idle
+window, so the ears do not close on the agent's own last word.
+
+A second live run with a deliberately invalid provider key, to see a failure
+rather than assume one: both rungs reported `failed` on the page with the
+provider's own message, the budget stayed spent rather than retrying once a
+second, and the session carried on.
+
+**What the judge actually decides.** Probed against six scripted conversations
+at both rungs — 12 considerations — the withdrawal fires 6 times in 6 and the
+first rung 0 in 6. Probed again on the three conversations most deserving of an
+early word, three times each, the first rung fires **3 in 9** — all three in the
+same scenario, the one where the agent's own question has gone unanswered, and
+each time by rephrasing that question into an easier one ("Are you thinking
+about budget, or what kind of trip you're in the mood for?"). The other two
+scenarios decline every time.
+
+That rate was **1 in 9** until the system prompt was told that speaking first is
+something this agent *does* (see the fixes below). Teaching it its own capability
+made it three times readier to use it — a coupling worth knowing about, since the
+change was made to stop it denying the capability, not to tune the rate. The
+increase is concentrated where firing is most defensible, so it stands; the
+on-screen decline log is what makes it tunable from real conversations rather
+than from intuition.
+
+Three prompt corrections came out of measuring rather than reasoning:
+
+- **The veto was weighted equally at every rung**, which produced 11 declines out
+  of 12 — including at 45 s of dead silence, where saying nothing is neglect
+  rather than tact. The bias has to *fall* as the silence grows, so each `Rung`
+  now carries its own disposition.
+- **A blanket "saying nothing is the normal answer" in the system prompt
+  overrode the per-rung disposition.** It now describes the judgement and defers
+  the weighting to the note. Removing Chapter 0's older "do not fill every gap"
+  line changed nothing, so the remaining reticence is the model's own judgement,
+  not a prompt conflict.
+- **The invitation rung had no legal move**, which is why it is gone. The
+  system prompt now says so directly: a short pause is almost never yours to
+  fill, and when a long one is worth breaking, offer something rather than ask
+  for something.
+
+Also observed and left alone: the withdrawal is grounded in the conversation
+when there is one ("…if you want to know anything else about Riga"), and generic
+when there is not.
+
+**Fixes**
+
+- The agent no longer speaks over someone who starts talking while it is
+  deciding. The gate watched for the silence becoming unavailable; speech makes
+  it *shorter*. Found by review, and the regression test was demonstrated
+  failing before the fix.
+- `Spoken.audible` is bounded by the duration of the audio actually sent, so a
+  lost `playback` message no longer leaves it true for the life of the session.
+  It wedged the clock (measured: zero ticks in 58 s) and, unnoticed since
+  Chapter 5, wedged speculation the same way.
+- A consideration that fails is reported to the page instead of logged at a
+  level nothing prints. A clock failing in silence looked exactly like one
+  deciding to stay quiet.
+- `NOTHING?` and `NOTHING,` are read as declining. Only `.` and `!` were
+  stripped, so the sentinel could be synthesised and spoken aloud.
+- An answer longer than 300 characters is reported and not spoken. Nothing
+  capped an unprompted reply against `MAX_OUTPUT_TOKENS` of 1024.
+- More delays than rungs is refused rather than silently trimmed, and a bad
+  `--initiative` now prints one sentence instead of a traceback.
+- The last rung is reachable. At 45 s the idle watchdog stopped listening at
+  32 s and the withdrawal never arrived, so the ears closed without the agent
+  ever saying goodbye. A test asserts the ladder stays inside
+  `IDLE_TIMEOUT_SECONDS`.
+- `Initiative.stop()` will not cancel and then await its own task, matching the
+  guard `Mic.stop()` already had.
+- The agent no longer denies that it can speak first. Asked outright — "can you
+  jump in on your own?" — it answered "usually no, I wait until you finish", and
+  then spoke unprompted fifteen seconds later. The prompt described the clock as
+  a request arriving rather than as something the agent *is*, so its self-model
+  never included it. Seen live, in Russian, by a user who then had to argue with
+  it. It now answers accurately in both languages, including the limits.
+- An unprompted line no longer reports "thought for 0 ms". Its timings are zero
+  by construction — the line was written before the turn began — and this
+  project does not put a number on screen that only looks like one. The bubble
+  now says where the real cost is.
+- Words the recognizer takes back are taken off the page. Partials are drawn
+  into a bubble as they arrive, and an utterance that commits to nothing left
+  that bubble behind — so the *next* utterance was written into it and appeared
+  wherever the abandoned one had been. Latent since Chapter 3 and invisible
+  until this chapter, because nothing could be added to the log in between:
+  reported live as a question drawn *above* the two unprompted lines that
+  preceded it. The fix is `mic.py`'s, not the clock's.
+- The test claiming a failing tick does not kill the ticker asserted nothing: it
+  yielded once while the ticker's first act is to sleep a whole tick, so no
+  cycle ever ran. Two more tests read the developer's environment and the rung
+  counter; both now assert behaviour.
+
 ## Measurement — LLM latency by provider, and connections kept between turns
 
 A small step between chapters. The roadmap's next large items (a local voice

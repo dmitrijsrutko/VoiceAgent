@@ -18,6 +18,7 @@ from voice_agent.errors import VoiceAgentError
 from voice_agent.heard import Spoken
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
+from voice_agent.streams import closing
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
 from voice_agent.tts.base import pcm_seconds
@@ -27,23 +28,6 @@ logger = logging.getLogger(__name__)
 SLOW_FIRST_TOKEN_MS = 3000
 """A first token this late is logged. Measured TTFT runs ~0.5-1.2 s; one turn
 took 8.5 s and nothing afterwards could say where it went."""
-
-
-@contextlib.asynccontextmanager
-async def closing[T](stream: AsyncIterator[T]) -> AsyncIterator[AsyncIterator[T]]:
-    """Close a provider's stream when the turn stops reading it, however it stops.
-
-    Cancelling a turn does not close the generator it was reading: the
-    cancellation usually lands in a socket write *between* fragments, which
-    leaves the generator suspended at its `yield` — and the provider's HTTP
-    stream open, and billed, until garbage collection gets round to it.
-    """
-    try:
-        yield stream
-    finally:
-        aclose = getattr(stream, "aclose", None)
-        if aclose is not None:
-            await aclose()
 
 
 class Interruption:
@@ -65,7 +49,7 @@ async def run_turn(
     engine: LLM,
     speaker: TTS | None,
     system_prompt: str,
-    text: str,
+    text: str | None,
     fragments: AsyncIterator[str] | None = None,
     report: dict[str, object] | None = None,
     usage: Usage | None = None,
@@ -76,8 +60,15 @@ async def run_turn(
 
     `voice` is filled with what the reply's speech says and when, so that
     whoever interrupts it can work out what was heard.
+
+    `text` is `None` for a turn the agent started itself: there is no question,
+    only an answer. Everything after that point is identical — the same
+    streaming, the same speech, the same truncation when it is talked over —
+    which is the reason an unprompted line goes through here rather than down a
+    path of its own.
     """
-    conversation.add_user(text)
+    if text is not None:
+        conversation.add_user(text)
     await channel.send_json({"type": "reply_start"})
 
     started = time.perf_counter()
@@ -111,7 +102,8 @@ async def run_turn(
             # a dangling question in the context that the next call would resend.
             # Part of the answer may already have been heard; it stops here, and
             # the audio that began is closed so the page stops waiting for it.
-            conversation.messages.pop()
+            if text is not None:
+                conversation.messages.pop()
             if speech is not None:
                 await speech.interrupt()
             logger.warning("turn failed for session %s: %s", conversation.id, exc)
@@ -175,7 +167,7 @@ async def run_turn(
             # before a reply existed, the same rule as a failure: no question
             # without an answer. Nothing more is sent, so whatever ended the
             # turn is the last word.
-            if reply is None:
+            if reply is None and text is not None:
                 conversation.messages.pop()
             raise
         # Talked over. This cancellation was the interruption asking the turn to

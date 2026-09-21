@@ -18,6 +18,14 @@ from dataclasses import dataclass, field
 from voice_agent.conversation import Message
 from voice_agent.tts.base import AudioChunk, pcm_seconds
 
+PLAYBACK_GRACE_SECONDS = 10.0
+"""How long after its own audio must have ended a voice is still treated as
+possibly audible, when the browser has not said otherwise.
+
+Covers playback starting later than the send and drifting behind it. Generous
+on purpose: being wrong in this direction costs one late speculation, while
+being wrong in the other costs the feature for the rest of the session."""
+
 
 @dataclass(slots=True)
 class Spoken:
@@ -66,8 +74,30 @@ class Spoken:
 
     @property
     def audible(self) -> bool:
-        """Possibly still coming out of the user's speaker."""
-        return self.started_at is not None and not self.finished and self.interrupted_at is None
+        """Possibly still coming out of the user's speaker.
+
+        Bounded, because the browser's word is not always going to arrive. The
+        only thing that clears `finished` is a `playback: false` message, and a
+        closed tab or a dropped frame means it never comes — after which this
+        stays true for the life of the session and everything gated on it goes
+        quiet for good, silently. That wedged the initiative clock (measured:
+        not one tick in 58 seconds) and it wedges speculation the same way.
+
+        The server does not have to take the browser's word for it, because it
+        knows how long the audio it sent lasts: nothing can still be sounding
+        once that duration, plus a generous allowance for playback starting
+        late, has passed since the first chunk went out. Believing the browser
+        while it is talking and falling back on arithmetic when it stops is what
+        makes this both accurate and terminating.
+        """
+        if self.started_at is None or self.finished or self.interrupted_at is not None:
+            return False
+        return time.perf_counter() - self.started_at <= self.sounds_for()
+
+    def sounds_for(self) -> float:
+        """An upper bound, in seconds from the first chunk, on when this voice
+        must have stopped. Grows while audio is still being sent."""
+        return pcm_seconds(self.sent_bytes) + PLAYBACK_GRACE_SECONDS
 
     def playback(self, active: bool) -> None:
         # A stop is only this voice's once it has been heard to start: the

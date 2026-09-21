@@ -156,6 +156,41 @@ def test_an_empty_commit_is_not_reported_at_all(store: SessionStore) -> None:
     assert store.get(key).messages == []
 
 
+def test_words_the_recognizer_takes_back_are_taken_off_the_page(
+    store: SessionStore,
+) -> None:
+    """An utterance that comes to nothing has to be taken back, not just
+    dropped server-side.
+
+    The page draws a bubble on the first partial and writes every later partial
+    into that same bubble, so one left behind does not merely linger — the
+    *next* utterance appears wherever the abandoned one was. Seen live: noise
+    was transcribed and taken back, two unprompted lines arrived in the gap,
+    and the question the user then asked was drawn above both of them, as
+    though they had answered it before it was asked.
+    """
+    stt = FakeSTT(
+        script=[
+            Transcript("is anyone", is_final=False),  # noise, drawn on the page
+            Transcript("  ", is_final=True),  # ... and committed to nothing
+            Transcript("what is the time", is_final=False),
+        ]
+    )
+    client = build(store, stt, FakeLLM())
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        text_frame(socket)
+        socket.send_json({"type": "listen_start"})
+        text_frame(socket)
+        socket.send_bytes(FRAME)
+        assert text_frame(socket)["text"] == "is anyone"
+        socket.send_bytes(FRAME)
+        assert text_frame(socket)["type"] == "transcript_dropped"
+        socket.send_bytes(FRAME)
+        assert text_frame(socket)["text"] == "what is the time"
+
+
 def test_saying_exit_ends_the_conversation(store: SessionStore) -> None:
     """A spoken exit is the same exit as a typed one."""
     stt = FakeSTT(script=[Transcript("Goodbye.", is_final=True)])

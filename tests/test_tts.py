@@ -13,6 +13,7 @@ from websockets.datastructures import Headers
 from websockets.http11 import Response
 
 from voice_agent.errors import ConfigError, ProviderError
+from voice_agent.streams import closing
 from voice_agent.tts import create_tts, elevenlabs_tts
 from voice_agent.tts.base import (
     SAMPLE_RATE,
@@ -30,7 +31,6 @@ from voice_agent.tts.elevenlabs_tts import (
     explain,
 )
 from voice_agent.tts.openai_tts import RESPONSE_FORMAT, OpenAITTS
-from voice_agent.turn import closing
 
 
 async def chunks_of(*parts: bytes | AudioChunk) -> AsyncIterator[AudioChunk]:

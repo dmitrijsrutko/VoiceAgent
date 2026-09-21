@@ -11,7 +11,7 @@ from typing import Any
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS
-from voice_agent.conversation import Conversation
+from voice_agent.conversation import Conversation, Message
 from voice_agent.session import Session
 from voice_agent.stt.base import Transcript
 
@@ -244,3 +244,178 @@ async def test_a_turn_that_dies_on_a_closed_socket_is_not_an_unretrieved_traceba
         loop.set_exception_handler(None)
 
     assert not unretrieved, unretrieved[0].get("message")
+
+
+# --- Unprompted turns ---------------------------------------------------------
+
+
+async def listening_for(
+    llm: FakeLLM, tts: FakeTTS | None = None
+) -> tuple[Session, RecordingChannel, Conversation]:
+    """A session with its ears open, which is the only state the clock ever
+    speaks from — `speak()` refuses otherwise, and that refusal is the yield
+    rule rather than an inconvenience."""
+    session, channel, conversation = session_for(llm, FakeSTT(script=[]), tts=tts)
+    assert session.mic is not None
+    await session.mic.start()
+    return session, channel, conversation
+
+
+async def test_an_unprompted_line_is_recorded_with_no_question_before_it() -> None:
+    """The agent started this turn, so there is no user message to keep. Every
+    chapter before this one could assume a reply had a question above it."""
+    llm = FakeLLM()
+    session, channel, conversation = await listening_for(llm)
+
+    await session.speak("Whenever you're ready.", rung=1)
+    await channel.wait_for("reply_end")
+
+    assert conversation.messages == [Message("assistant", "Whenever you're ready.")]
+    assert llm.seen == [], "an already-decided line must not be generated a second time"
+
+
+async def test_an_unprompted_line_is_marked_as_unprompted_on_the_wire() -> None:
+    session, channel, _ = await listening_for(FakeLLM())
+
+    await session.speak("Take your time.", rung=2)
+    await channel.wait_for("reply_end")
+
+    end = next(f for f in channel.frames if f["type"] == "reply_end")
+    assert end["initiative"] == 2
+    assert end["text"] == "Take your time."
+
+
+async def test_an_unprompted_line_is_spoken_aloud_like_any_other_reply() -> None:
+    tts = FakeTTS()
+    session, channel, _ = await listening_for(FakeLLM(), tts=tts)
+
+    await session.speak("Still here.", rung=1)
+    await channel.wait_for("audio_end")
+
+    assert tts.spoken == ["Still here."]
+    assert "audio_bytes" in channel.kinds()
+
+
+async def test_a_question_asked_during_an_unprompted_line_wins() -> None:
+    """The user has the floor the moment they take it. A nudge cut short must
+    not leave the question it interrupted without an answer."""
+    llm = FakeLLM(replies=["Of course."], pace=0.02)
+    session, channel, conversation = await listening_for(llm, tts=FakeTTS())
+
+    await session.speak(SLOW_REPLY, rung=1)
+    await channel.wait_for("audio_bytes", count=3)
+    await session.submit("actually, hello")
+    await channel.wait_for("reply_end", count=2)
+    await asyncio.sleep(0)
+
+    roles = [m.role for m in conversation.messages]
+    assert roles[-2:] == ["user", "assistant"]
+    assert conversation.messages[-1].content.strip() == "Of course."
+
+
+async def test_the_agent_never_speaks_first_into_an_ended_conversation() -> None:
+    llm = FakeLLM()
+    session, channel, conversation = await listening_for(llm)
+    conversation.end()
+
+    await session.speak("Anyone there?", rung=2)
+
+    assert conversation.messages == []
+    assert "reply_start" not in channel.kinds()
+
+
+# --- The yield rule -----------------------------------------------------------
+
+
+async def test_a_deaf_agent_has_no_silence_to_speak_into() -> None:
+    """`quiet_for` is the one place that knows every reason to hold back, so it
+    is asserted on directly rather than through the clock."""
+    session, _, _ = session_for(FakeLLM())
+
+    assert session.quiet_for() is None, "an agent with no ears cannot hear a silence"
+
+
+async def test_a_silence_does_not_count_while_a_turn_is_running() -> None:
+    llm = FakeLLM(replies=[SLOW_REPLY], pace=0.02)
+    session, channel, _ = session_for(llm, FakeSTT(script=[]), tts=FakeTTS())
+    assert session.mic is not None
+    await session.mic.start()
+
+    assert session.quiet_for() is not None
+    await session.submit("tell me something long")
+    await channel.wait_for("reply_start")
+    assert session.quiet_for() is None, "a reply in progress is not a silence"
+
+    await session.end()
+
+
+async def test_a_silence_does_not_count_before_the_microphone_is_open() -> None:
+    session, _, _ = session_for(FakeLLM(), FakeSTT(script=[]))
+
+    assert session.quiet_for() is None, "not listening is not the same as quiet"
+
+    assert session.mic is not None
+    await session.mic.start()
+    assert session.quiet_for() is not None
+    await session.end()
+
+
+async def test_a_silence_does_not_count_once_the_conversation_has_ended() -> None:
+    session, _, conversation = session_for(FakeLLM(), FakeSTT(script=[]))
+    assert session.mic is not None
+    await session.mic.start()
+    conversation.end()
+
+    assert session.quiet_for() is None
+
+
+async def test_the_agent_will_not_speak_first_when_there_is_no_silence() -> None:
+    """The yield rule enforced where it lives. `Initiative` cleared this line a
+    socket write earlier; the session has the last word, because it is the only
+    thing that can see every reason to hold back."""
+    llm = FakeLLM()
+    session, channel, conversation = await listening_for(llm)
+    assert session.mic is not None
+    await session.mic.stop(announce=False)  # ears shut: nothing to speak into
+
+    await session.speak("Still there?", rung=1)
+
+    assert conversation.messages == []
+    assert "reply_start" not in channel.kinds()
+
+
+async def test_a_user_turn_hands_the_budget_back() -> None:
+    """Asserted through what the agent does, not through the rung counter.
+
+    Silent (no TTS) so a turn ends the moment its text does, which keeps the
+    ladder and the turns from racing each other.
+    """
+    llm = FakeLLM(["one", "two", "again"])
+    session, channel, _ = await listening_for(llm)
+    mic = session.mic
+    assert mic is not None
+
+    async def long_silence() -> None:
+        """Let whatever just happened finish, then age the clock past a rung."""
+        for _ in range(4):
+            await asyncio.sleep(0)
+        mic._heard_speech_at -= 60
+
+    spoken = 0
+    for _ in range(len(session._initiative._ladder)):
+        await long_silence()
+        await session._initiative.tick()
+        spoken += 1
+        await channel.wait_for("reply_end", count=spoken)
+
+    await long_silence()
+    await session._initiative.tick()
+    assert channel.kinds().count("reply_end") == spoken, "the ladder went past its budget"
+
+    await session.submit("sorry, I'm back")
+    await channel.wait_for("reply_end", count=spoken + 1)
+
+    await long_silence()
+    await session._initiative.tick()
+
+    await channel.wait_for("reply_end", count=spoken + 2)  # it may speak first again

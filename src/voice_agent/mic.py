@@ -113,10 +113,35 @@ class Mic:
         self._keepalive: asyncio.Task[None] | None = None
         self._started = 0.0
         self._heard_speech_at = 0.0
+        self._drawn = False
+        """Whether partial text has been sent that the page is still showing.
+
+        Only this distinguishes an utterance that came to nothing — worth
+        taking back — from a stretch of silence that was never drawn at all."""
 
     @property
     def listening(self) -> bool:
         return self._listening
+
+    @property
+    def held(self) -> bool:
+        """Something is expected to be filling the silence — a turn running, or
+        the browser still playing a reply."""
+        return bool(self._holds)
+
+    @property
+    def quiet_for(self) -> float:
+        """Seconds since the recognizer last produced anything.
+
+        Not since the user stopped talking, which this server cannot see: it
+        runs no VAD, and the recognizer trails real speech by several hundred
+        milliseconds (measured at ~800 ms on a 1.65 s utterance). So this reads
+        systematically late, and everything built on it inherits that.
+
+        Negative while a reply is still playing, because `expect_silence` puts
+        the clock in the future — which reads correctly as "not quiet yet".
+        """
+        return time.perf_counter() - self._heard_speech_at
 
     async def start(self) -> None:
         if self._listening:
@@ -312,6 +337,20 @@ class Mic:
                 {"type": "listening", "active": True, "reason": "reconnected to the recognizer"}
             )
 
+    async def _drop(self) -> None:
+        """Take back partial text the page is showing but nothing will finish.
+
+        The page draws a bubble on the first partial and writes every later one
+        into it, so a bubble left behind does not merely linger — the *next*
+        utterance lands in it, and appears wherever the abandoned one was
+        instead of at the end of the conversation. Seen live: two unprompted
+        lines arrived in the gap, and the user's question was drawn above both.
+        """
+        if not self._drawn:
+            return
+        self._drawn = False
+        await self._channel.send_json({"type": "transcript_dropped"})
+
     async def _fail(self, message: str) -> None:
         await self._channel.send_json({"type": "listen_error", "message": message})
         await self.stop()
@@ -327,6 +366,9 @@ class Mic:
         self._agreement.reset()
         if self._on_session is not None:
             await self._on_session()
+        # A recognizer session starts from nothing, so anything the last one had
+        # begun to transcribe is void — on a reconnect, mid-utterance.
+        await self._drop()
         heard_at = time.perf_counter()
         async for transcript in self._stt.stream(self._audio()):
             self._heard_speech_at = time.perf_counter()
@@ -349,6 +391,7 @@ class Mic:
                     # the speculation lead on every turn, since a repeat is
                     # exactly what starts a speculation.
                     heard_at = time.perf_counter()
+                self._drawn = self._drawn or bool(transcript.text.strip())
                 await self._channel.send_json(
                     {"type": "transcript", "text": transcript.text, "final": False}
                 )
@@ -358,10 +401,14 @@ class Mic:
 
             if not transcript.text.strip():
                 # A commit with nothing in it — the flush at the end of a
-                # session, or a stretch of noise. Reporting it would put an
-                # empty bubble and a meaningless endpointing figure on screen.
+                # session, or a stretch of noise. Its *text* is not worth
+                # reporting: an empty bubble and a meaningless endpointing
+                # figure on screen. But the fact that it happened is, because
+                # the partials leading up to it have already been drawn, and
+                # only this says they came to nothing.
                 heard_at = time.perf_counter()
                 self._agreement.reset()
+                await self._drop()
                 continue
 
             if self._agreement.contradictions:
@@ -397,5 +444,6 @@ class Mic:
                 }
             )
             self._agreement.reset()
+            self._drawn = False
             heard_at = time.perf_counter()
             await self._on_final(transcript.text)

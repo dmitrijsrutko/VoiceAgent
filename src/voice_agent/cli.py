@@ -1,6 +1,8 @@
 """`uv run voice-agent` — serve the chat page and the conversation socket."""
 
 import argparse
+import logging
+from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
@@ -32,6 +34,13 @@ def main() -> None:
     )
     parser.add_argument("--voice", default=settings.voice, help="voice id or name for the backend")
     parser.add_argument(
+        "--voice-gender",
+        default=settings.voice_gender,
+        choices=["female", "male", "neutral"],
+        help="how the agent speaks about itself in languages that mark the "
+        "speaker's gender (default: %(default)s — match this to --voice)",
+    )
+    parser.add_argument(
         "--stt",
         default=settings.ears_provider,
         choices=["elevenlabs", "none"],
@@ -43,6 +52,30 @@ def main() -> None:
         default=settings.vad_silence,
         metavar="SECONDS",
         help="pause length that ends a spoken turn (default: 1.5)",
+    )
+    parser.add_argument(
+        "--initiative",
+        default=None,
+        metavar="SECONDS,...",
+        help="silences at which the agent considers speaking unprompted, or 'off' "
+        "for the purely reactive agent (default: 7,20,45)",
+    )
+    parser.add_argument(
+        "--sessions",
+        default=None,
+        metavar="DIR",
+        help="where to write the conversation record, or 'off' (default: sessions)",
+    )
+    parser.add_argument(
+        "--trace",
+        default=None,
+        metavar="DIR",
+        help="where to write the technical trace, or 'off' (default: traces)",
+    )
+    parser.add_argument(
+        "--purge-sessions",
+        action="store_true",
+        help="delete every recorded conversation, then exit",
     )
     parser.add_argument(
         "--list-voices",
@@ -69,8 +102,17 @@ def main() -> None:
         os.environ["VOICE_AGENT_MODEL"] = args.model
     if args.voice:
         os.environ["VOICE_AGENT_VOICE"] = args.voice
+    os.environ["VOICE_AGENT_VOICE_GENDER"] = args.voice_gender
     if args.vad_silence:
         os.environ["VOICE_AGENT_VAD_SILENCE"] = str(args.vad_silence)
+    if args.initiative is not None:
+        os.environ["VOICE_AGENT_INITIATIVE"] = args.initiative
+    if args.sessions is not None:
+        os.environ["VOICE_AGENT_SESSIONS"] = args.sessions
+    if args.trace is not None:
+        os.environ["VOICE_AGENT_TRACE"] = args.trace
+
+    start_logging()
 
     if args.bench_llm is not None:
         from voice_agent.bench import main as bench
@@ -78,18 +120,92 @@ def main() -> None:
         bench(args.bench_llm)
         return
 
+    if args.purge_sessions:
+        purge_sessions(load_settings().sessions)
+        return
+
     if args.list_voices:
         list_voices(args.tts)
         return
 
+    from voice_agent.errors import ConfigError
     from voice_agent.server import create_app
 
-    voice = args.tts if args.tts != "none" else "silent"
+    sex = {"female": "♀", "male": "♂", "neutral": "·"}[args.voice_gender]
+    voice = f"{args.tts} {sex}" if args.tts != "none" else "silent"
     ears = args.stt if args.stt != "none" else "deaf"
+    # A misconfiguration is a message, not a traceback. It is the one error a
+    # user is *expected* to hit — a typo in a flag — and burying the sentence
+    # that says which flag under twenty lines of stack helps nobody.
+    try:
+        # Re-read, so a bad --initiative is rejected here rather than inside the
+        # first connection.
+        settings = load_settings()
+        app = create_app()
+    except ConfigError as exc:
+        raise SystemExit(f"voice-agent: {exc}") from exc
+    delays = settings.initiative
+    clock = "+".join(f"{d:g}s" for d in delays) if delays else "reactive"
     print(
-        f"voice-agent → http://{args.host}:{args.port}  ({args.provider} · 🔊 {voice} · 🎤 {ears})"
+        f"voice-agent → http://{args.host}:{args.port}  "
+        f"({args.provider} · 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
+        f"· 📝 {settings.sessions or 'off'} · 🔬 {settings.trace or 'off'})"
     )
-    uvicorn.run(create_app(), host=args.host, port=args.port, log_level="warning")
+    uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
+
+
+def start_logging() -> None:
+    """Configure logging, which until Chapter 11 nothing in this project did.
+
+    The only line that touched it was uvicorn's own `log_level`, which sets
+    uvicorn's loggers and not ours, so all eight `logger.info` calls under
+    `src/voice_agent/` went nowhere — which is how the initiative clock's
+    provider failures stayed invisible.
+
+    The console's level is set on the **handler**, not inherited from the root
+    logger. Propagation consults handler levels and ignores ancestor logger
+    levels, so putting `voice_agent` at DEBUG to feed the trace also pushed
+    every INFO line to the terminal — a recogniser reconnect, a failed warm, a
+    turn ending — until this was written the way it is now.
+    """
+    from voice_agent.trace import TraceHandler, install, open_trace
+
+    console = logging.StreamHandler()
+    console.setLevel(logging.WARNING)
+    console.setFormatter(logging.Formatter("%(levelname)s %(name)s: %(message)s"))
+    root = logging.getLogger()
+    root.setLevel(logging.WARNING)  # third-party loggers unchanged
+    root.addHandler(console)
+
+    tracing = open_trace(load_settings().trace)
+    install(tracing)
+    if tracing is not None:
+        project = logging.getLogger("voice_agent")
+        project.setLevel(logging.DEBUG)  # our own INFO reaches the trace
+        project.addHandler(TraceHandler())  # and only the trace
+
+
+def purge_sessions(directory: Path | None) -> None:
+    """Delete every recorded conversation.
+
+    The retention policy is "keep everything", so this is the whole of the
+    delete half of it — which means it asks first. These are transcripts of
+    things somebody said out loud, and there is no second copy.
+    """
+    if directory is None:
+        print("Conversations are not being recorded.")
+        return
+    files = sorted(directory.glob("*.md"))
+    if not files:
+        print(f"No conversations in {directory}.")
+        return
+    print(f"{len(files)} conversation(s) in {directory}, from {files[0].name}.")
+    if input("Delete them all? [y/N] ").strip().casefold() not in ("y", "yes"):
+        print("Left alone.")
+        return
+    for path in files:
+        path.unlink()
+    print(f"Deleted {len(files)}.")
 
 
 def list_voices(provider: str) -> None:

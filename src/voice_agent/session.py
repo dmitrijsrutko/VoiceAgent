@@ -11,23 +11,34 @@ Interruption has one rule: a new turn from the user stops whatever the agent is
 still doing with the last one — writing it, speaking it, or both. Speech can
 start that turn early: the first words recognized while the agent is audible
 stop it there and then, long before those words are committed.
+
+A turn no longer has to come from the user at all. `Initiative` can start one
+out of a silence, and it goes through exactly the same door — the same lock,
+the same voice, the same truncation when it is talked over. The session owns
+the *yield rule* for that (`quiet_for`, below), because it is the only thing
+that can see every reason not to speak; the policy of when and what lives in
+`initiative.py`.
 """
 
 import asyncio
 import contextlib
 import logging
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass
 
+from voice_agent import trace
 from voice_agent.channel import Channel
 from voice_agent.conversation import Conversation
 from voice_agent.heard import Spoken, truncated
+from voice_agent.initiative import LADDER, Initiative, Rung
 from voice_agent.llm import LLM
 from voice_agent.mic import Mic
 from voice_agent.speculation import Speculation, Speculator
 from voice_agent.stt import STT
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
+from voice_agent.tts.base import once
 from voice_agent.turn import Interruption, run_turn
 from voice_agent.warming import Warmer
 
@@ -59,7 +70,11 @@ class Turn:
     question to record.
     """
 
-    text: str
+    text: str | None
+    """What the user said. `None` for a turn the agent started itself."""
+    said: str | None
+    """The line an unprompted turn already decided to say, which it speaks
+    instead of generating one. `None` for an ordinary turn."""
     voice: Spoken
     interruption: Interruption
     after: asyncio.Task[None] | None
@@ -77,7 +92,10 @@ class Session:
         speaker: TTS | None,
         system_prompt: str,
         listener: STT | None,
+        ladder: Sequence[Rung] | None = None,
     ) -> None:
+        """`ladder` empty means the agent never speaks first — the reactive
+        agent of every chapter before this one, unchanged."""
         self.conversation = conversation
         self._channel = channel
         self._engine = engine
@@ -109,6 +127,47 @@ class Session:
             if listener is not None
             else None
         )
+        self._initiative = Initiative(
+            engine,
+            system_prompt,
+            conversation,
+            quiet=self.quiet_for,
+            speak=self.speak,
+            report=channel.send_json,
+            ladder=LADDER if ladder is None else ladder,
+        )
+
+    def start(self) -> None:
+        """Begin considering whether to speak. Called once the greeting is out,
+        so the first silence measured is the one *after* the agent's own voice.
+
+        Explicit rather than started in `__init__`, which is not guaranteed to
+        run on the event loop — and because a session that never starts the
+        clock is exactly the `--initiative off` agent.
+        """
+        if self.mic is not None:
+            self._initiative.start()
+
+    def quiet_for(self) -> float | None:
+        """Seconds of silence it would be safe to speak into, or `None` for
+        "not now".
+
+        The one place that knows every reason to hold back, which is why the
+        clock asks rather than deciding for itself. `None` is deliberately not
+        zero: a moment that does not count must not be confused with a silence
+        that has only just begun.
+
+        Note what this deliberately does *not* answer: whether the user is
+        talking *right now*. Nothing in this session can — a first partial only
+        restarts the silence, it does not make the moment unavailable — so a
+        shrinking number is the clock's own signal for that, and a real voice
+        detector is what would replace it.
+        """
+        if self.conversation.ended or self._turns or self._unsettled():
+            return None
+        if self.mic is None or not self.mic.listening or self.mic.held:
+            return None
+        return self.mic.quiet_for
 
     async def _on_partial(self, stable: str, repeated: bool) -> None:
         history = self.conversation.messages
@@ -128,6 +187,17 @@ class Session:
             self._speculator.on_settled(stable, history)
 
     def _unsettled(self) -> bool:
+        """The last reply may still be in the user's ear, or is being cut down
+        to what they heard of it.
+
+        Asks `Spoken.audible`, which is the right question — speculation must
+        not adopt a guess while a reply whose history is about to change is
+        still playing, and the microphone's holds cannot answer that: the turn's
+        hold is released when the reply is *written*, seconds before its voice
+        finishes. What made this dangerous was not the signal but that it could
+        not terminate; `audible` is now bounded by the duration of the audio
+        actually sent, so this is both correct and self-clearing.
+        """
         audible = self._voice is not None and self._voice.audible
         return audible or (self._settling is not None and not self._settling.done())
 
@@ -257,6 +327,9 @@ class Session:
             # it can land after the conversation it belonged to has ended.
             return
         self._warmer.forget()  # already reported on the transcript frame
+        # The user has spoken, so the budget is theirs again — whatever the
+        # agent spent on the silence before it.
+        self._initiative.reset()
         if is_exit_command(text):
             # `exit` produces no reply, so a guess at it answers nothing. Left
             # alone it would run to completion unread and uncounted.
@@ -269,7 +342,27 @@ class Session:
         claimed = await self._speculator.claim(text)
         report = self._speculator.report()
         self._speculator.reset()
-        turn = Turn(text, Spoken(), Interruption(), after=self._settling)
+        self._begin(
+            Turn(text, None, Spoken(), Interruption(), after=self._settling), claimed, report
+        )
+
+    async def speak(self, line: str, rung: int) -> None:
+        """Say something nobody asked for.
+
+        The line has already been decided and vetted by `Initiative`; all that
+        is left is to say it. It becomes an ordinary turn — queued on the same
+        lock, cancelled by the same interruption, cut down to what was heard by
+        the same code — so nothing downstream has to know it was unprompted.
+        """
+        if self.conversation.ended or self.quiet_for() is None:
+            # Checked again here, at the last possible moment: `Initiative`
+            # cleared this line a socket write ago, and the yield rule belongs
+            # to whoever can see every reason to hold back.
+            return
+        turn = Turn(None, line, Spoken(), Interruption(), after=self._settling)
+        self._begin(turn, None, {"initiative": rung})
+
+    def _begin(self, turn: Turn, claimed: Speculation | None, report: dict[str, object]) -> None:
         self._voice = turn.voice
         task = asyncio.create_task(self._take_turn(turn, claimed, report))
         self._turns[task] = turn
@@ -295,11 +388,30 @@ class Session:
                     await asyncio.wait({turn.after})
                 if turn.interruption.requested:
                     # Overtaken by a newer turn before it began. The user still
-                    # asked it; only the answer is no longer wanted.
-                    self.conversation.add_user(turn.text)
+                    # asked it; only the answer is no longer wanted. An
+                    # unprompted line has no question to keep, so it simply
+                    # never happened.
+                    if turn.text is not None:
+                        self.conversation.add_user(turn.text)
                     return
                 turn.started = True
-                with self.mic.busy() if self.mic is not None else contextlib.nullcontext():
+                kind = "turn.unprompted" if turn.text is None else "turn"
+                # A turn reads its reply from exactly one source, and which one
+                # is what distinguishes the three kinds of turn there are.
+                if claimed is not None:
+                    fragments = claimed.stream()  # a guess made before the question ended
+                elif turn.said is not None:
+                    fragments = once(turn.said)  # a line the agent decided to say
+                else:
+                    fragments = None  # generated now, from the question just asked
+                with (
+                    self.mic.busy() if self.mic is not None else contextlib.nullcontext(),
+                    trace.span(
+                        kind,
+                        {"said": turn.text or turn.said, "speculated": claimed is not None},
+                        trace_id=self.conversation.id,
+                    ),
+                ):
                     seconds = await run_turn(
                         self._channel,
                         self.conversation,
@@ -307,7 +419,7 @@ class Session:
                         self._speaker,
                         self._system_prompt,
                         turn.text,
-                        fragments=claimed.stream() if claimed is not None else None,
+                        fragments=fragments,
                         usage=claimed.usage if claimed is not None else None,
                         report=report,
                         voice=turn.voice,
@@ -346,6 +458,9 @@ class Session:
 
     async def end(self) -> None:
         self.conversation.end()
+        # Stopped first: a tick that fires during the teardown would otherwise
+        # start a turn into a conversation that is already over.
+        await self._initiative.stop()
         # Cancelled before announcing, so nothing from a reply can follow it.
         await self._cancel_turns()
         await self._cancel_settling()
@@ -361,6 +476,7 @@ class Session:
 
     async def close(self) -> None:
         """The socket is gone."""
+        await self._initiative.stop()
         if self.mic is not None:
             await self.mic.stop(announce=False)
         # A turn or a guess outlives the browser that prompted it otherwise, and

@@ -1,0 +1,221 @@
+"""The conversation as a file you can read afterwards.
+
+Everything this project has debugged so far started with someone copying the
+page's telemetry into a chat window by hand, because a reload threw it away.
+This keeps it: one Markdown file per conversation, written as it happens.
+
+It is written by tapping `Channel` rather than by calling a logger from each
+place something interesting occurs. `Channel` is the one door every frame the
+browser receives goes through, so the record cannot drift from what the user
+actually saw, and a frame type added in a later chapter appears here without
+anyone remembering to record it.
+
+**No audio is ever written.** Binary frames are counted, never kept: voice is
+biometric data, a five-minute session is tens of megabytes, and every bug in
+nine chapters has been diagnosable from timings.
+"""
+
+import contextlib
+import json
+import logging
+from collections.abc import Mapping
+from datetime import datetime
+from pathlib import Path
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+SESSIONS_DIR = Path("sessions")
+
+SPEAKERS = {
+    "greeting": "agent (greeting)",
+    "reply_end": "agent",
+    "transcript": "you (spoken)",
+}
+"""Frames carrying something the user read or heard. Everything else is a note
+attached to whatever came before it."""
+
+NOISE = frozenset({"delta", "marks", "audio_start", "reply_start"})
+"""One frame per token or per audio chunk. Keeping them would bury the
+conversation in its own telemetry; the trace holds them."""
+
+SKIP_KEYS = frozenset({"type", "text", "history"})
+"""Rendered elsewhere: `type` heads the block, `text` is its prose, and
+`history` is the whole conversation replayed on connect."""
+
+MAX_VALUE_CHARS = 120
+"""Longer values are a payload, not a measurement, and belong in the trace —
+but they are cut short with a marker rather than dropped. Absence has to mean
+"the frame did not carry it", never "it was too long to show"."""
+
+
+def render(value: object) -> str:
+    if isinstance(value, bool):
+        return "yes" if value else "no"
+    if isinstance(value, float):
+        return f"{value:.3f}".rstrip("0").rstrip(".")
+    text = str(value) if isinstance(value, int | str) else json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= MAX_VALUE_CHARS else f"{text[:MAX_VALUE_CHARS]}…"
+
+
+def attributes(payload: Mapping[str, Any]) -> str:
+    """Every field the frame carries, as `key value · key value`.
+
+    Deliberately generic rather than phrased. The page turns `reply_end` into
+    prose — "thought for 492 ms · 56 chars" — and writing that a second time in
+    Python would be a second renderer to keep in step, wrong within two
+    chapters. This way a field added to any frame shows up here on its own, and
+    the numbers arrive unrounded, which is what a record is for.
+    """
+    parts = []
+    for key, value in payload.items():
+        # Falsy is omitted, and absence therefore means zero. Kept every turn,
+        # `speculated no · speculation_lead_ms 0 · speculations_discarded 0`
+        # is four fields saying nothing happened, on every line. The trace
+        # keeps the full picture; this file is the one meant to be read.
+        if key in SKIP_KEYS or not value:
+            continue
+        parts.append(f"{key} {render(value)}")
+    return " · ".join(parts)
+
+
+class Record:
+    """One conversation's file, appended to as the conversation happens.
+
+    A record that cannot be written is never allowed to break a conversation:
+    every failure here is logged once and then swallowed, and the agent carries
+    on without it.
+    """
+
+    def __init__(self, path: Path, prompt_id: str = "", trace: str = "") -> None:
+        self._path = path
+        self._prompt_id = prompt_id
+        self._trace = trace
+        self._file: Any = None
+        self._audio_frames = 0
+        self._broken = False
+
+    @property
+    def path(self) -> Path:
+        return self._path
+
+    def _open(self) -> Any:
+        if self._file is None and not self._broken:
+            try:
+                self._path.parent.mkdir(parents=True, exist_ok=True)
+                self._file = self._path.open("a", encoding="utf-8")
+            except OSError as exc:
+                self._broken = True
+                logger.warning("conversation not being recorded: %s", exc)
+        return self._file
+
+    def _write(self, text: str) -> None:
+        handle = self._open()
+        if handle is None:
+            return
+        try:
+            handle.write(text)
+        except OSError as exc:  # a full disk must not end the conversation
+            self._broken = True
+            logger.warning("conversation recording stopped: %s", exc)
+
+    @staticmethod
+    def _clock() -> str:
+        return datetime.now().strftime("%H:%M:%S")
+
+    def block(self, speaker: str, body: str = "", notes: str = "") -> None:
+        """One turn, or one thing worth its own heading.
+
+        A blank line before the speech and before every technical line. It
+        makes the file scannable — the words stand apart from the numbers —
+        and it is also what Markdown needs: adjacent lines are one paragraph,
+        so without the blank lines a rendered view runs every measurement
+        together into a single run-on line.
+        """
+        self._write(f"\n## {self._clock()} — {speaker}\n")
+        if body.strip():
+            self._write(f"\n{body.strip()}\n")
+        if notes:
+            self.note(notes)
+
+    def note(self, text: str) -> None:
+        """Something the page never saw: a mic expiry, a turn that died."""
+        self._write(f"\n`{text}`\n")
+
+    def said(self, text: str, how: str = "typed") -> None:
+        """Input the browser never echoes back, so `Channel` cannot see it."""
+        self.block(f"you ({how})", text)
+        self.flush()
+
+    def audio(self, size: int) -> None:
+        """A binary frame went out. Counted, never kept."""
+        self._audio_frames += 1
+
+    def frame(self, payload: Mapping[str, Any]) -> None:
+        kind = str(payload.get("type", ""))
+        if kind in NOISE:
+            return
+        if kind == "ready":
+            self._header(payload)
+            return
+        if kind == "transcript" and not payload.get("final"):
+            return  # a partial the recognizer is still rewriting
+
+        if kind in SPEAKERS:
+            text = str(payload.get("text", ""))
+            # Reset here as well as on `audio_end`: a reply whose audio never
+            # closes would otherwise lend its count to the next one.
+            self._audio_frames = 0
+            self.block(SPEAKERS[kind], text, attributes(payload))
+            self.flush()
+            return
+
+        details = attributes(payload)
+        if kind == "audio_end":
+            details = f"{details} · frames {self._audio_frames}"
+            self._audio_frames = 0
+        self.note(f"{kind}: {details}" if details else kind)
+        if kind == "ended":
+            self.flush()
+
+    def _header(self, payload: Mapping[str, Any]) -> None:
+        """Written once per conversation; a reconnect says so instead.
+
+        Reloading the link resumes the same conversation, so it is the same
+        file — a second header would read as a second conversation.
+        """
+        if self._path.exists() and self._path.stat().st_size:
+            self._write(f"\n## {self._clock()} — reconnected\n")
+            return
+        voice, ears = payload.get("voice") or {}, payload.get("ears") or {}
+        started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"started {started} · {payload.get('provider')}/{payload.get('model')}"
+        if voice:
+            line += f" · voice {voice.get('provider')} {voice.get('voice')}"
+        if ears:
+            line += f" · ears {ears.get('provider')}"
+        self._write(f"# Conversation {payload.get('session')}\n{line}\n")
+        origin = " · ".join(
+            part
+            for part in (
+                f"prompt {self._prompt_id}" if self._prompt_id else "",
+                f"trace {self._trace}" if self._trace else "",
+            )
+            if part
+        )
+        if origin:
+            self._write(f"{origin}\n")
+        self.flush()
+
+    def flush(self) -> None:
+        if self._file is not None:
+            try:
+                self._file.flush()
+            except OSError:
+                self._broken = True
+
+    def close(self) -> None:
+        if self._file is not None:
+            with contextlib.suppress(OSError):
+                self._file.close()
+            self._file = None

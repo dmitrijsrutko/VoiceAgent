@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 import websockets
 
+from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
 from voice_agent.stt.base import Transcript
@@ -116,6 +117,7 @@ class ElevenLabsSTT:
                 closing.set()
                 await socket.close()
 
+        trace.event("stt.session", {"provider": self.provider, "sample_rate": self.sample_rate})
         try:
             async with websockets.connect(
                 self.url, additional_headers={"xi-api-key": self._api_key}
@@ -126,9 +128,13 @@ class ElevenLabsSTT:
                         payload = json.loads(raw)
                         kind = payload.get("message_type")
                         if kind == PARTIAL:
-                            yield Transcript(text=str(payload.get("text", "")), is_final=False)
+                            text = str(payload.get("text", ""))
+                            trace.event("stt.partial", {"text": text})
+                            yield Transcript(text=text, is_final=False)
                         elif kind == COMMITTED:
-                            yield Transcript(text=str(payload.get("text", "")), is_final=True)
+                            text = str(payload.get("text", ""))
+                            trace.event("stt.committed", {"text": text})
+                            yield Transcript(text=text, is_final=True)
                         elif isinstance(kind, str) and "error" in kind:
                             raise ProviderError(explain(payload))
                 finally:

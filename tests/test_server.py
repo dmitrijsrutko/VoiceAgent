@@ -625,3 +625,113 @@ async def test_marks_are_timed_from_the_reply_s_first_sample() -> None:
 
     assert sink.marks == [250, 500, 750, 1000]
     assert sink.starts == [0, 500], "the page cannot cap earlier marks without the start"
+
+
+# --- The clock, configured ----------------------------------------------------
+
+
+def test_the_delays_are_configurable_but_the_intents_are_not() -> None:
+    """What each rung is *for* — offer something concrete, then withdraw — is
+    what makes the agent bearable to sit with. Only the when is a knob."""
+    from voice_agent.initiative import LADDER
+    from voice_agent.server import ladder_for
+
+    ladder = ladder_for([9.0, 30.0])
+
+    assert [rung.after for rung in ladder] == [9.0, 30.0]
+    assert [rung.intent for rung in ladder] == [rung.intent for rung in LADDER]
+
+
+def test_more_delays_than_rungs_is_refused_not_trimmed() -> None:
+    """Asking for four and silently getting two is the kind of quiet
+    disagreement between what was configured and what is running that this
+    project refuses everywhere else."""
+    from voice_agent.errors import ConfigError
+    from voice_agent.server import ladder_for
+
+    with pytest.raises(ConfigError, match="only 2 rungs"):
+        ladder_for([5.0, 10.0, 20.0, 30.0])
+
+
+def test_fewer_delays_than_rungs_shortens_the_ladder() -> None:
+    from voice_agent.server import ladder_for
+
+    assert len(ladder_for([5.0])) == 1
+    assert ladder_for([]) == ()
+
+
+@pytest.mark.parametrize("raw", ["off", "none", "", "0"])
+def test_the_clock_can_be_turned_off(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--initiative off` must restore exactly the reactive agent of every
+    chapter before this one, not a clock that keeps deciding no."""
+    from voice_agent.config import load_settings
+
+    monkeypatch.setenv("VOICE_AGENT_INITIATIVE", raw)
+    assert load_settings().initiative == ()
+
+
+@pytest.mark.parametrize("raw", ["7,5", "seven", "-1", "7,7"])
+def test_a_malformed_clock_refuses_to_start_rather_than_guessing(
+    raw: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A typo that silently produced a mute agent — or one that speaks every
+    half second — is worse than a server that will not start and says why."""
+    from voice_agent.config import load_settings
+    from voice_agent.errors import ConfigError
+
+    monkeypatch.setenv("VOICE_AGENT_INITIATIVE", raw)
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+# --- Speaking about itself ---------------------------------------------------
+
+
+def test_the_agent_is_told_which_gender_its_voice_has() -> None:
+    """Russian, Polish, Hebrew and others mark the speaker's gender on ordinary
+    past-tense verbs, so a woman's voice saying «я понял» contradicts itself in
+    the same breath. Heard live before this was set."""
+    from voice_agent.config import with_voice_gender
+
+    assert "«я поняла»" in with_voice_gender("rules", "female")
+    assert "«я понял»" in with_voice_gender("rules", "male")
+    assert "avoid the choice" in with_voice_gender("rules", "neutral")
+
+
+def test_the_gender_goes_last_so_the_cached_prefix_is_untouched() -> None:
+    """Everything above it is what the provider caches, and this never changes
+    between turns (ROADMAP §2C)."""
+    from voice_agent.config import with_voice_gender
+
+    assert with_voice_gender("rules", "female").startswith("rules\n\n")
+
+
+@pytest.mark.parametrize("raw", ["woman", "f", "", "FEMALE "])
+def test_an_unknown_voice_gender_is_refused(raw: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from voice_agent.config import load_settings
+    from voice_agent.errors import ConfigError
+
+    monkeypatch.setenv("VOICE_AGENT_VOICE_GENDER", raw)
+    if raw.strip().casefold() in ("female",):
+        assert load_settings().voice_gender == "female"  # spacing and case are fine
+        return
+    with pytest.raises(ConfigError):
+        load_settings()
+
+
+def test_the_system_prompt_the_agent_receives_carries_it(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, store: SessionStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The rule is useless unless it reaches the model, so this asserts on what
+    the provider was actually sent."""
+    monkeypatch.setenv("VOICE_AGENT_VOICE_GENDER", "male")
+    client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        receive(socket)
+        socket.send_json({"type": "user_message", "text": "привет"})
+        while receive(socket)["type"] != "reply_end":
+            pass
+
+    assert "masculine forms" in llm.systems[0]

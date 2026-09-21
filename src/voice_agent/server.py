@@ -13,6 +13,10 @@ chapter that had no ears.
 It is **full-duplex**: the browser keeps sending microphone audio while the
 agent speaks, and the user can talk over it. The browser's echo cancellation is
 what keeps the agent from hearing, and interrupting, its own voice.
+
+It is also **mixed-initiative**: a turn no longer has to be started by the user.
+Once the greeting is out, a per-session clock starts considering whether the
+silence is worth speaking into — and usually decides it is not.
 """
 
 import asyncio
@@ -22,6 +26,8 @@ import logging
 import math
 import os
 from collections.abc import AsyncIterator, Sequence
+from datetime import datetime
+from hashlib import sha256
 from pathlib import Path
 
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
@@ -30,12 +36,16 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
+from voice_agent import trace
 from voice_agent.channel import Channel
-from voice_agent.config import load_settings, load_system_prompt
+from voice_agent.config import load_settings, load_system_prompt, with_voice_gender
 from voice_agent.conversation import Message
-from voice_agent.errors import SessionNotFoundError, VoiceAgentError
+from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
 from voice_agent.greeting import Greeting
+from voice_agent.initiative import LADDER, Rung
 from voice_agent.llm import LLM, create_llm
+from voice_agent.llm.traced import Traced
+from voice_agent.record import Record
 from voice_agent.session import Session
 from voice_agent.sessions import SessionStore
 from voice_agent.stt import STT, create_stt
@@ -83,6 +93,58 @@ async def connect(engine: LLM) -> None:
         logger.warning("could not connect to %s before the first turn: %s", engine.provider, exc)
 
 
+def ladder_for(delays: Sequence[float]) -> tuple[Rung, ...]:
+    """The escalation, with the configured delays on the written-down rungs.
+
+    Only the *when* is configurable. What each rung is for — offer something
+    concrete, then withdraw — and how readily it should be taken are the parts
+    that make the agent tolerable to sit with, and they are not knobs.
+
+    Surplus delays are refused rather than dropped. Asking for four and silently
+    getting two is the kind of quiet disagreement between what was configured
+    and what is running that this project rejects everywhere else — `_delays`
+    already refuses to repair a malformed value.
+    """
+    if len(delays) > len(LADDER):
+        raise ConfigError(
+            f"VOICE_AGENT_INITIATIVE has {len(delays)} delays but there are "
+            f"only {len(LADDER)} rungs to put them on."
+        )
+    return tuple(
+        Rung(after, rung.intent, rung.disposition)
+        for after, rung in zip(delays, LADDER, strict=False)
+    )
+
+
+def record_for(directory: Path | None, conversation_id: str, prompt: str) -> Record | None:
+    """One file per conversation, named so the folder sorts by time.
+
+    Reopened rather than recreated when a link is resumed: the same
+    conversation is the same file, and `Record` notices and says "reconnected"
+    instead of writing a second header.
+    """
+    if directory is None:
+        return None
+    # Matched on the stem's tail rather than by glob: `*-{id}` would also match
+    # a conversation whose id merely ends with this one.
+    existing = sorted(
+        path
+        for path in directory.glob("*.md")
+        if path.stem.endswith(f"-{conversation_id}") and len(path.stem) == len(conversation_id) + 18
+    )
+    if existing:
+        path = existing[-1]
+    else:
+        path = directory / f"{datetime.now():%Y-%m-%d-%H%M%S}-{conversation_id}.md"
+    running = trace.current()
+    return Record(
+        path,
+        prompt_id=f"system_prompt.md@{sha256(prompt.encode()).hexdigest()[:7]}",
+        # So the readable file says which machine-readable one to open next.
+        trace=running.path.name if running is not None else "",
+    )
+
+
 def create_app(
     llm: LLM | None = None,
     store: SessionStore | None = None,
@@ -91,12 +153,17 @@ def create_app(
     voice: bool = True,
     ears: bool = True,
     greeting: str | None = None,
+    initiative: Sequence[float] | None = None,
+    sessions_dir: Path | None = None,
+    record: bool = True,
 ) -> FastAPI:
     """`voice=False` / `ears=False` run the agent silent or deaf, which is also
     what VOICE_AGENT_TTS=none and VOICE_AGENT_STT=none do. Neither capability
     may be load-bearing for the other, or for typing."""
     settings = load_settings()
-    engine = llm if llm is not None else create_llm(settings.provider, settings.model)
+    # Wrapped here rather than in `create_llm`, so a faked provider injected by
+    # a test is traced exactly like a real one.
+    engine = Traced(llm if llm is not None else create_llm(settings.provider, settings.model))
     sessions = store if store is not None else SessionStore()
     speaker: TTS | None = tts
     if speaker is None and voice:
@@ -104,8 +171,12 @@ def create_app(
     listener: STT | None = stt
     if listener is None and ears:
         listener = create_stt(settings.ears_provider, settings.vad_silence)
-    system_prompt = load_system_prompt()
+    system_prompt = with_voice_gender(load_system_prompt(), settings.voice_gender)
     opening = Greeting(settings.greeting if greeting is None else greeting, speaker)
+    ladder = ladder_for(settings.initiative if initiative is None else initiative)
+    # The same shape as `tts`/`voice` above: a place to put it, and a switch
+    # that turns it off without having to name one.
+    record_dir = (sessions_dir or settings.sessions) if record else None
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -145,58 +216,72 @@ def create_app(
             await websocket.close(code=4404, reason="no such conversation")
             return
 
-        await websocket.accept()
-        channel = Channel(websocket)
-        session = Session(channel, conversation, engine, speaker, system_prompt, listener)
+        # One span for the whole connection. `asyncio` copies the context
+        # into every task created inside it, so the microphone's task and
+        # each turn find their parent here without being handed it.
+        with trace.span("conversation", {"session": conversation.id}, trace_id=conversation.id):
+            await websocket.accept()
+            recording = record_for(record_dir, conversation.id, system_prompt)
+            channel = Channel(websocket, recording)
+            session = Session(
+                channel, conversation, engine, speaker, system_prompt, listener, ladder
+            )
 
-        await channel.send_json(
-            {
-                "type": "ready",
-                "session": conversation.id,
-                "provider": engine.provider,
-                "model": engine.model,
-                "voice": (
-                    {
-                        "provider": speaker.provider,
-                        "voice": speaker.voice,
-                        # Before any audio, because the browser builds its
-                        # output context on a gesture that precedes the reply.
-                        "sample_rate": SAMPLE_RATE,
-                    }
-                    if speaker
-                    else None
-                ),
-                "ears": (
-                    {"provider": listener.provider, "sample_rate": listener.sample_rate}
-                    if listener
-                    else None
-                ),
-                "history": serialize(conversation.messages),
-                "ended": conversation.ended,
-            }
-        )
+            await channel.send_json(
+                {
+                    "type": "ready",
+                    "session": conversation.id,
+                    "provider": engine.provider,
+                    "model": engine.model,
+                    "voice": (
+                        {
+                            "provider": speaker.provider,
+                            "voice": speaker.voice,
+                            # Before any audio, because the browser builds its
+                            # output context on a gesture that precedes the reply.
+                            "sample_rate": SAMPLE_RATE,
+                        }
+                        if speaker
+                        else None
+                    ),
+                    "ears": (
+                        {"provider": listener.provider, "sample_rate": listener.sample_rate}
+                        if listener
+                        else None
+                    ),
+                    "history": serialize(conversation.messages),
+                    "ended": conversation.ended,
+                }
+            )
 
-        session.voiced(await opening.deliver(channel, conversation))
+            session.voiced(await opening.deliver(channel, conversation))
+            # After the greeting, so the first silence the clock measures is the one
+            # that follows the agent's own voice rather than the socket opening.
+            session.start()
 
-        try:
-            while not conversation.ended:
-                message = await websocket.receive()
-                if message["type"] == "websocket.disconnect":
-                    break
-                if (frame := message.get("bytes")) is not None:
-                    if session.mic is not None:
-                        session.mic.feed(frame)
-                elif (raw := message.get("text")) is not None:
-                    await handle_text(channel, session, raw)
-        except WebSocketDisconnect:
-            return
-        finally:
-            await session.close()
+            try:
+                while not conversation.ended:
+                    message = await websocket.receive()
+                    if message["type"] == "websocket.disconnect":
+                        break
+                    if (frame := message.get("bytes")) is not None:
+                        if session.mic is not None:
+                            session.mic.feed(frame)
+                    elif (raw := message.get("text")) is not None:
+                        await handle_text(channel, session, raw, recording)
+            except WebSocketDisconnect:
+                return
+            finally:
+                await session.close()
+                if recording is not None:
+                    recording.close()
 
     return app
 
 
-async def handle_text(channel: Channel, session: Session, raw: str) -> None:
+async def handle_text(
+    channel: Channel, session: Session, raw: str, record: Record | None = None
+) -> None:
     try:
         payload = json.loads(raw)
         kind = str(payload["type"])
@@ -245,4 +330,9 @@ async def handle_text(channel: Channel, session: Session, raw: str) -> None:
 
     text = str(payload.get("text", "")).strip()
     if text:
+        # Typed input is the one thing `Channel` cannot see: the page already
+        # has it and the server never echoes it back. A spoken turn arrives as
+        # a committed `transcript` frame and is recorded there.
+        if record is not None:
+            record.said(text)
         await session.submit(text)

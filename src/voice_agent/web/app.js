@@ -169,6 +169,13 @@ ws.onmessage = (event) => {
       bubble.classList.remove("cursor");
       if (!bubble.textContent) bubble.remove();
       else if (!cut) note(bubble, "✋ interrupted before it was spoken");
+    } else if (bubble && msg.initiative) {
+      bubble.classList.remove("cursor");
+      // Its own timings are zero by construction, not by measurement: the line
+      // was written before this turn started, so there was nothing to wait for.
+      // Printing "thought for 0 ms" put a number on screen that only looked
+      // like one — what deciding actually cost is in the note above.
+      note(bubble, `🗣 unprompted · rung ${msg.initiative} · ${msg.chars} chars · decided above`);
     } else if (bubble) {
       bubble.classList.remove("cursor");
       // Tokens only when the provider reported them: a missing count shown as
@@ -271,6 +278,35 @@ ws.onmessage = (event) => {
       }
       live = null;
     }
+
+  } else if (msg.type === "transcript_dropped") {
+    // Words the recognizer started transcribing and then took back. The bubble
+    // is removed rather than left in place: it never became a turn, nothing
+    // downstream ever saw it, and leaving it behind is worse than cosmetic —
+    // the *next* utterance would be written into it, appearing wherever this
+    // one was rather than at the end of the conversation.
+    if (live) { stick(() => live.remove()); live = null; }
+
+  } else if (msg.type === "initiative") {
+    // Every consideration, spoken or not. The declines are the point: an agent
+    // that talks unprompted is easy, one that keeps deciding not to is the
+    // thing being built, and it is invisible unless it is drawn.
+    const quiet = `${(msg.quiet_ms / 1000).toFixed(0)}s quiet`;
+    const cached = msg.cached_tokens ? `, ${msg.cached_tokens} cached` : "";
+    const cost = msg.prompt_tokens
+      ? ` · ${msg.prompt_tokens} in${cached}, ${msg.output_tokens} out`
+      : "";
+    const took = `decided in ${ms(msg.consider_ms)}`;
+    const verdict = {
+      spoke: "💬 had something to say",
+      declined: "🤫 nothing worth saying",
+      yielded: "🤫 had something, but you started talking",
+      overran: "✂️ its answer ran on, so it went unsaid",
+      // Never silent: a clock that fails without saying so looks exactly like
+      // one that decided to stay quiet, and those are opposite facts.
+      failed: `⚠️ could not decide — ${msg.message}`,
+    }[msg.decision] || msg.decision;
+    add(`${verdict} · ${quiet} · rung ${msg.rung}/${msg.rungs} · ${took}${cost}`, "note think");
 
   } else if (msg.type === "listening") {
     listening = msg.active;
