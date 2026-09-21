@@ -38,7 +38,13 @@ from starlette.types import Scope
 
 from voice_agent import trace
 from voice_agent.channel import Channel
-from voice_agent.config import load_settings, load_system_prompt, with_voice_gender
+from voice_agent.config import (
+    load_settings,
+    load_system_prompt,
+    with_initiative,
+    with_languages,
+    with_voice_gender,
+)
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
 from voice_agent.greeting import Greeting
@@ -172,8 +178,17 @@ def create_app(
     if listener is None and ears:
         listener = create_stt(settings.ears_provider, settings.vad_silence)
     system_prompt = with_voice_gender(load_system_prompt(), settings.voice_gender)
+    # After the gender line and with it: both are facts about this process's
+    # body rather than its character, and both are fixed for its lifetime, so
+    # they sit below everything the provider caches.
+    if listener is not None:
+        system_prompt = with_languages(system_prompt, listener.languages)
     opening = Greeting(settings.greeting if greeting is None else greeting, speaker)
     ladder = ladder_for(settings.initiative if initiative is None else initiative)
+    # From the ladder, not from the setting: these are the rungs this session
+    # will actually run, so the agent's account of its own clock cannot drift
+    # from the clock. It was asked once and invented "a few seconds".
+    system_prompt = with_initiative(system_prompt, tuple(rung.after for rung in ladder))
     # The same shape as `tts`/`voice` above: a place to put it, and a switch
     # that turns it off without having to name one.
     record_dir = (sessions_dir or settings.sessions) if record else None
@@ -245,7 +260,13 @@ def create_app(
                         else None
                     ),
                     "ears": (
-                        {"provider": listener.provider, "sample_rate": listener.sample_rate}
+                        {
+                            "provider": listener.provider,
+                            "sample_rate": listener.sample_rate,
+                            # So the page can say what it can hear before
+                            # anybody speaks into it.
+                            "languages": list(listener.languages),
+                        }
                         if listener
                         else None
                     ),

@@ -82,6 +82,23 @@ class Rung:
 
 LADDER: tuple[Rung, ...] = (
     Rung(
+        5.0,
+        "Follow through on what you just said. The shortest useful addition to "
+        "it: the obvious next step, or the one thing in your last answer most "
+        "likely to need unpacking — offered so they can wave it away in a word. "
+        "Stay on what the two of you were already talking about. This is not the "
+        "moment to open a new subject, to reword an invitation you have already "
+        "made, or to ask whether they are still there.",
+        "A pause this short is usually someone thinking, or drawing breath before "
+        "they answer, and saying nothing is the ordinary right answer here — take "
+        "it unless what you have is both genuinely useful and genuinely short. "
+        "Two cases call for silence almost always: if what you just said was "
+        "long, they are still taking it in, and five seconds is nowhere near "
+        "enough time to have finished; and if nothing has been said yet beyond "
+        "your own opening, there is nothing to follow through on and the "
+        "invitation has already been made.",
+    ),
+    Rung(
         15.0,
         "Change register. Do not restate your earlier invitation in different "
         "words — offer something concrete instead: a specific thing the two of "
@@ -109,23 +126,34 @@ LADDER: tuple[Rung, ...] = (
         "told them you would.",
     ),
 )
-"""Two rungs: offer something, then withdraw. The delays matter least.
+"""Three rungs: follow through, offer something concrete, then withdraw.
 
-There used to be a third, at seven seconds, whose job was to leave the door open
-and invite the user in. It never once fired in eighteen measured considerations,
-and reading it back the reason was structural rather than shy: the rules forbid
-rewording an invitation already made, and the greeting *is* an invitation. Every
-move available to that rung was prohibited, so the model correctly said nothing.
-A rung with no legal move is not caution, it is a paid call with a foregone
-conclusion — so it is gone, and a seven-second pause is simply not the agent's
-to fill.
+The shape is the design; the delays are tuning. The first *follows through* on
+the exchange that just happened. The second *offers something concrete* rather
+than asking again — "are you there? … ARE YOU THERE?" is the needy pattern, and
+it is what makes proactive agents unbearable to sit with. The third is a
+withdrawal, which is a social act in its own right: it hands control back
+explicitly and earns the trust that lets the agent speak first at all. After it,
+silence until the user says something.
 
-What remains is the pair that does work. The first *offers something concrete*
-rather than asking again — "are you there? … ARE YOU THERE?" is the needy
-pattern, and it is what makes proactive agents unbearable to sit with. The
-second is a withdrawal, which is a social act in its own right: it hands control
-back explicitly and earns the trust that lets the agent speak first at all.
-After it, silence until the user says something."""
+A rung at *seven* seconds was tried in chapter 9 and deleted, having never once
+fired in eighteen measured considerations. The reason was structural rather than
+shy: its job was to leave the door open and invite the user in, the rules forbid
+rewording an invitation already made, and the greeting *is* an invitation — so
+every move available to it was prohibited and a paid call had a foregone
+conclusion. **That was an argument about the intent, not about short delays**,
+and this file read it as the latter for two chapters.
+
+The five-second rung avoids the trap by being about the *exchange* rather than
+the silence: five seconds after an answer, there is a real last answer to follow
+through on. Where there is not — straight after the greeting — it declines, and
+that is the correct move rather than a dead rung. The difference from the seven-
+second one is that only some of its situations are illegal, not all of them.
+
+Chapter 13 moved the first nudge here from fifteen seconds. Fifteen was measured
+from the moment the agent *stopped speaking* (`Mic.expect_silence` pushes the
+marker forward by the reply's own audio), so after a twenty-second answer it was
+thirty-five seconds of dead air before anything happened."""
 
 
 def nudge_prompt(rung: Rung, quiet: float) -> str:

@@ -9,7 +9,7 @@ from voice_agent.errors import ConfigError
 
 DEFAULT_PROVIDER = "deepseek"
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
-DEFAULT_EARS_PROVIDER = "elevenlabs"
+DEFAULT_EARS_PROVIDER = "assemblyai"
 
 DEFAULT_GREETING = "Hi, I'm a voice agent. What can I help you with?"
 """What the agent says when a conversation opens. Set VOICE_AGENT_GREETING to
@@ -19,16 +19,25 @@ It earns its place twice. It is the greeting the roadmap asks for — the moment
 that sets expectations about what this thing is — and it moves the synthesis
 engine's cold start off the user's first real question. Measured: the first
 synthesis of a process took 3.1 s against 250-290 ms for every one after."""
-DEFAULT_INITIATIVE_DELAYS = "15,28"
+DEFAULT_INITIATIVE_DELAYS = "5,15,28"
 """Seconds of silence at which the agent considers speaking unprompted, as
 positions in one silence rather than gaps between rungs. Set
 VOICE_AGENT_INITIATIVE=off, or this to empty, to get the purely reactive agent
 of every chapter before this one.
 
-Two numbers, not three. A rung at seven seconds was tried and removed: it never
-fired once in eighteen measured considerations, because its job was to invite
-the user in and the rules forbid rewording an invitation the greeting has
-already made. A short pause is simply not the agent's to fill.
+Three numbers since chapter 13. It was two, and the note here used to say that a
+short pause is "simply not the agent's to fill" — drawn from a seven-second rung
+that was tried and removed after never firing in eighteen considerations. That
+conclusion was too broad. The seven-second rung failed because its *job* was to
+invite the user in, and the rules forbid rewording an invitation the greeting has
+already made; every move it had was illegal. The delay was never the problem, and
+a rung that follows through on what was just said has legal moves at five seconds
+(`initiative.LADDER`).
+
+Fifteen also read far longer than it sounds. The clock is pushed forward by the
+agent's own speech (`Mic.expect_silence`), so it counts from the moment the voice
+stops — fifteen seconds after a twenty-second answer is thirty-five seconds of
+nothing.
 
 **The last one has to land inside the microphone's idle window**
 (`mic.IDLE_TIMEOUT_SECONDS`, 30 s). Measured live at 45 s: listening stopped at
@@ -165,6 +174,84 @@ def with_voice_gender(prompt: str, gender: str) -> str:
     changes between turns (ROADMAP §2C).
     """
     return f"{prompt}\n\n{SELF_REFERENCE[gender]}"
+
+
+HEARING = (
+    "Your hearing is a speech recognizer, and it transcribes these languages "
+    "and no others: {languages}.\n\n"
+    "You can read and write far more languages than that, but you cannot *hear* "
+    "them. So never offer, promise or agree to listen in a language outside "
+    "that list — if someone asks, say plainly which ones you can understand. "
+    "Claiming one you cannot hear is the same mistake as inventing a fact.\n\n"
+    "When a transcript reads as nonsense — words that do not make a sentence, "
+    "or a mixture of scripts in one line — that is usually not someone talking "
+    "nonsense. It is most often someone speaking a language your hearing does "
+    "not have. Do not answer it as though it were a question, and do not guess "
+    "at what it might have meant. Say briefly that you did not catch it and "
+    "name the languages you can understand."
+)
+"""What the agent is told about the languages it can hear.
+
+Appended for the same reason as the gender line, and in the same place. The
+recognizer does not fail on a language it lacks — it returns confident nonsense,
+which the agent then answers as though it were a question. Measured: spoken
+Russian arrived as "Period." and the agent asked what was meant by it, twice.
+
+Two jobs, because the failure has two halves. The agent must stop *promising* a
+language it cannot hear — as a model it speaks Russian perfectly well, and
+nothing before this told it that its ears do not. And it must recognise the
+garbage for what it is when it arrives, because that is the only moment anything
+in the running system can notice, the transcript being all the agent ever sees."""
+
+
+def with_languages(prompt: str, languages: tuple[str, ...]) -> str:
+    """Append which languages the agent can hear, if that is a limit at all.
+
+    At the end, with the gender line, and fixed for the life of the process —
+    the cached prefix is everything above it and never changes between turns.
+    A backend that reports nothing (`--stt none`, a recognizer with no opinion)
+    adds nothing, rather than telling the agent it hears an empty set.
+    """
+    if not languages:
+        return prompt
+    return f"{prompt}\n\n{HEARING.format(languages=', '.join(languages))}"
+
+
+CLOCK = (
+    "When nobody has spoken for a while, you are asked whether to say something "
+    "unprompted. That happens at {delays} of silence, counted from the moment "
+    "your own voice stops — and you may decline at any of them, which is the "
+    "usual answer at the shortest. After the last one you stay quiet until they "
+    "speak.\n\n"
+    "These are the real numbers. If someone asks how long you wait before "
+    "speaking first, tell them plainly instead of guessing at it."
+)
+"""What the agent is told about its own clock.
+
+Because it was asked and made a number up. Requested live — "what is the time
+between your last message and your repeated message if there is silence?" — the
+agent answered "A few seconds, typically", when the first rung was at fifteen.
+Nothing had ever told it, so it did what a model does with a question about its
+own body and invented a plausible answer. The same failure as claiming to hear
+Russian, and the same fix: state the fact, once, where it cannot drift."""
+
+
+def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:
+    """Append when the agent may speak unprompted, if it may at all.
+
+    Fed from the ladder the session actually runs, not from the default, so the
+    prompt cannot disagree with the clock. `--initiative off` adds nothing —
+    an agent that never speaks first has nothing to say about when it does.
+    """
+    if not delays:
+        return prompt
+    seconds = [f"{d:g}" for d in delays]
+    spoken = (
+        " and ".join(seconds)
+        if len(seconds) < 3
+        else f"{', '.join(seconds[:-1])} and {seconds[-1]}"
+    )
+    return f"{prompt}\n\n{CLOCK.format(delays=f'{spoken} seconds')}"
 
 
 def _delays(raw: str) -> tuple[float, ...]:

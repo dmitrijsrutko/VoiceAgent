@@ -278,7 +278,11 @@ def test_the_ready_frame_advertises_the_capture_rate(store: SessionStore) -> Non
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}") as socket:
-        assert text_frame(socket)["ears"] == {"provider": "fake-ears", "sample_rate": 16000}
+        # The rate is what this test is about; the frame also carries the
+        # languages the recognizer understands, which has its own test.
+        ears = text_frame(socket)["ears"]
+        assert ears["provider"] == "fake-ears"
+        assert ears["sample_rate"] == 16000
 
 
 def test_listening_expires_after_a_silent_stretch(

@@ -3,6 +3,7 @@
 from collections.abc import Callable
 
 from voice_agent.errors import ConfigError
+from voice_agent.stt.assemblyai_stt import AssemblyAISTT
 from voice_agent.stt.base import STT
 from voice_agent.stt.elevenlabs_stt import ElevenLabsSTT
 
@@ -11,6 +12,7 @@ NO_EARS = "none"
 for anyone without a recognition key."""
 
 BUILDERS: dict[str, Callable[[float | None], STT]] = {
+    "assemblyai": lambda silence: AssemblyAISTT(silence_seconds=silence),
     "elevenlabs": lambda silence: ElevenLabsSTT(silence_seconds=silence),
 }
 

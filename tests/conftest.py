@@ -196,10 +196,19 @@ class FakeSTT:
     known number of frames rather than by sleeping.
     """
 
-    def __init__(self, script: Sequence[Transcript] | None = None, fail: bool = False) -> None:
+    def __init__(
+        self,
+        script: Sequence[Transcript] | None = None,
+        fail: bool = False,
+        languages: tuple[str, ...] = (),
+    ) -> None:
         self.provider = "fake-ears"
         self.model = "fake-ears-1"
         self.sample_rate = 16000
+        # Empty by default: a recognizer with no stated limit adds nothing to
+        # the system prompt, so every test that is not *about* languages keeps
+        # seeing the prompt it was written against.
+        self.languages = languages
         self.fail = fail
         self.script = (
             list(script)

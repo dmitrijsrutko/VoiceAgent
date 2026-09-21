@@ -631,14 +631,21 @@ async def test_marks_are_timed_from_the_reply_s_first_sample() -> None:
 
 
 def test_the_delays_are_configurable_but_the_intents_are_not() -> None:
-    """What each rung is *for* — offer something concrete, then withdraw — is
-    what makes the agent bearable to sit with. Only the when is a knob."""
+    """What each rung is *for* — follow through, offer something concrete, then
+    withdraw — is what makes the agent bearable to sit with. Only the when is a
+    knob.
+
+    Sized from `LADDER` rather than from a written-down number: the rungs have
+    changed twice now, and every place that restated their count instead of
+    reading it went stale without failing.
+    """
     from voice_agent.initiative import LADDER
     from voice_agent.server import ladder_for
 
-    ladder = ladder_for([9.0, 30.0])
+    delays = [9.0 * (i + 1) for i in range(len(LADDER))]
+    ladder = ladder_for(delays)
 
-    assert [rung.after for rung in ladder] == [9.0, 30.0]
+    assert [rung.after for rung in ladder] == delays
     assert [rung.intent for rung in ladder] == [rung.intent for rung in LADDER]
 
 
@@ -647,10 +654,12 @@ def test_more_delays_than_rungs_is_refused_not_trimmed() -> None:
     disagreement between what was configured and what is running that this
     project refuses everywhere else."""
     from voice_agent.errors import ConfigError
+    from voice_agent.initiative import LADDER
     from voice_agent.server import ladder_for
 
-    with pytest.raises(ConfigError, match="only 2 rungs"):
-        ladder_for([5.0, 10.0, 20.0, 30.0])
+    too_many = [float(i + 1) for i in range(len(LADDER) + 1)]
+    with pytest.raises(ConfigError, match=f"only {len(LADDER)} rungs"):
+        ladder_for(too_many)
 
 
 def test_fewer_delays_than_rungs_shortens_the_ladder() -> None:
@@ -735,3 +744,92 @@ def test_the_system_prompt_the_agent_receives_carries_it(
             pass
 
     assert "masculine forms" in llm.systems[0]
+
+
+def test_the_agent_is_told_which_languages_it_can_hear(llm: FakeLLM, store: SessionStore) -> None:
+    """A recognizer that cannot hear a language returns nonsense rather than an
+    error, so the agent has to be told — otherwise it promises Russian it can
+    never receive, which the prompt's own "do not invent capabilities" forbids.
+    """
+    client = TestClient(
+        create_app(
+            llm=llm, stt=FakeSTT(languages=("en", "es")), store=store, voice=False, greeting=""
+        )
+    )
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        receive(socket)
+        socket.send_json({"type": "user_message", "text": "hello"})
+        drain(socket, audio=False)
+
+    assert "en, es" in llm.systems[0]
+    assert "never offer, promise or agree to listen" in llm.systems[0]
+
+
+def test_a_recognizer_with_no_stated_limit_says_nothing_about_languages(
+    llm: FakeLLM, store: SessionStore
+) -> None:
+    """Telling the agent it hears an empty set would be worse than silence."""
+    client = TestClient(create_app(llm=llm, stt=FakeSTT(), store=store, voice=False, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        receive(socket)
+        socket.send_json({"type": "user_message", "text": "hello"})
+        drain(socket, audio=False)
+
+    assert "Your hearing is a speech recognizer" not in llm.systems[0]
+
+
+def test_the_page_is_told_what_the_ears_understand(llm: FakeLLM, store: SessionStore) -> None:
+    """So somebody can see it before they open their mouth."""
+    client = TestClient(
+        create_app(
+            llm=llm, stt=FakeSTT(languages=("en", "es")), store=store, voice=False, greeting=""
+        )
+    )
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        ready = receive(socket)
+
+    assert ready["ears"]["languages"] == ["en", "es"]
+
+
+def test_the_agent_is_told_when_it_may_speak_first() -> None:
+    """Asked live how long it waits, the agent answered "a few seconds" when
+    the first rung was at fifteen. It had never been told, so it did what a
+    model does with a question about its own body and made a number up."""
+    from voice_agent.config import with_initiative
+
+    said = with_initiative("rules", (5.0, 15.0, 28.0))
+
+    assert "5, 15 and 28 seconds" in said
+    assert "tell them plainly instead of guessing" in said
+
+
+def test_an_agent_that_never_speaks_first_is_told_nothing_about_a_clock() -> None:
+    from voice_agent.config import with_initiative
+
+    assert with_initiative("rules", ()) == "rules"
+
+
+def test_the_prompt_quotes_the_ladder_that_is_actually_running(
+    llm: FakeLLM, store: SessionStore
+) -> None:
+    """The delays reach the prompt from the built ladder, not from the setting,
+    so the agent's account of its clock cannot drift away from the clock."""
+    client = TestClient(
+        create_app(
+            llm=llm, store=store, voice=False, ears=False, greeting="", initiative=[3.0, 9.0]
+        )
+    )
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        receive(socket)
+        socket.send_json({"type": "user_message", "text": "hello"})
+        drain(socket, audio=False)
+
+    assert "3 and 9 seconds" in llm.systems[0]

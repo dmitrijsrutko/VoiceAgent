@@ -7,7 +7,7 @@ from pathlib import Path
 import uvicorn
 from dotenv import load_dotenv
 
-from voice_agent.config import load_settings
+from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, load_settings
 
 
 def main() -> None:
@@ -43,7 +43,7 @@ def main() -> None:
     parser.add_argument(
         "--stt",
         default=settings.ears_provider,
-        choices=["elevenlabs", "none"],
+        choices=["assemblyai", "elevenlabs", "none"],
         help="speech recognition backend, or 'none' to stay deaf (default: %(default)s)",
     )
     parser.add_argument(
@@ -58,7 +58,9 @@ def main() -> None:
         default=None,
         metavar="SECONDS,...",
         help="silences at which the agent considers speaking unprompted, or 'off' "
-        "for the purely reactive agent (default: 7,20,45)",
+        # Read, not restated: this said 7,20,45 for two chapters after those
+        # were no longer the delays.
+        f"for the purely reactive agent (default: {DEFAULT_INITIATIVE_DELAYS})",
     )
     parser.add_argument(
         "--sessions",
@@ -151,6 +153,19 @@ def main() -> None:
         f"({args.provider} · 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
         f"· 📝 {settings.sessions or 'off'} · 🔬 {settings.trace or 'off'})"
     )
+    # Said out loud at every start, because the failure this prevents is silent.
+    # A language this backend does not know is not refused — it is transcribed
+    # into confident nonsense, which the agent then answers. Measured: spoken
+    # Russian came back as "Раскажем не pravalo вывnutriny produkt kitaia", and
+    # nothing anywhere said the recognizer was out of its depth.
+    if args.stt == "assemblyai":
+        from voice_agent.stt.assemblyai_stt import LANGUAGES
+
+        print(
+            f"   ears speak {len(LANGUAGES)} languages ({' '.join(LANGUAGES)}). "
+            "Anything else is transcribed as nonsense rather than refused — "
+            "use --stt elevenlabs for it."
+        )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 

@@ -14,6 +14,306 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 13 — The clock, retuned: the agent speaks sooner, and knows when it will
+
+Chapter 9 gave the agent a clock and tuned it patient. Sat with, it is too
+patient — and by more than the number says. `Mic.expect_silence` pushes the
+silence marker forward by the reply's own audio, so the fifteen seconds were
+counted from the moment the agent *stopped speaking*, not from the user's last
+word. Measured in a real conversation: replies of thirteen to twenty seconds,
+then fifteen seconds of nothing, then a line. Thirty-five seconds of a two-party
+conversation in which one party has finished and the other has not started.
+
+So the first nudge moves to five seconds, and a rung is added rather than the
+existing one dragged forward: follow through at 5 s, offer something concrete at
+15 s, withdraw at 28 s.
+
+**Why this is not the seven-second rung coming back.** Chapter 9 tried one at
+seven seconds and deleted it after it failed to fire in eighteen consecutive
+considerations. The reason was structural: its job was to leave the door open
+and invite the user in, the rules forbid rewording an invitation already made,
+and the greeting *is* an invitation — so every move it had was illegal and a
+paid call had a foregone conclusion. That was an argument about the **intent**,
+and both `initiative.py` and `config.py` went on to restate it as an argument
+about **short delays** ("a short pause is simply not the agent's to fill"). It
+is not. The new rung is about the *exchange that just happened* rather than
+about the silence: five seconds after an answer there is a real last answer to
+follow through on. Straight after the greeting there is not, and there it
+declines — which is the correct move, not a dead rung. Only some of its
+situations are illegal, where all of the seven-second rung's were.
+
+**The agent can also now answer for its own clock.** Asked live — "what is the
+time between your last message and your repeated message if there is silence?" —
+it said "A few seconds, typically", when the answer was fifteen. Nothing had
+ever told it, so it did what a model does with a question about its own body.
+This is the same failure as claiming to hear Russian, and takes the same fix:
+`with_initiative` appends the real delays, beside `with_languages` and
+`with_voice_gender` and for the same reasons.
+
+**What changed**
+
+- `src/voice_agent/initiative.py`: a third rung at the front of `LADDER`,
+  biased hard towards silence — five seconds is usually someone thinking, and
+  after a long answer it is certainly someone still taking it in.
+- `src/voice_agent/config.py`: `DEFAULT_INITIATIVE_DELAYS = "5,15,28"`, and
+  `with_initiative` to put those seconds in the prompt.
+- `src/voice_agent/server.py`: the prompt takes its delays from the built
+  ladder, so what the agent says about its clock cannot drift from the clock.
+- `src/voice_agent/cli.py`: `--initiative` help said `7,20,45` — the delays
+  before chapter 9 removed the seven-second rung. It now reads the real default
+  instead of restating a number that can rot again.
+- `tests/test_server.py`: the two ladder tests hardcoded "2 rungs"; they size
+  themselves from `LADDER` now, for exactly the reason the help string went
+  stale.
+
+**Design decisions**
+
+- **The disposition had to move with the delay, and that is the whole risk of
+  this change.** `nudge_prompt` injects the literal "they have said nothing for
+  about 5 seconds", while the old first rung opened "This is a long silence
+  now". Retuning the number alone would have handed the model a contradiction
+  whose only resolution is to speak when it should not. There is a test that
+  the first rung's disposition never calls five seconds a long silence.
+- **A new rung, not a dragged one.** Moving the concrete offer to five seconds
+  would have made the same move at the wrong distance and left a 23-second hole
+  before the withdrawal. The rungs are a shape — follow through, offer,
+  withdraw — and the shape is what makes the agent bearable to sit with.
+- **The budget rises from two considerations per silence to three.** A rung is
+  consumed before the call, so a decline still costs exactly one call and the
+  ceiling is hard. Every consideration already reports its tokens and its
+  decision, declines included.
+- **Not fixed here, though this chapter found it:** replies run long. The two
+  worst in the measured session were 20.6 s and 16.6 s of audio, both
+  interrupted by the user, against a prompt that asks for one to three
+  sentences. A five-second nudge after a twenty-second monologue is a smaller
+  problem than the monologue. That is its own chapter.
+
+**Latency impact**
+
+None — this touches no stage of the round trip. The number it changes is the
+one the user waits through when *nobody* is talking, which the budget in §7
+does not cover and probably should.
+
+**Verification**
+
+`uv run verify` green: ruff, format, mypy strict, 405 tests. **The live exercise
+is outstanding**, and this chapter is judged on it rather than on the suite: the
+measure is the ratio of declines to nudges at rung 1. Every consideration writes
+`initiative: rung N · quiet_ms · decision spoke|declined · consider_ms` into the
+session record. A first rung that speaks every single time is too eager; one
+that never speaks is the seven-second rung again. Either way the disposition is
+what to retune, not the delay.
+
+## Chapter 12 — A second pair of ears: AssemblyAI takes over listening
+
+Chapter 3 gave the agent ears and, with them, a dependency: ElevenLabs Scribe
+was the only recognizer the `STT` protocol had ever been asked to describe, and
+an interface with one implementation is a guess. This chapter collects on that
+guess. AssemblyAI's Universal-Streaming endpoint becomes the default listener,
+Scribe stays one flag away, and nothing downstream of `Transcript` was touched
+to make it happen — the turn loop, agreement, warming, speculation, barge-in
+and the `heard` accounting all run unchanged over a different vendor's socket.
+
+**Read this before switching the ears: AssemblyAI transcribes 18 languages, and
+Russian is not one of them.** Anything outside `en es fr de it pt tr nl sv no da
+fi hi vi ar he ja zh` is not refused — it is transcribed into confident
+nonsense. Spoken Russian came back as "Раскажем не pravalo вывnutriny produkt
+kitaia и государствены dolk.", and the agent answered the nonsense in English
+without anything anywhere reporting a problem. `language_codes=ru` does not
+help: it is accepted at connect and silently ignored. For those languages use
+`--stt elevenlabs`, which handles them and keeps partials, punctuation and
+`--vad-silence` working. The startup banner now says this out loud every run,
+because an evening was lost to discovering it the hard way.
+
+AssemblyAI's `whisper-rt` model does cover 99 languages and transcribes Russian
+accurately — it was measured, not assumed. It is deliberately **not** offered:
+it emits no partial transcripts at all, even with `include_partial_turns=true`,
+which switches off chapter 4's warming, chapter 5's speculation and the live
+transcript bubble, and leaves `--vad-silence` inert (200/900/2500 ms all give
+the same ~1030 ms). It buys one language and spends most of what this project
+has built.
+
+The reason to move is not that Scribe is bad. It is that the endpointing
+decision — the largest single term in the round trip (§7) — currently belongs
+to whichever vendor is listening, and owning the *choice* of that vendor is the
+first step to eventually owning the decision itself. AssemblyAI also brings the
+streaming turn detection that the interjection work ahead of us depends on, and
+one key that covers reasoning too (Chapter 13).
+
+**What this chapter found out about text-to-speech, so nobody asks again.**
+AssemblyAI has no standalone synthesis. Not "not yet", not "undocumented" —
+their own FAQ says *"AssemblyAI does not offer standalone text-to-speech as a
+separate service."* Their voices exist only inside the Voice Agent API
+(`wss://agents.assemblyai.com/v1/ws`), a managed bundle that supplies its own
+STT, LLM, turn detection and TTS over a single socket and exposes no event that
+hands it text to speak. Adopting it would mean deleting this project's entire
+pipeline and keeping the browser. So the voice stays ElevenLabs, and the
+one-vendor-per-stage story stops at two stages on purpose.
+
+**What changed**
+
+- `src/voice_agent/stt/base.py`: the `STT` protocol gains `languages`. Which
+  languages a recognizer has is not a detail of one vendor — it decides whether
+  a spoken sentence becomes a transcript or becomes nonsense — so it belongs on
+  the interface, and mypy enforced that by refusing the test fake until it
+  answered too.
+- `src/voice_agent/config.py`: `with_languages` appends what the agent can hear
+  to the system prompt, beside `with_voice_gender` and for the same reason —
+  a fact about this process's body rather than its character, fixed for the
+  process's life, and therefore below everything the provider caches.
+- `src/voice_agent/server.py`, `web/app.js`: the ready frame carries the
+  languages, the status bar shows the count with the codes on hover, and a
+  dismissible note in the log says it before anybody speaks.
+- `src/voice_agent/stt/assemblyai_stt.py`: new. Universal-Streaming v3 over a
+  raw WebSocket, emitting the same volatile-then-committed `Transcript` stream
+  Scribe does. Partials come from `Turn` messages with `end_of_turn: false`;
+  the commit is the same turn with it true.
+- `src/voice_agent/stt/registry.py`: knows two backends. The error naming the
+  ones that exist composes itself, so it needed no edit — which is the registry
+  earning its keep.
+- `src/voice_agent/config.py`, `cli.py`, `.env.example`: `assemblyai` is the
+  default ears; `--stt elevenlabs` is the way back.
+- `tests/test_stt.py`: the tunable-pause test now names ElevenLabs instead of
+  taking the default, because the default is no longer it.
+
+**Design decisions**
+
+- **One knob, two units.** `--vad-silence` stays the only endpointing control.
+  Scribe takes one threshold in seconds; AssemblyAI takes a *window* in
+  milliseconds — `min_turn_silence` before it may end a confident turn,
+  `max_turn_silence` before it ends one regardless. The flag maps onto the
+  ceiling (1.5 s → 1500 ms) with the floor at half. The alternative was an
+  AssemblyAI-only `--stt-mode` exposing their `min_latency`/`balanced`/
+  `max_accuracy` presets, rejected because a flag that silently does nothing on
+  the other backend is exactly the quiet disagreement between configuration and
+  behaviour this project refuses everywhere else. The clamp to the service's
+  own 50–10000 ms is applied here rather than left to the server, so a wild
+  value is corrected before it becomes a rejected connection. Measured after
+  the fact rather than argued: `min_turn_silence` is the bound that governs in
+  practice — 200 ms gives an 830 ms lag to the final, 900 ms gives 1453 ms,
+  2500 ms gives 1869 ms — while the ceiling never fired in any test, because a
+  sentence that sounds finished ends the turn confidently long before it. Half
+  is what makes `--vad-silence 1.5` land near 1.3 s instead of overshooting to
+  2 s. `mode` turned out to be the blunter, stronger knob (`min_latency`
+  1196 ms vs `max_accuracy` 3009 ms on the same clip) and is still not exposed.
+- **One final per `turn_order`, enforced at the edge.** The service can deliver
+  a turn twice — once as it ends, again once formatted. Nothing downstream can
+  tell the copies apart, so a passed-through second copy drives an entire extra
+  turn: the agent answering the same sentence twice, in a voice the user is
+  still listening to. Collapsed in the adapter, where `turn_order` still
+  exists. The set is per-session, because `turn_order` restarts at zero on
+  every connection and remembering it across a reconnect would swallow the
+  first real turn after one. `format_turns` is left *unset* rather than
+  explicitly off, relying on the spec's documented default of `false` — which
+  is precisely why the guard is defensive rather than decorative: the thing
+  that would produce the second copy is a default we do not control.
+- **Raw WebSocket, not the `assemblyai` SDK.** Both existing vendor adapters
+  talk their protocol directly, and this one is four message types. The SDK's
+  own integration guide recommends itself for WebSocket lifecycle handling —
+  which is the part this project already has working code for, twice.
+- **Binary audio frames.** Scribe wants base64 inside JSON; so does the Voice
+  Agent API; this endpoint wants neither. Getting it wrong produces silence
+  rather than an error, so there is a test asserting the frames are binary.
+- **`Terminate` is cost control, not manners.** An abandoned session bills
+  until the three-hour cap. It is sent when the audio iterator ends, and the
+  service's `Termination` reply is what ends the read loop.
+- **The agent is now told what it can hear, because it could not find out.**
+  `prompts/system_prompt.md` has always said "answer in the language the user is
+  speaking" and, separately, never to invent capabilities. With these ears both
+  were quietly impossible to obey: asked "понимаешь по-русски?" the agent says
+  yes, because as a *model* it does — nothing had ever told it that its hearing
+  is the narrow part. Worse, when Russian actually arrives it arrives as
+  plausible English, so there is no moment at which the agent could notice. The
+  appended block does two things: it forbids promising a language outside the
+  recognizer's set, and it teaches the agent that a transcript reading as
+  nonsense is usually a language it cannot hear rather than a person talking
+  nonsense — which is the only handle anything in the running system has on the
+  failure, the transcript being all the agent ever sees.
+- **Both backends declare their set, in their own code convention.** AssemblyAI
+  answers in ISO 639-1 (`en`, `es`), Scribe in ISO 639-3 (`eng`, `spa`, and
+  `rus`). Normalising a hundred entries by hand is a way to invent a fact, and
+  only one backend listens at a time, so the two lists never have to agree. A
+  backend that states no limit contributes no prompt line at all — telling the
+  agent it hears an empty set would be worse than silence.
+- **This recognizer's partials are already final, and that changes what two
+  earlier chapters are doing.** The spec is explicit: a `Turn`'s `transcript`
+  is "all finalized words in the turn", and every word but the trailing one
+  carries `word_is_final: true`. Scribe rewrites its partials; this one only
+  appends. Chapter 4's `StablePrefix` exists to manufacture stability out of
+  volatile text, so here it spends roughly one partial of lag guaranteeing
+  something the recognizer already guarantees — and `agreement.repeated`, the
+  signal chapter 5 speculates on, quietly changes meaning from "the recognizer
+  stopped finding new words" to "no new word *finalized* since the last
+  message". Nothing breaks. But speculations are billed generations, so the
+  live run has to report `speculations`, `speculations_discarded` and
+  `speculation_wasted_chars` on both backends before anyone calls this even.
+  Deliberately **not** fixed here: making agreement backend-aware would rewrite
+  two chapters' measured behaviour on a hunch, and the numbers do not exist
+  yet. It is its own chapter if the numbers ask for it.
+- **No `Bearer` prefix** on the key. The one AssemblyAI product that requires
+  it is the Voice Agent API, which this is not, and generalising the rule in
+  either direction returns a 1008 close.
+
+**Latency impact**
+
+**Endpointing measured against the live service; the full round trip is not.**
+On a synthesized phrase that stops mid-thought, time from the last speech
+sample to the committed transcript was 830 ms at `min_turn_silence=200`,
+1453 ms at 900, and 1869 ms at 2500 — so the default `--vad-silence 1.5`
+(floor 750 ms) should land near 1.3 s. That is the largest single term in the
+budget (§7) and it is now a number rather than a delegation nobody had timed.
+
+What is still missing is the *spoken* round trip through the browser: these
+figures come from PCM fed to the socket at real time, which removes capture,
+the network from a real microphone, and playback. The comparison against Scribe
+on the same spoken turns has not been run.
+
+**Deliberately not done**
+
+Diarization, `keyterms_prompt`, `prompt`, `voice_focus`, language detection,
+PII redaction, and browser temp-token auth are all available on this endpoint
+and none of them is this chapter. Semantic turn detection — taking the
+endpointing decision back from the vendor rather than re-delegating it — is
+still the chapter this one makes possible rather than performs.
+
+**Verification**
+
+`uv run verify` green: ruff, format, mypy strict, 394 tests. The new adapter is
+tested against a real WebSocket server speaking the v3 protocol, because the
+failures that matter here — wrong frame type, a session never terminated, a
+formatted turn arriving twice — are properties of the conversation with the
+server and not of the object.
+
+A review pass after the first green run added three guards and found a bug with
+one of them. The browser's capture worklet buffers a fixed 1600 *samples*, which
+is 100 ms only because the rate is 16 kHz; a test now ties it to `SAMPLE_RATE`,
+because at 48 kHz it silently becomes 33 ms, under this endpoint's 50 ms floor,
+and every session would die on connect. The close-code hints are pinned by a
+test — which immediately caught that `ConnectionClosed.code` has been deprecated
+since websockets 13.1, so `explain` now reads the service's close frame off
+`rcvd` instead of a shortcut that warns today and disappears later. And `Begin`,
+which echoes the configuration the service accepted, is traced rather than
+dropped: an unrecognised query parameter here is *ignored*, not refused, so
+without that line "`--vad-silence` had no effect" and "`--vad-silence` never
+arrived" are indistinguishable from the outside.
+
+The backend has now been exercised against the **real service**, though not yet
+through a microphone: Russian and English synthesized to 16 kHz PCM and streamed
+at real time, across `universal-3-5-pro`, `whisper-rt` and
+`universal-streaming-multilingual`. That is what produced the language finding,
+the endpointing numbers, and the knowledge that `whisper-rt` emits no partials —
+none of which unit tests against a fake server could have shown.
+
+One belief from the first draft of this entry was wrong and is corrected here:
+the `stt.begin` echo does **not** report the turn-silence bounds. It reports the
+model and mode, and comes back with the bounds absent even when they are
+demonstrably in effect. It documents what the service accepted; only timing
+confirms the pause landed.
+
+**Still outstanding**: nobody has spoken into a microphone through this backend.
+Barge-in, the browser capture path and the speculation counters under real
+speech are all unverified.
+
 ## Chapter 11 — The trace: a span tree, and the first logging this project has had
 
 Where Chapter 10 writes the conversation for a person to read, this writes what

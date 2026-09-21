@@ -115,6 +115,26 @@ for the full log and the reasoning behind each step.
   saying «я понял» — a man's form — in a woman's voice. `--voice-gender`
   (`female` by default, `male`, or `neutral`) tells it which to use, and the
   startup line shows it next to the voice so a mismatch is visible.
+- **Chapter 13 — the clock, retuned.** The agent now considers speaking
+  unprompted at 5, 15 and 28 seconds of silence rather than 15 and 28, and the
+  first of those is a new, deliberately small move: follow through on what was
+  just said, not a fresh topic and not "are you still there". The silence is
+  counted from when the agent's *own voice stops*, so the old first nudge landed
+  35 seconds after a 20-second answer. It also knows its own delays now, and
+  says them when asked instead of guessing.
+- **Chapter 12 — a second pair of ears.** Speech recognition now has two
+  backends behind one protocol: AssemblyAI Universal-Streaming (the default)
+  and ElevenLabs Scribe (`--stt elevenlabs`). Nothing downstream of a
+  transcript changed. `--vad-silence` stays the single endpointing knob and
+  means the same thing on both, though the services take it in different units.
+  **AssemblyAI transcribes 18 languages and Russian is not among them** — a
+  language it does not know is turned into confident nonsense rather than
+  refused, so use `--stt elevenlabs` for those (Scribe covers 100, including
+  Russian). What the ears understand is now said in three places: the startup
+  banner, the page's status bar and a note in the log, and the agent's own
+  system prompt, so it stops offering to listen in languages it cannot hear. AssemblyAI has **no** standalone text-to-speech, so the voice stays
+  ElevenLabs — their synthesis exists only inside a managed voice-agent bundle
+  that would replace this pipeline wholesale.
 - **Chapter 11 — the trace.** A machine-readable companion to the record:
   `traces/<date>-<pid>.jsonl`, one JSON object per line, holding every reasoning
   call with its whole prompt and reply, every synthesis, every recognizer event,
@@ -172,11 +192,13 @@ uv run --env-file .env <command>
 ## Usage
 
 ```bash
-uv run voice-agent                          # DeepSeek + ElevenLabs, on :8000
+uv run voice-agent                          # DeepSeek + AssemblyAI ears + ElevenLabs voice, on :8000
 uv run voice-agent --provider anthropic --model claude-sonnet-5
 uv run voice-agent --tts openai --voice nova
 uv run voice-agent --voice-gender male       # match how the agent refers to itself
 uv run voice-agent --tts none               # no synthesis key needed
+uv run voice-agent --stt elevenlabs         # Scribe: needed for Russian and other
+                                            # languages AssemblyAI does not cover
 uv run voice-agent --stt none               # typing only, no recognition
 uv run voice-agent --vad-silence 2.0        # wait longer before ending a turn
 uv run voice-agent --initiative off         # never speak first; purely reactive
@@ -256,9 +278,10 @@ src/voice_agent/
     traced.py             a span around every reasoning call, whoever makes it
     openai_compatible.py  OpenAI and DeepSeek (same wire format)
     anthropic_provider.py Anthropic (system prompt and streaming differ)
-  stt/                    chapter 3: speech recognition
+  stt/                    chapters 3, 12: speech recognition
     base.py               Transcript + the STT protocol
     registry.py           name -> backend, or None for deafness
+    assemblyai_stt.py     Universal-Streaming v3 (default); 18 languages, no ru
     elevenlabs_stt.py     Scribe realtime over a raw WebSocket (VAD endpointing)
   tts/                    chapter 2: speech synthesis
     base.py               the TTS protocol: a text stream in, PCM chunks out

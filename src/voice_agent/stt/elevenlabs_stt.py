@@ -31,6 +31,118 @@ SAMPLE_RATE = 16000
 """What Scribe wants. The browser opens its AudioContext at this rate so no
 resampling happens anywhere."""
 
+LANGUAGES = (
+    "afr",
+    "amh",
+    "ara",
+    "hye",
+    "asm",
+    "ast",
+    "aze",
+    "bel",
+    "ben",
+    "bos",
+    "bul",
+    "mya",
+    "yue",
+    "cat",
+    "ceb",
+    "nya",
+    "hrv",
+    "ces",
+    "dan",
+    "nld",
+    "eng",
+    "est",
+    "fil",
+    "fin",
+    "fra",
+    "ful",
+    "glg",
+    "lug",
+    "kat",
+    "deu",
+    "ell",
+    "guj",
+    "hau",
+    "heb",
+    "hin",
+    "hun",
+    "isl",
+    "ibo",
+    "ind",
+    "gle",
+    "ita",
+    "jpn",
+    "jav",
+    "kea",
+    "kan",
+    "kaz",
+    "khm",
+    "kor",
+    "kur",
+    "kir",
+    "lao",
+    "lav",
+    "lin",
+    "lit",
+    "luo",
+    "ltz",
+    "mkd",
+    "msa",
+    "mal",
+    "mlt",
+    "zho",
+    "mri",
+    "mar",
+    "mon",
+    "nep",
+    "nso",
+    "nor",
+    "oci",
+    "ori",
+    "pus",
+    "fas",
+    "pol",
+    "por",
+    "pan",
+    "ron",
+    "rus",
+    "srp",
+    "sna",
+    "snd",
+    "sin",
+    "slk",
+    "slv",
+    "som",
+    "spa",
+    "swa",
+    "swe",
+    "tam",
+    "tgk",
+    "tel",
+    "tha",
+    "tur",
+    "ukr",
+    "umb",
+    "urd",
+    "uzb",
+    "vie",
+    "cym",
+    "wol",
+    "xho",
+    "zul",
+)
+"""The languages Scribe transcribes, as ISO 639-3 codes.
+
+Three-letter, where AssemblyAI's are two-letter. Left in each vendor's own
+convention rather than normalised: mapping 639-3 to 639-1 by hand across a
+hundred entries is a way to invent a fact, and only one backend is listening at
+a time so the two lists never have to line up.
+
+This is the reason `--stt elevenlabs` is the answer for Russian (`rus`, here;
+absent from AssemblyAI's eighteen) and for most of the world besides."""
+
 DEFAULT_SILENCE_SECONDS = 1.5
 """How long a pause means "I'm done" — Scribe's own default.
 
@@ -75,6 +187,7 @@ class ElevenLabsSTT:
         self.provider = "elevenlabs"
         self.model = model or DEFAULT_MODEL
         self.sample_rate = SAMPLE_RATE
+        self.languages = LANGUAGES
         self.silence_seconds = silence_seconds or DEFAULT_SILENCE_SECONDS
         self._api_key = api_key or require_env("ELEVENLABS_API_KEY")
 

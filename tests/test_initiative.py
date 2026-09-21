@@ -360,3 +360,51 @@ async def test_every_consideration_reports_what_it_cost() -> None:
     report = clock.reports[0]
     assert isinstance(report["prompt_tokens"], int) and report["prompt_tokens"] > 0
     assert isinstance(report["output_tokens"], int) and report["output_tokens"] > 0
+
+
+def test_the_first_rung_does_not_call_five_seconds_a_long_silence() -> None:
+    """`nudge_prompt` injects the real number, so the disposition has to agree
+    with it.
+
+    The rung that used to be first sat at fifteen seconds and opened "This is a
+    long silence now". Moved to five without rewriting, the model would be told
+    "they have said nothing for about 5 seconds" and, in the next breath, that
+    this is a long silence — a flat contradiction that can only push it towards
+    speaking when it should not.
+    """
+    from voice_agent.initiative import LADDER as SHIPPED
+
+    prompt = nudge_prompt(SHIPPED[0], SHIPPED[0].after)
+
+    assert "about 5 seconds" in prompt
+    assert "long silence" not in SHIPPED[0].disposition
+
+
+def test_the_first_rung_follows_through_rather_than_inviting() -> None:
+    """The seven-second rung was deleted for having no legal move: its job was
+    to invite the user in, and the greeting has already done that, so every
+    option was forbidden and the paid call had a foregone conclusion.
+
+    This one is about the exchange that just happened instead, which is a move
+    that exists whenever anything has been said. Pinned because re-describing it
+    as an invitation would quietly recreate a rung that can never fire.
+    """
+    from voice_agent.initiative import LADDER as SHIPPED
+
+    first = SHIPPED[0].intent.casefold()
+
+    assert "follow through" in first
+    assert "still there" in first  # named, as a thing not to do
+    assert "invitation you have already made" in first
+
+
+def test_the_shipped_ladder_starts_where_the_default_says_it_does() -> None:
+    """The delays and the rungs are separate places and have disagreed before."""
+    from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, _delays
+    from voice_agent.initiative import LADDER as SHIPPED
+
+    delays = _delays(DEFAULT_INITIATIVE_DELAYS)
+
+    assert len(delays) == len(SHIPPED) == 3
+    assert delays[0] == 5.0
+    assert [rung.after for rung in SHIPPED] == list(delays)

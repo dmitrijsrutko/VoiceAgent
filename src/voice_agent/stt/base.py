@@ -35,6 +35,21 @@ class STT(Protocol):
     def model(self) -> str: ...
 
     @property
+    def languages(self) -> tuple[str, ...]:
+        """Which languages this backend can transcribe, in the vendor's own
+        code convention — AssemblyAI answers in two-letter codes, ElevenLabs in
+        three-letter ones, and normalising them by hand would invent facts.
+
+        On the protocol because it is not a detail of one vendor: a recognizer
+        handed a language it does not have returns confident nonsense rather
+        than an error, so what it can hear has to be answerable *before*
+        somebody speaks. It reaches the user twice — as a line appended to the
+        system prompt, so the agent stops promising to listen in languages it
+        cannot, and on the page, so a person can see it before they open their
+        mouth."""
+        ...
+
+    @property
     def sample_rate(self) -> int:
         """The rate the backend expects. The browser captures at this rate
         rather than resampling, so a mismatch is a configuration bug, not

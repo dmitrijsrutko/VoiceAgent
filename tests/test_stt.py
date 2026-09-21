@@ -187,7 +187,11 @@ def test_the_default_pause_matches_the_service_default() -> None:
 def test_the_pause_is_tunable_because_no_single_value_is_right(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    # Named rather than taken from the settings' default: since chapter 12 the
+    # default ears are AssemblyAI, and this test is about *this* backend
+    # reading the shared knob.
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    monkeypatch.setenv("VOICE_AGENT_STT", "elevenlabs")
     monkeypatch.setenv("VOICE_AGENT_VAD_SILENCE", "2.5")
     settings = load_settings()
 

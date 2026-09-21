@@ -7,7 +7,7 @@ import { createPlayer } from "./player.js";
 import { interrupted, listenStart, listenStop, playback, userMessage } from "./protocol.js";
 import {
   add, form, input, listen, meta, ms, mute, note, paintListening as paint, paintText, setEnabled,
-  status, stick,
+  status, stick, wrap,
 } from "./ui.js";
 
 const key = location.pathname.split("/").pop();
@@ -123,6 +123,26 @@ async function prepareMic() {
   }
 }
 
+// Said once, in the log, and dismissible. A recognizer handed a language it
+// does not have returns confident nonsense rather than an error, so the only
+// moment this can be cheap to learn is before anybody speaks.
+function noteLanguages(langs) {
+  const el = document.createElement("div");
+  el.className = "note";
+  el.innerHTML =
+    `The microphone understands <strong>${langs.length}</strong> languages: ` +
+    `<code>${langs.join(" ")}</code>.<br>` +
+    "Anything else is transcribed as nonsense rather than refused. " +
+    '<a href="#" id="dismiss-langs">Got it</a>';
+  // Through `stick`, like every other append: a note that does not scroll into
+  // view is a note nobody reads.
+  stick(() => wrap.appendChild(el));
+  el.querySelector("#dismiss-langs").addEventListener("click", (e) => {
+    e.preventDefault();
+    el.remove();
+  });
+}
+
 ws.onmessage = (event) => {
   if (event.data instanceof ArrayBuffer) {
     // Binary frames only ever arrive between `audio_start` and `audio_end`.
@@ -134,8 +154,14 @@ ws.onmessage = (event) => {
 
   if (msg.type === "ready") {
     const voice = msg.voice ? `${msg.voice.provider} ${msg.voice.voice.slice(0, 10)}` : "silent";
-    const ears = msg.ears ? `🎤 ${msg.ears.provider} ${msg.ears.sample_rate / 1000}kHz` : "🎤 deaf";
+    const langs = msg.ears && msg.ears.languages ? msg.ears.languages : [];
+    const heard = langs.length ? ` · ${langs.length} languages` : "";
+    const ears = msg.ears ? `🎤 ${msg.ears.provider} ${msg.ears.sample_rate / 1000}kHz${heard}` : "🎤 deaf";
     meta.textContent = `${msg.provider} · ${msg.model} · 🔊 ${voice} · ${ears} · ${msg.session.slice(0, 8)}…`;
+    // The codes themselves on hover: too long for the bar, and the count alone
+    // is enough to make someone look before they speak.
+    meta.title = langs.length ? `heard: ${langs.join(" ")}` : "";
+    if (langs.length) noteLanguages(langs);
     sampleRate = msg.ears ? msg.ears.sample_rate : 16000;
     if (msg.voice) player.setRate(msg.voice.sample_rate);
     if (msg.ears) prepareMic();
