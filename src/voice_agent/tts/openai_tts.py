@@ -5,10 +5,8 @@ ElevenLabs in every detail that matters (voices are names rather than ids, the
 format is a separate parameter, streaming is a response wrapper rather than a
 separate endpoint), which is what makes the `TTS` protocol worth having.
 
-Crude on purpose since Chapter 7: `/audio/speech` takes whole text only, so the
-reply is gathered in full and synthesized after it has been written — the
-batched wait that ElevenLabs no longer has. Sentence-sized requests, cut on our
-side, would fix it; nothing here needs that yet.
+Crude: `/audio/speech` takes whole text only, so the reply is synthesized after
+it has been written. That is why the page never offers it.
 """
 
 from collections.abc import AsyncIterator

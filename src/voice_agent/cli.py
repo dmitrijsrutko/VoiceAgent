@@ -8,6 +8,9 @@ import uvicorn
 from dotenv import load_dotenv
 
 from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, load_settings
+from voice_agent.llm import registry as llm_registry
+from voice_agent.stt import registry as stt_registry
+from voice_agent.tts import registry as tts_registry
 
 
 def main() -> None:
@@ -22,14 +25,14 @@ def main() -> None:
     parser.add_argument(
         "--provider",
         default=settings.provider,
-        choices=["deepseek", "openai", "anthropic"],
+        choices=list(llm_registry.BUILDERS),
         help="reasoning engine backend (default: %(default)s)",
     )
     parser.add_argument("--model", default=settings.model, help="override the provider's default")
     parser.add_argument(
         "--tts",
         default=settings.voice_provider,
-        choices=["elevenlabs", "openai", "none"],
+        choices=[*tts_registry.BUILDERS, tts_registry.NO_VOICE],
         help="speech synthesis backend, or 'none' to stay silent (default: %(default)s)",
     )
     parser.add_argument("--voice", default=settings.voice, help="voice id or name for the backend")
@@ -43,7 +46,7 @@ def main() -> None:
     parser.add_argument(
         "--stt",
         default=settings.ears_provider,
-        choices=["assemblyai", "elevenlabs", "none"],
+        choices=[*stt_registry.BUILDERS, stt_registry.NO_EARS],
         help="speech recognition backend, or 'none' to stay deaf (default: %(default)s)",
     )
     parser.add_argument(
@@ -51,15 +54,13 @@ def main() -> None:
         type=float,
         default=settings.vad_silence,
         metavar="SECONDS",
-        help="pause length that ends a spoken turn (default: 1.5)",
+        help="pause length that ends a spoken turn (default: the recognizer's own)",
     )
     parser.add_argument(
         "--initiative",
         default=None,
         metavar="SECONDS,...",
         help="silences at which the agent considers speaking unprompted, or 'off' "
-        # Read, not restated: this said 7,20,45 for two chapters after those
-        # were no longer the delays.
         f"for the purely reactive agent (default: {DEFAULT_INITIATIVE_DELAYS})",
     )
     parser.add_argument(
@@ -105,7 +106,7 @@ def main() -> None:
     if args.voice:
         os.environ["VOICE_AGENT_VOICE"] = args.voice
     os.environ["VOICE_AGENT_VOICE_GENDER"] = args.voice_gender
-    if args.vad_silence:
+    if args.vad_silence is not None:
         os.environ["VOICE_AGENT_VAD_SILENCE"] = str(args.vad_silence)
     if args.initiative is not None:
         os.environ["VOICE_AGENT_INITIATIVE"] = args.initiative
@@ -140,10 +141,9 @@ def main() -> None:
     # user is *expected* to hit — a typo in a flag — and burying the sentence
     # that says which flag under twenty lines of stack helps nobody.
     try:
-        # Re-read, so a bad --initiative is rejected here rather than inside the
-        # first connection.
+        # Re-read after the flags above, so a bad --initiative is rejected here.
         settings = load_settings()
-        app = create_app()
+        app = create_app(settings=settings)
     except ConfigError as exc:
         raise SystemExit(f"voice-agent: {exc}") from exc
     delays = settings.initiative
@@ -153,11 +153,8 @@ def main() -> None:
         f"({args.provider} · 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
         f"· 📝 {settings.sessions or 'off'} · 🔬 {settings.trace or 'off'})"
     )
-    # Said out loud at every start, because the failure this prevents is silent.
-    # A language this backend does not know is not refused — it is transcribed
-    # into confident nonsense, which the agent then answers. Measured: spoken
-    # Russian came back as "Раскажем не pravalo вывnutriny produkt kitaia", and
-    # nothing anywhere said the recognizer was out of its depth.
+    # Said at every start: a language this recognizer lacks is not refused but
+    # transcribed as confident nonsense, which the agent then answers.
     if args.stt == "assemblyai":
         from voice_agent.stt.assemblyai_stt import LANGUAGES
 
@@ -170,18 +167,12 @@ def main() -> None:
 
 
 def start_logging() -> None:
-    """Configure logging, which until Chapter 11 nothing in this project did.
-
-    The only line that touched it was uvicorn's own `log_level`, which sets
-    uvicorn's loggers and not ours, so all eight `logger.info` calls under
-    `src/voice_agent/` went nowhere — which is how the initiative clock's
-    provider failures stayed invisible.
+    """Configure logging: the console at INFO, the trace at DEBUG.
 
     The console's level is set on the **handler**, not inherited from the root
     logger. Propagation consults handler levels and ignores ancestor logger
-    levels, so putting `voice_agent` at DEBUG to feed the trace also pushed
-    every INFO line to the terminal — a recogniser reconnect, a failed warm, a
-    turn ending — until this was written the way it is now.
+    levels, so `voice_agent` at DEBUG for the trace would otherwise flood the
+    terminal.
     """
     from voice_agent.trace import TraceHandler, install, open_trace
 

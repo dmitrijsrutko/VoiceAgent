@@ -62,7 +62,7 @@ class StablePrefix:
     contradictions: int = 0
     """Times agreement produced something that disagreed with already-stable
     text. Should be zero; counted rather than asserted, because the cost of
-    being wrong here is a wasted warm rather than a broken turn."""
+    being wrong here is a wasted guess rather than a broken turn."""
 
     @property
     def text(self) -> str:

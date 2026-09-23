@@ -1,8 +1,6 @@
 """In-memory session store: one conversation per unique link.
 
-Everything lives in this process. Restarting the server loses every
-conversation, which is the intended chapter 1 behavior — persistence is a
-later chapter, and pretending otherwise would hide the cost of not having it.
+Everything lives in this process: a restart loses every conversation.
 """
 
 import secrets
@@ -18,11 +16,9 @@ so it has to be unguessable, not merely unique."""
 class SessionStore:
     """`cap` bounds how many conversations are kept, oldest dropped first.
 
-    Unset — every chapter before 14, and every local run — the store grows
-    forever, which is correct when the only person who can add to it is the one
-    who started the server. With a public address it is not: `GET /` mints a
-    conversation on every load, so a crawler grows this dict until the process
-    is killed for it.
+    Unset (a local run), the store grows forever. With a public address that
+    is not safe: `GET /` mints a conversation on every load, so a crawler would
+    grow this dict until the process is killed for it.
 
     A dropped conversation loses its link; reloading it gets the 404 page
     instead of its history. That is precisely what restarting the server already

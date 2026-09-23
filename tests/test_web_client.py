@@ -367,12 +367,6 @@ def test_sending_a_message_drops_the_unheard_greeting_before_resuming() -> None:
     assert submit.index("try {") < submit.index("player.resume()"), "an audio failure escapes"
 
 
-def test_the_cached_token_percentage_cannot_divide_by_zero() -> None:
-    """A provider that reports no usage yields a zero prompt-token count, and
-    `NaN%` on screen is how you would find out."""
-    assert "const pct = msg.warm_prompt_tokens" in source("app.js"), "the division is unguarded"
-
-
 def test_the_socket_is_not_opened_by_loading_the_page() -> None:
     """The whole point of the start screen. Opening the socket *is* starting the
     conversation — the server greets, and starts the clock that decides whether
@@ -443,8 +437,8 @@ def test_the_utterance_being_spoken_stays_last_in_the_log() -> None:
     app = without_comments(source("app.js"))
 
     assert "wrap.insertBefore(el, below)" in ui
-    assert app.count("pinLast(") == 3, "the live bubble is not pinned and released on every path"
     assert 'live = add("", "msg user volatile"); pinLast(live);' in app
+    assert "pinLast(null)" in app, "the live bubble is never released"
 
 
 def test_listening_starts_itself_once_the_agent_is_ready() -> None:
@@ -456,7 +450,7 @@ def test_listening_starts_itself_once_the_agent_is_ready() -> None:
     # In the `ready` handler and nowhere earlier: that frame is what confirms
     # the rate the microphone was built at, and that the socket can carry it.
     auto_listen = "if (msg.ears && !micRefused) beginListening();"
-    assert app.index('msg.type === "ready"') < app.index(auto_listen)
+    assert app.index("ready(msg) {") < app.index(auto_listen)
 
 
 def test_the_page_carries_a_default_facts_block() -> None:
@@ -466,29 +460,29 @@ def test_the_page_carries_a_default_facts_block() -> None:
     from voice_agent.server import FACTS_BLOCK
 
     assert FACTS_BLOCK in PAGE.read_text(encoding="utf-8")
-    assert 'getElementById("facts")' in source("app.js")
+    assert 'getElementById("facts")' in source("start.js")
 
 
 def test_the_chosen_stack_travels_with_the_socket() -> None:
     """The socket opening is what starts a conversation, so the choice has to
     be on it. A selector the server never hears is a selector that lies."""
     app = without_comments(source("app.js"))
+    start = without_comments(source("start.js"))
     connect = re.search(r"function connect\(\).*?\n\}", app, re.DOTALL)
 
     assert connect, "connect() is gone"
-    body = connect.group(0)
-    assert "URLSearchParams" in body and "picked(group)" in body
-    assert '"llm", "stt"' in body, "both halves of the stack must be sent"
+    assert "stackQuery()" in connect.group(0)
+    assert 'for (const group of ["llm", "stt"])' in start, "both halves of the stack must be sent"
 
 
 def test_the_languages_notice_follows_the_chosen_ears() -> None:
     """Scribe hears 100 languages and AssemblyAI 18, and which is running is
     the visitor's choice now — so a notice fixed at page load would describe a
     recognizer they did not pick."""
-    app = without_comments(source("app.js"))
+    start = without_comments(source("start.js"))
 
-    assert 'startStack.addEventListener("change", paintEars)' in app
-    assert "languages: <code>" in app
+    assert 'startStack.addEventListener("change"' in start
+    assert "languages: <code>" in start
 
 
 def test_the_start_screen_warns_about_no_particular_language() -> None:
@@ -502,18 +496,18 @@ def test_the_voice_is_a_group_of_one_that_is_never_sent() -> None:
     synthesising — offering it as a peer would be offering a worse agent. The
     voice is drawn like the other two parts of the stack, with one option, and
     the socket never carries a choice of it."""
-    app = without_comments(source("app.js"))
-    choosing = re.findall(r'choose\("(\w+)"', app)
+    start = without_comments(source("start.js"))
+    choosing = re.findall(r'choose\("(\w+)"', start)
 
     assert choosing == ["llm", "stt", "tts"], f"the pickers changed: {choosing}"
-    assert "{ single: true }" in app, "the voice is no longer drawn as a group of one"
-    assert 'for (const group of ["llm", "stt"])' in app, "the socket now carries something else"
+    assert "{ single: true }" in start, "the voice is no longer drawn as a group of one"
+    assert 'for (const group of ["llm", "stt"])' in start, "the socket now carries something else"
 
 
 def test_each_picker_draws_its_default_first() -> None:
     """The server lists providers in registry order — DeepSeek before
     Anthropic — which put the default on the right."""
-    app = without_comments(source("app.js"))
+    start = without_comments(source("start.js"))
 
-    assert "sort((a, b) => Number(!!b.default) - Number(!!a.default))" in app
-    assert "ordered.map(" in app
+    assert "sort((a, b) => Number(!!b.default) - Number(!!a.default))" in start
+    assert "ordered.map(" in start

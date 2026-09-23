@@ -11,6 +11,7 @@ import contextlib
 import logging
 import time
 from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation, Message
@@ -26,48 +27,63 @@ from voice_agent.tts.base import pcm_seconds
 
 logger = logging.getLogger(__name__)
 
+FELL_BEHIND_MS = 500
+"""Synthesis this far behind playback is logged: the listener heard a pause."""
+
 SLOW_FIRST_TOKEN_MS = 3000
-"""A first token this late is logged. Measured TTFT runs ~0.5-1.2 s; one turn
-took 8.5 s and nothing afterwards could say where it went."""
+"""A first token this late is logged (typical TTFT is ~0.5-1.2 s)."""
 
 
-class Interruption:
-    """Whether a turn being cancelled was talked over rather than torn down.
+@dataclass(frozen=True, slots=True)
+class Context:
+    """What every turn of one conversation is run with."""
 
-    The two end differently. A conversation that ends, or a socket that closes,
-    drops a question left without its answer. A user who talks over the reply
-    has asked the question and heard some of the answer, so both stay — the
-    answer cut down, later, to what was heard.
+    channel: Channel
+    conversation: Conversation
+    engine: LLM
+    speaker: TTS | None
+    system_prompt: str
+
+
+@dataclass(eq=False, slots=True)
+class Turn:
+    """One turn, from the moment it is submitted.
+
+    An interruption treats a turn by where it is: one already running is
+    cancelled and keeps what it wrote; one still waiting has not begun, so
+    there is only a question to record.
     """
 
-    def __init__(self) -> None:
-        self.requested = False
+    text: str | None
+    """What the user said. `None` for a turn the agent started itself."""
+    said: str | None = None
+    """The line an unprompted turn already decided to say."""
+    after: asyncio.Task[None] | None = None
+    """The cut of the reply this turn interrupted, which it waits for."""
+    voice: Spoken = field(default_factory=Spoken)
+    """What the reply's speech says and when, to work out what was heard."""
+    interrupted: bool = False
+    """Talked over rather than torn down. A torn-down turn drops a question left
+    without an answer; a talked-over one keeps both, the answer cut down to
+    what was heard."""
+    started: bool = False
 
 
 async def run_turn(
-    channel: Channel,
-    conversation: Conversation,
-    engine: LLM,
-    speaker: TTS | None,
-    system_prompt: str,
-    text: str | None,
+    ctx: Context,
+    turn: Turn,
     fragments: AsyncIterator[str] | None = None,
-    report: dict[str, object] | None = None,
     usage: Usage | None = None,
-    voice: Spoken | None = None,
-    interruption: Interruption | None = None,
+    report: dict[str, object] | None = None,
 ) -> float | None:
-    """Returns how much of the spoken reply is still to play when this returns.
+    """Stream one reply to the page and the synthesizer. Returns how much of the
+    spoken reply is still to play.
 
-    `voice` is filled with what the reply's speech says and when, so that
-    whoever interrupts it can work out what was heard.
-
-    `text` is `None` for a turn the agent started itself: there is no question,
-    only an answer. Everything after that point is identical — the same
-    streaming, the same speech, the same truncation when it is talked over —
-    which is the reason an unprompted line goes through here rather than down a
-    path of its own.
+    `fragments` is the reply when it was not generated here — a claimed guess,
+    or an unprompted line — and is otherwise asked of the engine.
     """
+    channel, conversation, speaker = ctx.channel, ctx.conversation, ctx.speaker
+    text, voice = turn.text, turn.voice
     if text is not None:
         conversation.add_user(text)
     await channel.send_json({"type": "reply_start"})
@@ -80,21 +96,13 @@ async def run_turn(
     reply: Message | None = None
     try:
         first_token_at: float | None = None
-        # A claimed speculation is already generating — possibly already finished.
-        # Everything after this point is identical either way, which is the point:
-        # a turn does not know whether its reply was guessed at.
         usage = usage if usage is not None else Usage()
 
         def ask() -> AsyncIterator[str]:
-            return engine.stream(system_prompt, conversation.messages, usage)
+            return ctx.engine.stream(ctx.system_prompt, conversation.context, usage)
 
-        # Guarded whichever of the three sources the words come from. A
-        # speculation claimed before the question finished is the same model
-        # answering the same prompt, so it can leak the sentinel the same way;
-        # an unprompted line cannot, having already passed `spoken_line`, and
-        # is guarded anyway rather than given an exception to carry around.
-        # The retry always goes to the engine — re-running a guess would only
-        # produce the guess again.
+        # Guarded whatever the source; a retry always asks the engine, since
+        # re-running a guess would only produce the guess again.
         source = guard(fragments if fragments is not None else ask(), ask)
         try:
             async with closing(source) as fragments:
@@ -106,10 +114,8 @@ async def run_turn(
                         speech.say(fragment)
                     await channel.send_json({"type": "delta", "text": fragment})
         except VoiceAgentError as exc:
-            # Fail closed: drop the user turn too, so a failed exchange never leaves
-            # a dangling question in the context that the next call would resend.
-            # Part of the answer may already have been heard; it stops here, and
-            # the audio that began is closed so the page stops waiting for it.
+            # Fail closed: drop the question too, so no call resends a dangling
+            # one; close any audio already begun so the page stops waiting.
             if text is not None:
                 conversation.messages.pop()
             if speech is not None:
@@ -131,32 +137,7 @@ async def run_turn(
         await channel.send_json(
             {
                 **(report or {}),
-                "type": "reply_end",
-                "text": written,
-                "chars": len(written),
-                # Split at the first token, because the halves mean different
-                # things. `ttft_ms` is dead air the user actually experiences and
-                # is the number the latency budget targets; `generation_ms` is
-                # throughput, which streaming already hides behind text appearing
-                # on screen. A single "reply took N ms" would blur the one that
-                # matters into the one that does not.
-                "ttft_ms": ttft_ms,
-                "generation_ms": elapsed_ms(generation_started),
-                # Events the provider sent, and what it says they cost. Not the same
-                # number: a fragment is often one token but not by contract.
-                "fragments": len(produced),
-                "output_tokens": usage.output_tokens,
-                "prompt_tokens": usage.prompt_tokens,
-                "cached_tokens": usage.cached_tokens,
-                # Set only when this call had to open a connection first; a
-                # reused one costs nothing, so a steady stream of these means
-                # connections are not being kept between turns.
-                "connect_ms": usage.connect_ms,
-                # Splits a slow first token: a late accept or several attempts
-                # is the network or a refusal; a quick accept then a long wait
-                # is the provider queueing.
-                "accepted_ms": usage.accepted_ms,
-                "attempts": usage.attempts,
+                **reply_report(written, len(produced), ttft_ms, generation_started, usage),
             }
         )
         if ttft_ms >= SLOW_FIRST_TOKEN_MS:
@@ -170,7 +151,7 @@ async def run_turn(
             )
         return await speech.done() if speech is not None else None
     except asyncio.CancelledError:
-        if interruption is None or not interruption.requested:
+        if not turn.interrupted:
             # The socket closed, or the user ended the conversation. Cancelled
             # before a reply existed, the same rule as a failure: no question
             # without an answer. Nothing more is sent, so whatever ended the
@@ -192,6 +173,33 @@ async def run_turn(
         # including the `reply_end` write, which queues behind audio frames.
         if speech is not None:
             await speech.cancel()
+
+
+def reply_report(
+    written: str, fragments: int, ttft_ms: int, generation_started: float, usage: Usage
+) -> dict[str, object]:
+    """The `reply_end` frame of a reply that finished."""
+    return {
+        "type": "reply_end",
+        "text": written,
+        "chars": len(written),
+        # Split at the first token: `ttft_ms` is dead air the user hears and
+        # the number the latency budget targets; `generation_ms` is throughput,
+        # which streaming hides behind text already on screen.
+        "ttft_ms": ttft_ms,
+        "generation_ms": elapsed_ms(generation_started),
+        # A fragment is often one token, but not by contract.
+        "fragments": fragments,
+        "output_tokens": usage.output_tokens,
+        "prompt_tokens": usage.prompt_tokens,
+        "cached_tokens": usage.cached_tokens,
+        # Set only when a connection had to be opened first.
+        "connect_ms": usage.connect_ms,
+        # Splits a slow first token: late accept = network or refusal; quick
+        # accept then a long wait = the provider queueing.
+        "accepted_ms": usage.accepted_ms,
+        "attempts": usage.attempts,
+    }
 
 
 async def _record_interrupted(
@@ -232,6 +240,11 @@ class Speech:
         self._first_sent_at: float | None = None
         self._sent = 0
         self._chunks = 0
+        self._last_chunk_at: float | None = None
+        self._late_ms = 0
+        """The most a chunk arrived after the audio before it would have
+        finished playing: a pause the listener heard, not one in the voice."""
+        self._late_after = ""
         self._audio_ended = False
         self._task = asyncio.create_task(self._run())
 
@@ -251,6 +264,14 @@ class Speech:
         return self._remaining()
 
     async def cancel(self) -> None:
+        if not self._task.done() and self._last_chunk_at is not None and not self._audio_ended:
+            # A stalled synthesis leaves no `audio_end` behind, so this is the
+            # only trace of where it stopped.
+            logger.warning(
+                "synthesis unfinished when its turn ended: %.1f s since the last chunk, after %r",
+                time.perf_counter() - self._last_chunk_at,
+                self._voiced_tail(),
+            )
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
@@ -269,6 +290,7 @@ class Speech:
         try:
             async with closing(self._speaker.stream(self._fragments())) as audio:
                 async for chunk in audio:
+                    self._note_lateness()
                     if self._first_sent_at is None:
                         # Announced on the first chunk rather than on connecting,
                         # so a synthesis that fails outright opens no stream,
@@ -328,12 +350,34 @@ class Speech:
                 "synthesis_ms": elapsed_ms(synthesis_started),
                 # The number the whole project is judged on: send to first audio.
                 "first_audio_ms": elapsed_ms(self._turn_started, self._first_sent_at),
-                # Whether the voice started before the reasoning engine finished
-                # writing — the thing this chapter exists to make true.
+                # Whether the voice started before the reply was fully written.
                 "audio_before_reply_end": self._text_ended_at is None
                 or self._first_sent_at < self._text_ended_at,
+                "late_ms": self._late_ms,
+                "late_after": self._late_after,
             }
         )
+        if self._late_ms >= FELL_BEHIND_MS:
+            logger.warning(
+                "synthesis fell %d ms behind playback after %r", self._late_ms, self._late_after
+            )
+
+    def _note_lateness(self) -> None:
+        """How late this chunk is against playback, assuming playback began
+        when the first chunk was sent (the browser starts a little after, so
+        this errs towards zero)."""
+        now = time.perf_counter()
+        self._last_chunk_at = now
+        if self._first_sent_at is None:
+            return
+        late_ms = round((now - self._first_sent_at - pcm_seconds(self._sent)) * 1000)
+        if late_ms > self._late_ms:
+            self._late_ms = late_ms
+            self._late_after = self._voiced_tail()
+
+    def _voiced_tail(self) -> str:
+        """The last words voiced so far, to place a pause in the text."""
+        return "".join(self.voice.chars)[-30:]
 
     def _remaining(self) -> float | None:
         """Playback left, assuming it began when the first chunk was sent.

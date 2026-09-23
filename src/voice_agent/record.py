@@ -1,18 +1,14 @@
 """The conversation as a file you can read afterwards.
 
-Everything this project has debugged so far started with someone copying the
-page's telemetry into a chat window by hand, because a reload threw it away.
-This keeps it: one Markdown file per conversation, written as it happens.
+One Markdown file per conversation, written as it happens, so telemetry
+survives a reload.
 
-It is written by tapping `Channel` rather than by calling a logger from each
-place something interesting occurs. `Channel` is the one door every frame the
-browser receives goes through, so the record cannot drift from what the user
-actually saw, and a frame type added in a later chapter appears here without
-anyone remembering to record it.
+It taps `Channel`, the one door every frame to the browser goes through, so the
+record cannot drift from what the user saw, and a new frame type is recorded
+without anyone remembering to.
 
 **No audio is ever written.** Binary frames are counted, never kept: voice is
-biometric data, a five-minute session is tens of megabytes, and every bug in
-nine chapters has been diagnosable from timings.
+biometric data, and timings have been enough to diagnose every bug so far.
 """
 
 import contextlib
@@ -61,11 +57,8 @@ def render(value: object) -> str:
 def attributes(payload: Mapping[str, Any]) -> str:
     """Every field the frame carries, as `key value · key value`.
 
-    Deliberately generic rather than phrased. The page turns `reply_end` into
-    prose — "thought for 492 ms · 56 chars" — and writing that a second time in
-    Python would be a second renderer to keep in step, wrong within two
-    chapters. This way a field added to any frame shows up here on its own, and
-    the numbers arrive unrounded, which is what a record is for.
+    Generic rather than phrased like the page: a second renderer would drift,
+    and this way a new field shows up on its own, unrounded.
     """
     parts = []
     for key, value in payload.items():

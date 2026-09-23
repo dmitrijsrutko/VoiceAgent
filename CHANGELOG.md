@@ -14,6 +14,83 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Simplification — a review, and less to carry
+
+Not a chapter: a review of the requirements, the architecture and the code,
+before building further. The core held up: streaming LLM into streaming TTS,
+barge-in that keeps only what was heard, the choice of stack, the caps. What had
+grown heavy was around it: a feature that never earned its keep, four functions
+too large to hold in one's head, comments that read as a diary, and docs about
+ten times larger than their own rules allow. This pass removes weight and
+changes behaviour only where stated.
+
+**What changed**
+- **Warming removed** (`warming.py`, `LLM.warm`, the 🔥 notes). Measured in
+  Chapter 4 at ~10 ms after the first turn, inside the noise, and only ever on
+  DeepSeek. Speculation covers the same gap.
+- **Telemetry behind a `details` switch.** The notes under each bubble are
+  still written, but hidden unless the header's **details** is on (remembered
+  per browser). Errors and "press listen" stay visible.
+- **No trace on the public instance** (`VOICE_AGENT_TRACE = "off"` in
+  `fly.toml`): it held whole prompts and replies, against AGENTS.md §10.
+- `server.py`: `create_app` went from 270 lines to 90. Process state is one
+  `Agent`, the socket is a module-level `serve()`/`converse()`, and `facts()`
+  takes 3 arguments instead of 8.
+- `pool.py`: `Stack` owns which engines and ears are offered and which each
+  conversation picked (it was closures inside `create_app`).
+- `turn.py`: `run_turn(ctx, turn, …)` replaces 11 parameters. `Turn` lives here,
+  and a flag replaces the one-bool `Interruption` class. The `reply_end` report
+  is its own function.
+- `web/`: `app.js` dispatches through one handler per server message (it was a
+  235-line if/else). The start screen is `start.js`, and the note text is
+  `telemetry.js`, which node now executes.
+- Comments and docstrings cut to their constraints, down from about 2,000 lines
+  to about 1,400. The stories stay here, in the CHANGELOG.
+- Hygiene: `prompts/AssemblyAI.md` (a vendor guide for coding agents, never
+  loaded) moved to `docs/vendor/`. Five unused `.env.example` names are gone.
+  The CLI's choices come from the registries, and `--vad-silence`'s help no
+  longer claims a default it does not have.
+- README down from about 4,100 words to about 1,100, with one line per chapter.
+  The two multi-page fix entries below are condensed to their facts.
+
+**Design decisions**
+- **The registries were left as they are.** A generic `Registry[T]` would add
+  a layer to three 50-line modules that are already consistent enough.
+- **Config still flows through the environment.** The CLI writes flags into
+  `os.environ` so there is one parser. `create_app` now takes the `Settings`
+  the CLI loaded rather than loading them again.
+- **No server-side protocol module.** The handler table in `app.js` is now the
+  one list of server frames on the client. Typing every frame on the server
+  would be a larger change than this pass.
+
+**Latency impact**
+- None intended. Warming's measured effect was within the noise.
+
+**Deliberately not done**
+- Speculation and agreement stay, still unmeasured on AssemblyAI (the
+  default ears). That measurement is the next thing worth doing to them.
+- Initiative keeps its three rungs.
+
+**Verification**
+- `uv run verify` green after every step: 520 tests. That is 6 warming tests
+  removed, 12 telemetry cases added in node, and the source-text checks moved
+  onto the new modules.
+- A before/after comparison of every module's syntax tree, with docstrings
+  removed, confirmed that the comment pass changed no code.
+- The page rendered in headless Chrome: three pickers with the defaults first,
+  and the details switch present.
+- A typed conversation driven through the page in headless Chrome (silent,
+  deaf, a real click): greeting, reply, notes hidden until **details** is on,
+  and no errors on the page or the server.
+
+**Fixes**
+
+- Haiku answered Russian in English after one English reply (11 of 16 in a replay of a live conversation), and, corrected on its own gender, made Dostoevsky feminine. The language rule is now also the prompt's last line, with examples (0 of 32 on the same replay), and the gender line says it covers only the agent itself.
+- That rule still let about 1 in 30 first replies go English on the live site: the English greeting was the only turn before the question. The greeting now stays in the page's history but out of the model's context, stated in the prompt as already said instead (8 of 8 Russian after the change; the residual rate is too small to measure frugally).
+- A reply paused audibly at «…Достоевский —», exactly where synthesis split it, but a resynthesis showed no silence in the audio and the record kept no timing. `audio_end` now carries how far the voice fell behind playback and after which words (`late_ms`, `late_after`, a ⚠ note on the page, logged from 500 ms), a synthesis still unfinished when its turn ends is logged, and the page's playback gaps go into the record.
+- «понял» in a woman's voice again, the gender line buried under the hearing and clock notes. The prompt now opens with who the agent is ("You are a woman…"), ends with the voice rule after the language rule, and treats an earlier wrong form as a mistake rather than a precedent: masculine forms 3 of 5 → 0 of 5 on a replay whose history already held one.
+- `--stt none` is honoured when recognizer keys are present. Since Chapter 15 the page still offered ears, and asked for the microphone.
+
 ## Chapter 15 — The vendors become a choice
 
 `AGENTS.md` opens with the claim this whole project is built to prove: **the
@@ -173,253 +250,44 @@ a conversation it is as stable as it ever was, which is what caching needs.
 
 ## The agent waits to be started
 
-Loading the page *was* the conversation. The socket opened at module scope, so
-arriving at a link made the server mint a session, speak its greeting and start
-the clock that decides whether to speak into a silence — at somebody who was
-still reading the page and had not found their headphones. Being *heard* then
-took a second, separate press of **listen**, which meant the agent greeted you
-out loud and then ignored you when you answered it.
+Loading the page used to *be* the conversation: the agent greeted somebody still
+reading it, and could not be heard until they found **listen**. A **start
+conversation** screen now stands in front, and the click is also the gesture a
+browser needs before audio may play.
 
-The two halves were wrong in opposite directions, and one button fixes both. A
-**Start conversation** screen now stands in front of the conversation. Pressing
-it is the person saying they are ready — and it is also the browser gesture that
-permits audio, which is the part that was quietly broken rather than merely
-eager: autoplay is refused without one, so the greeting frequently *could not
-play at all* and the page fell back to "click anywhere to hear the agent". A
-voice agent whose first act is to ask you to click before it can speak has
-already lost the demo. Listening then starts by itself, because somebody who has
-just said they are ready should not have to say it twice.
+- **The socket opening is the start**; there is no `start` message. The chosen
+  stack rides on its query string (Chapter 15).
+- **The facts are written into the page** (`server.with_facts`), not fetched, so
+  the screen can say what starting entails (recording, no mic, silence) before
+  there is a socket.
+- **`player.resume()` is the first statement of the click** and is awaited
+  before the socket opens: the greeting arrives about 20 ms later, and a resume
+  still in flight left it unplayed. Found in a real browser; the tests could
+  not see it.
+- **Listening starts by itself**, and the microphone is asked for in the same
+  click, before the greeting (see Chapter 15's fixes).
 
-The same screen is where the agent now says what it is. The languages notice and
-the recording notice used to arrive on connect, as dismissible notes — correct,
-but a moment late: by then the conversation had started and was already being
-written down. They are now what the button is surrounded by, so pressing it is
-an informed act rather than one explained afterwards.
-
-**What changed**
-
-- `src/voice_agent/web/app.js`: the socket is created in `connect()`, called by
-  the start button, instead of at module scope. `beginListening()` is lifted out
-  of `listen.onclick` and called from the `ready` handler — there and not in the
-  click, because `buildMic` needs the sample rate that only the `ready` frame
-  carries. Four guards that touch the socket go through one null-safe
-  `sending()`.
-- `src/voice_agent/server.py`: `facts()` — the voice, the ears and whether this
-  run writes things down — used by both the `ready` frame and, through
-  `with_facts`, the served page. The start screen has to say what beginning
-  entails before there is a socket to ask over.
-- `src/voice_agent/web/index.html`: the start screen, and an empty `#facts`
-  block for the server to fill.
-- `src/voice_agent/web/mic.js`: `warmUpMicPermission` deleted. It existed to
-  move the permission prompt to page load so the first **listen** press felt
-  instant; there is no first press any more, and prompting somebody who has
-  only opened a page was the rudest thing this client did.
-
-**Design decisions**
-
-- **The socket opening is the start; there is no `start` message.** The server
-  already does nothing until a connection arrives, so the gate costs no
-  protocol and no state. It also means an unopened page holds no slot against
-  `VOICE_AGENT_MAX_LIVE` and ticks no clock — a page that is merely *open* is
-  now free, where before it was a running conversation.
-- **The facts are written into the page, not fetched.** A second endpoint would
-  have been another round trip and a second statement of the same three things;
-  one helper feeding both paths is what keeps the page from claiming a voice the
-  server does not have.
-- **The microphone opens during the greeting, not after it.** Chapter 8 already
-  keeps the mic open while the agent speaks, so this is the existing design
-  rather than a new risk, and it means barge-in can be discovered in the first
-  two seconds instead of by accident later.
-- **Permission is asked where it is used.** Denied, the conversation starts
-  anyway, says so in the log, and leaves **listen** pressable to try again.
-
-**Latency impact**
-
-The greeting now costs one WebSocket handshake after the click, where the socket
-used to be open in advance — measured locally at 20 ms from connect to the
-greeting frame, with the audio itself served from the on-disk cache
-(`synthesis_ms 0`). Against that, the greeting now *plays*, which it often did
-not.
-
-**Deliberately not done**
-
-- `GET /` still mints on page load: the link has to exist for the page to load
-  at all, and chapter 1's "the link is the conversation" rests on it.
-- Barge-in is not suppressed during the greeting — talking over it from the
-  first second is the point.
-
-**Verification**
-
-- `uv run verify` green: 493 tests, up 10.
-- Driven in a real browser (headless Chrome over the debug protocol), against a
-  local server, with the greeting served from cache so no synthesis was spent:
-  - Before the click: the start screen renders both notices from the served
-    facts, and `performance.getEntriesByType("resource")` shows **zero**
-    `/ws/` connections. Three page loads produced **no** session records —
-    nothing starts.
-  - After it: the start screen is gone, the greeting arrives and plays, the
-    listen chip reads **⏹ stop** and the status line **· listening** without
-    anything else being pressed, and no console errors.
-  - With the microphone denied: the conversation still starts, "microphone
-    failed: Permission denied" appears in the log, typing works, and **listen**
-    is pressable.
-- **A race the browser caught and the tests could not.** `player.resume()` is
-  asynchronous, and the greeting follows the socket by ~20 ms — fast enough to
-  arrive while the resume is still in flight, where `player.chunk` reads the
-  context as "suspended" and tells the user to click to hear audio already on
-  its way. The click handler now awaits the resume before opening the socket.
-  Every structural test passed both before and after that fix; only running it
-  showed the difference.
+Verified with `uv run verify` and by driving the page in headless Chrome.
 
 ## Fix — The decline sentinel escaped into an ordinary turn
 
-Somebody said "Nothing specifically. What's on yours?" to the public instance,
-and the agent answered, out loud: **`NOTHING`**.
+A public conversation on Haiku answered a question aloud with `NOTHING`. The
+base system prompt taught the decline word on every call, while only the
+initiative path ever filtered it, so an ordinary turn could emit a token nothing
+caught.
 
-`NOTHING` is not an answer. It is `DECLINE`, the reserved word Chapter 9 gave
-the agent for *"I have considered speaking into this pause and I would rather
-not"*. The trace of that conversation shows it exactly:
+- **The prompt**: the sentinel is now taught only by the per-call nudge
+  (`initiative.nudge_prompt`), never by the base prompt.
+- **The guard** (`decline.py`): every reply streams through `guard`, which holds
+  only a prefix that could still become the sentinel (at most seven characters)
+  and retries once if it does. The voice still starts early.
+- **Its own regression**: removing the sentinel left "saying nothing is
+  available" in the prompt, and the model improvised stage directions
+  (`[waiting]`) in 5 of 16 truncated histories. The dangling line was removed,
+  and `guard` also rejects a reply that opens with `[` or `(`.
 
-```
-16:07:29.924  span=turn  parent=conversation  said="Nothing specifically. What's on yours?"
-16:07:30.419  llm.reply   text='NOTHING'   (5 output tokens)
-16:07:30.621  tts.spoken  text='NOTHING'   <- synthesised and played
-```
-
-Seven and seventeen seconds later, two `initiative.consider` spans got the same
-`NOTHING` back from the same model and have **no `tts` child at all** — the
-filter working, on the path that has one. That contrast is the whole bug.
-
-**What was actually wrong.** `prompts/system_prompt.md` told the agent how to
-decline — "reply with exactly `NOTHING`" — in the *base* system prompt, sent on
-every call. Only `initiative.spoken_line` ever checked for it. So the
-instruction was global and the enforcement was local: every ordinary turn was
-primed to emit a token that nothing downstream would catch, and the phrasing of
-`nudge_prompt` already carried the same instruction per call, making the copy in
-the base prompt redundant as well as dangerous.
-
-**Why it surfaced now, which is the uncomfortable part.** Chapter 14 switched
-the deployed provider to Haiku on the strength of a 480 ms latency win, and did
-not re-exercise a conversation on it. Measured against the provocations
-afterwards:
-
-| said to the agent | Haiku 4.5 | DeepSeek |
-| --- | --- | --- |
-| "Nothing specifically. What's on yours?" | **`NOTHING`** | "Not much — no tasks queued up…" |
-| "Nothing much, you?" | ok | ok |
-| "Nothing." | **`NOTHING`** | "No problem. I'm here whenever you need me." |
-| "I've got nothing. What do you think?" | **`NOTHING`** | "Nothing wrong with a quiet moment…" |
-
-Three in four against nought in four. The flaw is Chapter 9's and had been
-latent since it shipped; the provider choice is what fired it. A benchmark is
-not an exercise, and `--bench-llm` measures a model's speed while saying nothing
-whatever about whether it can hold this project's conversation.
-
-**What changed**
-
-- `prompts/system_prompt.md`: the sentinel is gone from the base prompt
-  entirely. The section now says outright that none of it applies to an
-  ordinary turn, and points at the bracketed note as the only place that says
-  how to decline. `nudge_prompt` already ended with the instruction, so the
-  initiative path lost nothing.
-- `src/voice_agent/decline.py`: new. `DECLINE`, `is_decline`, and `guard` — a
-  token and the two halves that have to agree about it, in one file, because
-  they were in two and that is how this happened.
-- `src/voice_agent/turn.py`: every reply now streams through `guard`.
-- `src/voice_agent/initiative.py`: `spoken_line` defers to `is_decline`.
-
-**Design decisions**
-
-- **Both a prompt change and a guard.** The prompt change alone fixes the
-  measured failure — Haiku goes 3-of-4 to 0-of-4 — and it is still only a
-  request made of a model. The guard is the guarantee, and it is fifteen lines.
-- **The guard buffers by prefix, not by reply.** Waiting for the last token to
-  check the first would undo Chapter 7, whose entire purpose is starting the
-  voice before the reply is finished. Instead the reply is held only while it
-  could still *become* the sentinel — at "Hey" that is nothing at all, at "No
-  problem" one fragment, and never more than seven characters. A mid-word space
-  counts as divergence, which a test insisted on after the first version held
-  "No " needlessly.
-- **A leak costs one extra call rather than a silence.** Saying `NOTHING` aloud
-  is bad; saying nothing at all in reply to a direct question is worse, because
-  it reads as a crash. The retry goes to the engine even when the leak came
-  from a speculation — re-running a guess would only produce the guess again.
-
-**Latency impact**
-
-None measurable. The guard yields the first fragment of an ordinary reply
-without holding it, because the first fragment almost never looks like the
-sentinel. The retry costs one full call, on an event now measured at 0 in 4.
-
-**The fix's own regression: stage directions**
-
-The first version of the prompt change caused a second leak of the same family,
-found by re-running the provocations against the live instance afterwards. Asked
-"Nothing.", the agent replied **`[I'll wait]`** — and the record shows it
-synthesised and played: `audio_end: bytes 40124 · seconds 0.836`.
-
-Removing the named sentinel had left this, in the base prompt, pointing at
-nothing:
-
-> **Saying nothing is always available to you.**
-
-An unanchored licence to say nothing, with no sanctioned way to express it. So
-the model improvised one, and reached for the format the same prompt reserves
-for the *system*: the bracketed note. `[waiting]`, `[Listening.]`,
-`[No response needed. Waiting for the user to speak.]`, and — giving the game
-away completely — `[Silence — 5 seconds]`, which is the shape of `nudge_prompt`'s
-own first line. **A reserved format is as leakable as a reserved word.**
-
-It surfaces where the model has least to go on: a history truncated by barge-in.
-Chapter 8 rewrites an interrupted reply down to what was actually heard, so a
-user who talks over the greeting leaves a three-character assistant turn in the
-context. Measured against that history, `Nothing.`, sixteen samples each:
-
-| base prompt | bracketed replies |
-| --- | --- |
-| before this chapter's change | 0 / 16 |
-| after the first version of it | **5 / 16** |
-| after the repair below | 2 / 16 |
-
-That is a regression this chapter introduced, and the middle row is the number
-that matters: a demo whose headline feature is barge-in had a one-in-three
-chance of answering a short sentence with a stage direction.
-
-**What repaired it**
-
-- `prompts/system_prompt.md`: the dangling bullet is gone — the per-call note
-  already says the agent may stay quiet, and each rung's `disposition` already
-  says how readily, so it had no remaining job here. Beside "never use
-  markdown", which is the same kind of rule, a new one: **never write a stage
-  direction**, because everything produced here is spoken and there is no
-  channel for describing oneself. It ends by naming the asymmetry directly —
-  square brackets are how the agent *is addressed*, never how it replies.
-- `src/voice_agent/decline.py`: `is_aside` — a reply whose first non-blank
-  character is `[` or `(` is not speech. Unlike the sentinel this is decidable
-  on the first fragment, so nothing is held and nothing streams before the
-  retry replaces it. The closing bracket is deliberately not looked for:
-  `[laughs] Sure` is no more speakable than `[laughs]`.
-
-The prompt alone takes it from 5-in-16 to 2-in-16 — better, and not a fix. The
-guard is what makes it zero, and this is the clearest argument the chapter
-produced for why the earlier decision to do both was right. A prompt is a
-request; only the guard is a guarantee.
-
-**Verification**
-
-- `uv run verify` green: 483 tests, up 46.
-- `tests/test_decline.py`: the sentinel recognised however it comes back;
-  ordinary answers that merely contain the word "nothing" left alone; fragments
-  keeping their shape; a sentinel arriving in pieces still caught; `No.`
-  surviving as the short answer it is.
-- Re-run against the live provider: **0 leaks in 4 provocations on Haiku**,
-  where the same script produced 3 before the change.
-- One test earned its place immediately. The first version of `guard` looped
-  over the provider's generator and yielded onward without `streams.closing`,
-  which is the precise shape that helper's own docstring warns about — and
-  `test_closing_mid_reply_stops_generating` failed with "a reply nobody will
-  receive is still being billed". A wrapper written to stop one leak had opened
-  another.
+Measured against the live provider: 0 leaks in 4 provocations for the sentinel
+(was 3 of 4), and 0 of 16 for stage directions.
 
 ## Chapter 14 — Off localhost: the agent gets a public address
 

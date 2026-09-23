@@ -102,9 +102,10 @@ On the 1 GB volume at `/data`:
 
 - `/data/sessions/<date>-<id>.md` — the conversation: what was said and typed,
   the timings, the decisions, what each part cost.
-- `/data/traces/<date>-<pid>.jsonl` — the span tree, holding whole prompts and
-  whole replies. API keys are redacted on the way out; transcripts are not, so
-  treat this as being exactly as sensitive as the record beside it.
+
+The span-tree trace is **off** here (`VOICE_AGENT_TRACE = "off"`): it holds whole
+prompts and replies, which AGENTS.md §10 keeps out of logs by default. Traces
+written before it was turned off may remain in `/data/traces`.
 
 **No audio is ever written.** Binary frames are counted and discarded
 (Chapter 10).
@@ -114,11 +115,11 @@ Nothing expires. The delete is the one the CLI has always had:
 ```bash
 fly ssh console            # then, on the machine:
 #   uv run --no-sync voice-agent --purge-sessions   (it asks first, so not via -C)
-#   rm -rf /data/traces
+#   rm -rf /data/traces                              (older traces, if any)
 ```
 
 To run the public instance without recording anything, set
-`VOICE_AGENT_SESSIONS` and `VOICE_AGENT_TRACE` to `off` in `fly.toml`. The
+`VOICE_AGENT_SESSIONS` to `off` in `fly.toml` as well. The
 page's notice follows the setting, so it cannot claim one while doing the other.
 
 ## Running the image locally

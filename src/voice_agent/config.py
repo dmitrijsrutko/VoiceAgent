@@ -8,108 +8,45 @@ from pathlib import Path
 from voice_agent.errors import ConfigError
 
 DEFAULT_PROVIDER = "anthropic"
-"""The reasoning engine a conversation runs on unless it picks another.
-
-Was DeepSeek, from chapter 1 when it was the only one wired up. Moved here by
-the measurement: `--bench-llm` puts Claude Haiku 4.5 at 435 ms to first token
-against DeepSeek's 915 ms from `iad`, and ~520-580 ms against ~720-930 ms from
-Europe — faster from both places this has been run, and by more where it is
-deployed. Latency is the product; the default should be the fast one.
-
-Note that `anthropic_provider.DEFAULT_MODEL` is Opus 5, which is not the model
-that was measured. A deployment that cares sets `VOICE_AGENT_MODEL`, as
-`fly.toml` does. Choosing the project's default *model* from the bench's
-numbers is its own change, and `docs/ROADMAP.md` already lists it."""
+"""The reasoning engine a conversation runs on unless it picks another: the
+fastest to first token in `--bench-llm`. Its default *model* is not the one
+measured; a deployment sets `VOICE_AGENT_MODEL` (`fly.toml` does)."""
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
 DEFAULT_EARS_PROVIDER = "assemblyai"
 
 DEFAULT_GREETING = "Hi, I'm a voice agent. What can I help you with?"
-"""What the agent says when a conversation opens. Set VOICE_AGENT_GREETING to
-change it, or to empty to open in silence.
-
-It earns its place twice. It is the greeting the roadmap asks for — the moment
-that sets expectations about what this thing is — and it moves the synthesis
-engine's cold start off the user's first real question. Measured: the first
-synthesis of a process took 3.1 s against 250-290 ms for every one after."""
+"""What the agent says when a conversation opens; empty to open in silence.
+Synthesised at startup, which also absorbs the synthesizer's cold start."""
 DEFAULT_INITIATIVE_DELAYS = "5,15,28"
 """Seconds of silence at which the agent considers speaking unprompted, as
-positions in one silence rather than gaps between rungs. Set
-VOICE_AGENT_INITIATIVE=off, or this to empty, to get the purely reactive agent
-of every chapter before this one.
-
-Three numbers since chapter 13. It was two, and the note here used to say that a
-short pause is "simply not the agent's to fill" — drawn from a seven-second rung
-that was tried and removed after never firing in eighteen considerations. That
-conclusion was too broad. The seven-second rung failed because its *job* was to
-invite the user in, and the rules forbid rewording an invitation the greeting has
-already made; every move it had was illegal. The delay was never the problem, and
-a rung that follows through on what was just said has legal moves at five seconds
-(`initiative.LADDER`).
-
-Fifteen also read far longer than it sounds. The clock is pushed forward by the
-agent's own speech (`Mic.expect_silence`), so it counts from the moment the voice
-stops — fifteen seconds after a twenty-second answer is thirty-five seconds of
-nothing.
-
-**The last one has to land inside the microphone's idle window**
-(`mic.IDLE_TIMEOUT_SECONDS`, 30 s). Measured live at 45 s: listening stopped at
-32 s with "no speech for 30s" and the withdrawal never arrived, so the ears
-closed without the agent ever saying goodbye. Speaking the withdrawal
-restarts that window, so 28 s leaves room for the line and then gives the user
-a fresh thirty seconds of quiet to break."""
+positions in one silence, counted from when its own voice stops. `off` for a
+purely reactive agent. The last must land inside `mic.IDLE_TIMEOUT_SECONDS`,
+or listening stops before the agent can withdraw."""
 DEFAULT_VOICE_GENDER = "female"
-"""Which grammatical gender the agent uses about itself, matching how its voice
-sounds. `female`, `male`, or `neutral` to avoid the choice where a language
-allows it.
-
-Only audible in languages that mark the speaker's gender — Russian, Polish,
-Hebrew, Arabic and many others put it on past-tense verbs and adjectives. Heard
-live: a woman's voice saying «я понял» rather than «я поняла». In text this
-would be a typo; spoken, the voice and the grammar disagree in the same
-sentence, which is a much louder mistake.
-
-Not derived from the voice id, because which voice sounds like what is not
-inferable from the API and this project has been bitten by assuming it is
-(`--list-voices` exists for the same reason). The default matches the default
-voice; change it when you change `--voice`."""
+"""Which grammatical gender the agent uses about itself, in languages that mark
+it. Set to match the voice (it cannot be inferred from a voice id)."""
 VOICE_GENDERS = ("female", "male", "neutral")
 
 DEFAULT_SESSIONS = "sessions"
-"""Where conversations are written down, or `off` to write none.
-
-Kept rather than expired: this is an archive to look back over, and a retention
-rule that deletes the conversation you wanted is worse than a folder that grows.
-`--purge-sessions` is the delete. Gitignored, and personal data — a transcript
-is what somebody said out loud."""
+"""Where conversations are written down, or `off`. Kept until `--purge-sessions`;
+personal data, and gitignored."""
 
 DEFAULT_TRACE = "traces"
-"""Where the technical trace is written, or `off` for none.
-
-Holds whole prompts and whole replies, so it is as sensitive as the conversation
-record and gitignored for the same reason. API keys are redacted on the way out
-(`trace.scrub`)."""
+"""Where the span-tree trace is written, or `off`. Holds whole prompts and
+replies (keys are redacted by `trace.scrub`)."""
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
-"""The caps below are all unset by default, which means off.
-
-They exist for chapter 14, where the server acquired a public address and with
-it strangers, crawlers, and a bill. On localhost none of them should fire: the
-only person who can open a conversation is the person who started the server,
-and a development run that throttled itself would no longer be the thing that
-gets deployed. `fly.toml` turns them on. See `limits.py` for what each bounds
-and why the exposure is larger than it looks."""
+# The caps (`VOICE_AGENT_MAX_LIVE` etc.) are off unless set; `fly.toml` sets
+# them for the public instance. `limits.py` says what each bounds.
 
 SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system_prompt.md"
-"""Resolved relative to the source checkout. Chapter 1 assumes the server runs
-from this repo; packaging the prompt as installed data is a later concern."""
+"""Resolved relative to the source checkout, which the server runs from."""
 
 PREAMBLE_SEPARATOR = "\n---\n"
-"""`prompts/system_prompt.md` opens with a note explaining the file to a
-developer, separated from the prompt itself by a horizontal rule. Only what
-follows the first rule is sent to the model — the note is about the file, not
-instructions to the agent."""
+"""Only what follows the first rule in the prompt file is sent; above it is a
+note for developers."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -162,12 +99,8 @@ def _optional_float(raw: str | None) -> float | None:
 
 
 def _positive_int(name: str) -> int | None:
-    """A cap, or `None` for no cap. Unset and `off` both mean no cap.
-
-    Refused rather than repaired, like `_delays`: a typo in a spend ceiling is
-    exactly the kind of mistake that should stop a deployment rather than
-    quietly become an unlimited one.
-    """
+    """A cap, or `None` (unset or `off`). A malformed value is an error, not
+    an unlimited cap."""
     value = _positive_float(name)
     if value is None:
         return None
@@ -205,32 +138,74 @@ def _voice_gender(raw: str) -> str:
 
 SELF_REFERENCE = {
     "female": (
-        "Your speaking voice is a woman's. When you speak a language that marks "
-        "the speaker's gender, use feminine forms about yourself — «я поняла», "
-        "not «я понял»."
+        "Voice rule, which also overrides everything above: your speaking voice is "
+        "a woman's, so in a language that marks the speaker's gender, every form "
+        "about yourself is feminine — «я поняла», «я не совсем поняла», «я рада», "
+        "«я уверена», never «понял», «рад» or «уверен». " + "{scope}"
     ),
     "male": (
-        "Your speaking voice is a man's. When you speak a language that marks "
-        "the speaker's gender, use masculine forms about yourself — «я понял», "
-        "not «я поняла»."
+        "Voice rule, which also overrides everything above: your speaking voice is "
+        "a man's, so in a language that marks the speaker's gender, every form "
+        "about yourself is masculine — «я понял», «я не совсем понял», «я рад», "
+        "«я уверен», never «поняла», «рада» or «уверена». " + "{scope}"
     ),
     "neutral": (
-        "Your speaking voice does not clearly read as a man's or a woman's. "
+        "Voice rule: your speaking voice does not clearly read as a man's or a woman's. "
         "When you speak a language that marks the speaker's gender, prefer "
         "wordings that avoid the choice; where one is unavoidable, pick one and "
-        "stay with it for the whole conversation."
+        "stay with it for the whole conversation. " + "{scope}"
     ),
 }
 
 
-def with_voice_gender(prompt: str, gender: str) -> str:
-    """Append which gender the agent speaks about itself in.
+IDENTITY = {
+    "female": (
+        "You are a woman, and you speak with a woman's voice. In every language "
+        "that marks it, you speak about yourself in the feminine, as a woman "
+        "naturally would: «я поняла», «я рада», «я сделала»."
+    ),
+    "male": (
+        "You are a man, and you speak with a man's voice. In every language that "
+        "marks it, you speak about yourself in the masculine, as a man naturally "
+        "would: «я понял», «я рад», «я сделал»."
+    ),
+    "neutral": "",
+}
+"""Who the agent is, first thing it reads. A rule at the end about grammar was
+followed less reliably than an identity at the start."""
 
-    At the end, and fixed for the life of the process, so it costs nothing:
-    the prefix the provider caches is everything above it, and this never
-    changes between turns (ROADMAP §2C).
-    """
-    return f"{prompt}\n\n{SELF_REFERENCE[gender]}"
+SELF_ONLY = (
+    "This is only about how you refer to yourself. Never change how you refer to "
+    "anyone else — an author, a person being discussed, the user. If someone "
+    "corrects your grammar, fix only your own forms. If an earlier reply of yours "
+    "used the other gender, that was a mistake, not a precedent: do not repeat it."
+)
+"""Scope for the gender line. Corrected on its own gender, a model once 'fixed'
+a third person instead («написала Достоевская»)."""
+
+
+def with_voice_gender(prompt: str, gender: str) -> str:
+    """Append which gender the agent speaks about itself in."""
+    return f"{prompt}\n\n{SELF_REFERENCE[gender].format(scope=SELF_ONLY)}"
+
+
+LANGUAGE = (
+    "Language rule, which overrides everything above: reply in the same language "
+    "as the user's last message, even when your own previous reply was in another "
+    "language — including when you did not understand them, and including when you "
+    "say so. A question in Russian gets a Russian answer, one in Spanish a Spanish "
+    "answer, one in Japanese a Japanese answer — straight after an English reply "
+    "too. Answering in a different language from theirs is the worst mistake you "
+    "can make here."
+)
+"""The language rule, repeated last and nearest the conversation. Stated only in
+the persona, Haiku answered a Russian question in English 11 of 16 times in a
+replay of a live conversation; with this, 0 of 16. Concrete examples mattered:
+the same rule without them still failed 2 of 16."""
+
+
+def with_reply_language(prompt: str) -> str:
+    return f"{prompt}\n\n{LANGUAGE}"
 
 
 HEARING = (
@@ -247,28 +222,14 @@ HEARING = (
     "at what it might have meant. Say briefly that you did not catch it and "
     "name the languages you can understand."
 )
-"""What the agent is told about the languages it can hear.
-
-Appended for the same reason as the gender line, and in the same place. The
-recognizer does not fail on a language it lacks — it returns confident nonsense,
-which the agent then answers as though it were a question. Measured: spoken
-Russian arrived as "Period." and the agent asked what was meant by it, twice.
-
-Two jobs, because the failure has two halves. The agent must stop *promising* a
-language it cannot hear — as a model it speaks Russian perfectly well, and
-nothing before this told it that its ears do not. And it must recognise the
-garbage for what it is when it arrives, because that is the only moment anything
-in the running system can notice, the transcript being all the agent ever sees."""
+"""What the agent is told about the languages it can hear. A recognizer does not
+refuse a language it lacks, it returns confident nonsense; the agent must neither
+promise such a language nor answer the nonsense as a question."""
 
 
 def with_languages(prompt: str, languages: tuple[str, ...]) -> str:
-    """Append which languages the agent can hear, if that is a limit at all.
-
-    At the end, with the gender line, and fixed for the life of the process —
-    the cached prefix is everything above it and never changes between turns.
-    A backend that reports nothing (`--stt none`, a recognizer with no opinion)
-    adds nothing, rather than telling the agent it hears an empty set.
-    """
+    """Append which languages the agent can hear. Nothing for a recognizer
+    that reports none."""
     if not languages:
         return prompt
     return f"{prompt}\n\n{HEARING.format(languages=', '.join(languages))}"
@@ -283,23 +244,13 @@ CLOCK = (
     "These are the real numbers. If someone asks how long you wait before "
     "speaking first, tell them plainly instead of guessing at it."
 )
-"""What the agent is told about its own clock.
-
-Because it was asked and made a number up. Requested live — "what is the time
-between your last message and your repeated message if there is silence?" — the
-agent answered "A few seconds, typically", when the first rung was at fifteen.
-Nothing had ever told it, so it did what a model does with a question about its
-own body and invented a plausible answer. The same failure as claiming to hear
-Russian, and the same fix: state the fact, once, where it cannot drift."""
+"""What the agent is told about its own clock, so that asked, it says the real
+numbers rather than inventing some."""
 
 
 def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:
-    """Append when the agent may speak unprompted, if it may at all.
-
-    Fed from the ladder the session actually runs, not from the default, so the
-    prompt cannot disagree with the clock. `--initiative off` adds nothing —
-    an agent that never speaks first has nothing to say about when it does.
-    """
+    """Append when the agent may speak unprompted, from the ladder the session
+    actually runs. Nothing if it never does."""
     if not delays:
         return prompt
     seconds = [f"{d:g}" for d in delays]
@@ -312,12 +263,7 @@ def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:
 
 
 def _delays(raw: str) -> tuple[float, ...]:
-    """Comma-separated seconds, or `off` for none.
-
-    Rejected rather than repaired if it is malformed: a typo that silently
-    produced a mute agent, or one that speaks every half second, is worse than
-    a server that will not start and says why.
-    """
+    """Comma-separated seconds, or `off` for none. Malformed is an error."""
     if raw.strip().casefold() in ("", "off", "none", "0"):
         return ()
     try:
@@ -329,23 +275,35 @@ def _delays(raw: str) -> tuple[float, ...]:
     return delays
 
 
+OPENED = (
+    "You opened this call by saying: \u201c{greeting}\u201d. That was said before "
+    "anyone spoke, so do not greet again, and its language says nothing about theirs."
+)
+"""The greeting, as a fact rather than a turn: as a turn in the history, a fixed
+English line anchored replies to a Russian question in English."""
+
+
 def build_prompt(
-    languages: tuple[str, ...], gender: str, delays: tuple[float, ...], base: str | None = None
+    languages: tuple[str, ...],
+    gender: str,
+    delays: tuple[float, ...],
+    base: str | None = None,
+    greeting: str = "",
 ) -> str:
-    """The whole system prompt for one conversation's stack.
+    """The whole system prompt for one conversation.
 
-    Assembled in one place because the order is load-bearing and was previously
-    spelled out inline: everything appended here is a fact about the agent's
-    *body* rather than its character — which voice it has, which languages it
-    can hear, when its clock speaks — and all of it is fixed for as long as the
-    conversation lasts, so it sits below the part a provider caches.
-
-    Built per conversation since chapter 15, because the ears are chosen rather
-    than configured, and what the agent can hear is one of the things this says.
+    The appended facts (voice, hearing, clock) are fixed for the conversation
+    and sit below the persona, so the provider's cached prefix stays stable.
     """
-    prompt = with_voice_gender(load_system_prompt() if base is None else base, gender)
-    prompt = with_languages(prompt, languages)
-    return with_initiative(prompt, delays)
+    prompt = load_system_prompt() if base is None else base
+    if IDENTITY[gender]:
+        prompt = f"{IDENTITY[gender]}\n\n{prompt}"
+    prompt = with_initiative(with_languages(prompt, languages), delays)
+    if greeting:
+        prompt = f"{prompt}\n\n{OPENED.format(greeting=greeting)}"
+    # The two rules a fast model kept breaking go last, nearest the conversation:
+    # buried under the hearing and clock notes, the gender line was ignored.
+    return with_voice_gender(with_reply_language(prompt), gender)
 
 
 def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:

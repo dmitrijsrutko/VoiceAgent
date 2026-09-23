@@ -69,7 +69,8 @@ primary_region = "iad"
 
   # Recorded, and the page says so before anybody speaks (`noteRecording`).
   VOICE_AGENT_SESSIONS = "/data/sessions"
-  VOICE_AGENT_TRACE = "/data/traces"
+  # No trace in public: it holds whole prompts and replies (AGENTS.md §10).
+  VOICE_AGENT_TRACE = "off"
 
   # The caps. Off everywhere else; see `limits.py` for what each one bounds.
   VOICE_AGENT_MAX_LIVE = "4"

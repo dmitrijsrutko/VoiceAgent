@@ -239,8 +239,6 @@ async def test_tracing_a_stream_still_closes_the_provider(traced: Any) -> None:
 
         async def connect(self) -> None: ...
 
-        async def warm(self, system: str, messages: Any) -> Any: ...
-
         async def stream(self, system: str, messages: Any, usage: Any = None) -> Any:
             try:
                 for word in ("one ", "two ", "three "):

@@ -9,9 +9,8 @@ turn really ends the answer already exists.
 It is a bet, and the point of the design is that losing it is cheap: the
 generation is cancelled the instant the recognizer finds another word, so a
 wrong guess costs only what it managed to produce in the meantime rather than
-a whole reply. What it cannot do is have side effects — which is true today
-because this agent has no tools, and is the boundary the chapter that adds them
-will have to defend.
+a whole reply. It must never have side effects, which holds while the agent
+has no tools.
 """
 
 import asyncio
@@ -34,9 +33,7 @@ SPECULATE = True
 The bet: when a partial adds no new words the speaker has probably stopped, and
 the ~0.8 s the reasoning engine needs can be spent now rather than after the
 recognizer gets round to committing. Worth min(head start, time-to-first-token)
-— measured at 0.27 s and 0.80 s on two real utterances, so 0.3-0.8 s, not the
-1.0-1.7 s an earlier estimate claimed by counting the network floor separately
-from the head start that contains it.
+— measured at 0.27 s and 0.80 s on two real utterances.
 
 Losing the bet costs only what the generation produced before it was cancelled.
 That is only true while the agent has no tools: a speculation that could send a
@@ -91,14 +88,13 @@ class Speculation:
         """Stop generating. Returns the characters the guess cost."""
         # Cancelling the task is enough to release the provider's stream: the
         # task is always suspended *inside* the generator's own await, so the
-        # cancellation is delivered there and its cleanup runs. Measured, after
-        # an explicit `aclose()` here turned out to change nothing.
+        # cancellation is delivered there and its cleanup runs.
         self._task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await self._task
         # A fire-and-forget task's exception is nobody's by default. Provider
         # failures are already held as `_failure`; anything reaching here is a
-        # defect, and silent defects are this project's recurring enemy.
+        # defect, and must not pass silently.
         # `.exception()` itself raises on a cancelled task, hence the guard.
         finished = self._task.done() and not self._task.cancelled()
         if finished and (failure := self._task.exception()) is not None:
@@ -109,9 +105,8 @@ class Speculation:
 class Speculator:
     """The guess for the utterance in progress, and what guessing cost.
 
-    Reported rather than assumed. Chapter 4 shipped a warm that fired seven
-    times for one turn and cached nothing, and the only reason that was ever
-    noticed is that the count was on screen.
+    Reported rather than assumed: a wasted guess is a real bill, and only a
+    count on screen makes it visible.
     """
 
     def __init__(self, engine: LLM, system: str) -> None:

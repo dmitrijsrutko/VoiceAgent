@@ -1,41 +1,92 @@
-"""One backend per name, built on first use and kept for the life of the process.
-
-Chapter 15 lets a conversation choose its reasoning engine and its ears, which
-raises the question of when those get built. Per conversation is the obvious
-answer and the wrong one.
+"""Which backends a conversation may choose, and one shared instance of each.
 
 **Shared, because the connection is the asset.** `llm/http.py` keeps an idle
-HTTP connection for 300 seconds, on the adapter's own client — that is what the
-"connections kept between turns" measurement bought, after finding that every
-streamed call had been reopening one. An adapter per conversation would hand
-each new visitor a cold client and pay DNS and TLS again on their first
-question, quietly undoing that chapter. Recognizers are shared for a plainer
-reason: an `STT` holds no session, `stream()` opens one per listening turn, so
-there is nothing per-conversation to keep apart.
+HTTP connection on the adapter's own client; an adapter per conversation would
+pay DNS and TLS again on every visitor's first question. An `STT` holds no
+session (`stream()` opens one per listening turn), so it is shared too.
 
 **Lazy, because a missing key raises.** Every adapter calls `require_env` in its
-constructor, so building the full set at startup would crash any deployment that
-holds some keys and not others — which is most of them, and both of mine.
-Nothing is built until somebody picks it, and `registry.available()` is what
-decides whether they may.
+constructor, so nothing is built until somebody picks it.
 """
 
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 
+from voice_agent.conversation import Conversation
 from voice_agent.llm import LLM, create_llm
+from voice_agent.llm.registry import DEFAULT_MODELS
+from voice_agent.llm.registry import available as llm_available
 from voice_agent.llm.traced import Traced
 from voice_agent.stt import STT, create_stt
+from voice_agent.stt.registry import NO_EARS, describe
+from voice_agent.stt.registry import available as stt_available
 
 logger = logging.getLogger(__name__)
+
+
+class Stack:
+    """The engines and ears this deployment offers, and each conversation's pick.
+
+    Only what holds a key is offered. With no key for anything, the configured
+    default is offered anyway, so a misconfigured deployment fails at the first
+    call naming the missing variable rather than with an empty page.
+    """
+
+    def __init__(
+        self, provider: str, model: str | None, ears_provider: str, *, hears: bool = True
+    ) -> None:
+        self._provider = provider
+        self._model = model
+        self.engines: tuple[str, ...] = llm_available() or (provider,)
+        # `none` configured means deaf, even where recognizer keys are present.
+        hears = hears and ears_provider != NO_EARS
+        self.listeners: tuple[str, ...] = (stt_available() or (ears_provider,)) if hears else ()
+        self.default_engine = provider if provider in self.engines else self.engines[0]
+        self.default_ears = (
+            ears_provider
+            if ears_provider in self.listeners
+            else next(iter(self.listeners), NO_EARS)
+        )
+
+    def model_for(self, provider: str) -> str | None:
+        """The model override, for the provider it was configured alongside
+        only: a Claude model name means nothing to DeepSeek."""
+        return self._model if provider == self._provider else None
+
+    def model_named(self, provider: str) -> str:
+        return self.model_for(provider) or DEFAULT_MODELS[provider]
+
+    def choose(self, conversation: Conversation, asked: Mapping[str, str]) -> tuple[str, str]:
+        """The stack this conversation runs, pinned on its first connect.
+
+        A reconnect keeps what the history was made with. An unknown or
+        unavailable name falls back to the default rather than refusing: this is
+        a URL anyone can type, and the `ready` frame says what actually ran.
+        """
+        if conversation.engine is None:
+            wanted = asked.get("llm", "")
+            conversation.engine = wanted if wanted in self.engines else self.default_engine
+            heard = asked.get("stt", "")
+            conversation.ears = heard if heard in self.listeners else self.default_ears
+        return conversation.engine, conversation.ears or NO_EARS
+
+    def choices(self, engine: str, ears: str) -> dict[str, list[dict[str, object]]]:
+        """What the page may offer, with `engine` and `ears` marked as chosen.
+        Recognizers are described, not built, so no key is needed to list one."""
+        return {
+            "llm": [
+                {"name": name, "model": self.model_named(name), "default": name == engine}
+                for name in self.engines
+            ],
+            "stt": [{**describe(name), "default": name == ears} for name in self.listeners],
+        }
 
 
 class Pool:
     """The backends this process has been asked for so far.
 
-    `engine` and `ears` stand in for every name when they are given — that is
-    how a test injects one fake and has it serve whichever stack the code under
-    test chooses, so the selection is inert rather than special-cased.
+    `engine` and `ears`, when given, serve every name: a test injects one fake
+    and the selection logic still runs unchanged.
     """
 
     def __init__(
@@ -47,9 +98,7 @@ class Pool:
     ) -> None:
         self._model_for = model_for
         self._silence = silence
-        # Wrapped once, here: a faked provider injected by a test is traced
-        # exactly like a real one, which is why this has never lived in
-        # `create_llm`.
+        # Wrapped here, so an injected fake is traced exactly like a real one.
         self._fixed_engine = Traced(engine) if engine is not None else None
         self._fixed_ears = ears
         self._engines: dict[str, LLM] = {}
@@ -73,9 +122,3 @@ class Pool:
             logger.info("building the %s recognizer", name)
             self._ears[name] = listener
         return self._ears[name]
-
-    def built(self) -> tuple[LLM, ...]:
-        """The engines actually built so far — what there is to warm or close."""
-        if self._fixed_engine is not None:
-            return (self._fixed_engine,)
-        return tuple(self._engines.values())

@@ -145,7 +145,8 @@ def test_the_whole_conversation_is_resent_as_context_every_turn(
         "Sure thing. ",
         "third",
     ]
-    assert llm.systems[0].startswith("You are a voice assistant.")
+    assert llm.systems[0].startswith("You are a woman")  # the voice's identity, then the persona
+    assert "You are a voice assistant." in llm.systems[0]
 
 
 def test_reconnecting_to_the_link_resumes_the_same_conversation(client: TestClient) -> None:
@@ -555,6 +556,51 @@ def test_the_system_prompt_tells_the_agent_to_match_the_users_language() -> None
     assert "greeting is not evidence" in prompt.lower()
 
 
+def test_the_language_and_voice_rules_are_the_last_things_the_agent_reads() -> None:
+    """Stated in the persona alone, Haiku answered a Russian question in English
+    after one English reply, in 11 of 16 replays of a live conversation; repeated
+    last, with examples, 0 of 16. The gender line, left under the hearing and
+    clock notes, was ignored the same way («понял» in a woman's voice)."""
+    from voice_agent.config import LANGUAGE, build_prompt
+
+    prompt = build_prompt(("en", "ru"), "female", (5.0,), base="persona")
+    closing = prompt.split("\n\n")[-2:]
+
+    assert closing[0] == LANGUAGE
+    assert closing[1].startswith("Voice rule")
+    assert "previous reply was in another" in LANGUAGE
+
+
+def test_the_greeting_is_stated_but_the_language_rule_stays_last() -> None:
+    from voice_agent.config import LANGUAGE, build_prompt
+
+    prompt = build_prompt(("en",), "female", (), base="persona", greeting="Hi there.")
+
+    assert "\u201cHi there.\u201d" in prompt
+    assert prompt.index("Hi there.") < prompt.index(LANGUAGE)
+
+
+def test_the_agent_is_a_woman_or_a_man_before_it_is_anything_else() -> None:
+    """A grammar rule at the end was ignored («понял» in a woman's voice); an
+    identity is the first thing read. A neutral voice gets none."""
+    from voice_agent.config import build_prompt
+
+    assert build_prompt((), "female", (), base="persona").startswith("You are a woman")
+    assert build_prompt((), "male", (), base="persona").startswith("You are a man")
+    assert build_prompt((), "neutral", (), base="persona").startswith("persona")
+
+
+@pytest.mark.parametrize("gender", ["female", "male", "neutral"])
+def test_the_gender_rule_is_about_the_agent_alone(gender: str) -> None:
+    """Corrected on its own gender, a model made Dostoevsky feminine instead."""
+    from voice_agent.config import SELF_ONLY, with_voice_gender
+
+    line = with_voice_gender("rules", gender)
+
+    assert SELF_ONLY in line
+    assert "{scope}" not in line
+
+
 def test_the_system_prompt_says_what_a_cut_off_reply_means() -> None:
     """The history marks an interrupted reply only by where it stops, so the
     model has to be told what that means."""
@@ -745,7 +791,7 @@ def test_the_system_prompt_the_agent_receives_carries_it(
         while receive(socket)["type"] != "reply_end":
             pass
 
-    assert "masculine forms" in llm.systems[0]
+    assert "a man's, so" in llm.systems[0]
 
 
 def test_the_agent_is_told_which_languages_it_can_hear(llm: FakeLLM, store: SessionStore) -> None:
@@ -924,6 +970,22 @@ def test_the_page_offers_only_backends_this_deployment_has_keys_for(
     assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
     assert [o["name"] for o in choices["llm"] if o["default"]] == ["anthropic"]
     assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
+
+
+def test_ears_configured_off_stay_off_even_with_recognizer_keys(
+    llm: FakeLLM, tts: FakeTTS, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--stt none` means deaf. With a recognizer key in the environment it was
+    offered anyway, and the page asked for a microphone."""
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "sk-test")
+    monkeypatch.setenv("VOICE_AGENT_STT", "none")
+    client = TestClient(create_app(llm=llm, tts=tts, greeting=""))
+    known = served_facts(client.get(f"/c/{start(client)}").text)
+    choices = known["choices"]
+    assert isinstance(choices, dict)
+
+    assert known["ears"] is None
+    assert choices["stt"] == []
 
 
 def test_the_page_says_what_each_recognizer_hears_without_holding_its_key(

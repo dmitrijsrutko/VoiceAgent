@@ -1,8 +1,7 @@
 """The conversation: the messages exchanged so far, and nothing else.
 
 This is the "context" that is resent to the reasoning engine on every call.
-It is deliberately a plain in-memory list — no trimming, no summarization, no
-persistence. Those are later chapters, and each needs this to exist first.
+A plain in-memory list: no trimming, no summarization, no persistence.
 """
 
 from dataclasses import dataclass, field
@@ -34,6 +33,15 @@ class Conversation:
     that quietly swapped either would leave the agent contradicting its own
     transcript.
     """
+    opening: Message | None = None
+    """The greeting, kept in the history the page replays but out of what the
+    model reads: a fixed line in one language anchored replies to it (the system
+    prompt says it was said instead)."""
+
+    @property
+    def context(self) -> list[Message]:
+        """What the reasoning engine reads: every message but the greeting."""
+        return [m for m in self.messages if m is not self.opening]
 
     def add_user(self, content: str) -> Message:
         return self._add("user", content)
@@ -55,10 +63,13 @@ class Conversation:
         """
         for index, existing in enumerate(self.messages):
             if existing is message:
-                if content is None:
+                replacement = None if content is None else Message(message.role, content)
+                if replacement is None:
                     del self.messages[index]
                 else:
-                    self.messages[index] = Message(role=message.role, content=content)
+                    self.messages[index] = replacement
+                if existing is self.opening:
+                    self.opening = replacement
                 return
 
     def end(self) -> None:

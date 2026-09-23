@@ -1,18 +1,12 @@
 """The caps a public address needs, and nothing more.
 
-Every chapter before this one ran on localhost, where the only person who could
-open a conversation was the person who started the server. A public URL removes
-that, and the exposure is larger than "a stranger reads the page": `GET /` mints
-a conversation on every load, an open socket starts the initiative clock, and
-each rung of a silence is a billed reasoning call. A crawler that follows one
-link can therefore spend money at a rate nobody chose, without ever saying a
-word.
+A public URL brings strangers, and the exposure is larger than it looks: `GET /`
+mints a conversation on every load, an open socket starts the initiative clock,
+and each rung of a silence is a billed call. A crawler could spend money at a
+rate nobody chose without saying a word.
 
-Everything here is **off unless configured**, and the deployment is what turns
-it on (`fly.toml`). A development run that quietly throttled itself would make
-chapters 1-13 behave differently depending on where they ran, which is the kind
-of divergence between the local thing and the deployed thing that this project
-refuses everywhere else.
+Everything here is **off unless configured**; `fly.toml` turns it on, so a local
+run behaves like the one that gets deployed.
 
 None of this is security. It is a spend ceiling and a fair-use rule held in one
 process's memory, and anyone who minds can defeat it by changing their address.

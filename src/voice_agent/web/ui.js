@@ -8,6 +8,7 @@ export const send = document.getElementById("send");
 export const meta = document.getElementById("meta");
 export const status = document.getElementById("status");
 export const mute = document.getElementById("mute");
+export const details = document.getElementById("details");
 export const listen = document.getElementById("listen");
 export const start = document.getElementById("start");
 export const begin = document.getElementById("begin");
@@ -26,11 +27,10 @@ export function stick(mutate) {
   if (following) log.scrollTop = log.scrollHeight;
 }
 
-// The utterance still being spoken, which stays the last thing in the log
-// until it is committed or dropped. Its bubble is made at the first partial, so
-// a reply to the *previous* utterance that starts after the user has already
-// carried on used to be drawn below it — and the user's words, finishing in
-// that bubble, then read as said before the reply they actually followed.
+// The utterance still being spoken stays the last thing in the log until it is
+// committed or dropped. Its bubble is made at the first partial, so otherwise a
+// reply to the previous utterance, starting after the user carried on, would be
+// drawn below words that followed it.
 let pinned = null;
 
 export function pinLast(el) { pinned = el; }
@@ -44,11 +44,12 @@ export function add(text, cls) {
   return el;
 }
 
-export function note(el, text) {
-  // Telemetry is always the *last* thing appended to a turn, so a note that
-  // does not scroll is a note nobody ever sees.
+// A line under a bubble. Telemetry unless said otherwise, which the page hides
+// until "details" is on. Appended inside `stick`: it is the last thing in a
+// turn, and a note that does not scroll is a note nobody sees.
+export function note(el, text, cls = "telemetry") {
   const tag = document.createElement("span");
-  tag.style.cssText = "display:block; font-size:11px; opacity:.5; margin-top:4px;";
+  tag.className = `tag ${cls}`;
   tag.textContent = text;
   stick(() => el.appendChild(tag));
 }
@@ -76,8 +77,6 @@ export function paintText(el, text, shown) {
   rest.textContent = text.slice(shown);
   body.replaceChildren(document.createTextNode(text.slice(0, shown)), rest);
 }
-
-export function ms(v) { return v < 1000 ? `${v} ms` : `${(v / 1000).toFixed(1)} s`; }
 
 export function paintListening(listening, speaking) {
   listen.classList.toggle("on", listening);

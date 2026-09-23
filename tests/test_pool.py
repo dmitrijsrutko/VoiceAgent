@@ -94,15 +94,6 @@ def test_the_model_override_is_asked_per_provider(monkeypatch: pytest.MonkeyPatc
     assert pool.engine("deepseek").model == DEFAULT_MODELS["deepseek"]
 
 
-def test_only_built_engines_are_offered_for_warming(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    pool = Pool(no_model)
-
-    assert pool.built() == ()
-    pool.engine("deepseek")
-    assert len(pool.built()) == 1
-
-
 # --- what the registries can answer without building anything ---------------
 
 

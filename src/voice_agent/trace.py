@@ -4,22 +4,13 @@ Where `record.py` writes the conversation for a person to read, this writes what
 the machine did for a program to read — every provider request and response with
 its full body, every log line, and the timings around them.
 
-**It is a span tree, and that is the point.** `AGENTS.md` §7's latency budget
-is already a tree — endpointing, then the reasoning engine's first token, then
-the synthesizer's first byte, then playback — and recording it flat would throw
-away the structure this project reasons in. Spans carry a parent, so "which
-synthesis belonged to which turn" is answered by the data rather than by reading
-timestamps and guessing.
+**A span tree**, because the latency budget (`AGENTS.md` §7) is one: spans carry
+a parent, so which synthesis belonged to which turn is in the data.
 
-**Why this is OpenTelemetry-shaped but not OpenTelemetry.** The vocabulary is
-theirs: `trace`, `span`, `parent`, and `gen_ai.*` attribute names where the
-semantic conventions have settled. The transport is not, because this file's job
-is to hold whole prompts and whole replies, and that is the one thing OTel
-handles badly — the GenAI conventions moved prompts out of span attributes into
-log events precisely because backends truncate them. A local file has no such
-limit, needs no collector to read, and adds no dependency to a project whose
-inner loop runs on localhost. When the deployment chapter wants a real backend,
-exporting this over OTLP is a mapping over data already shaped for it.
+**OpenTelemetry-shaped, not OpenTelemetry.** The vocabulary is theirs (`span`,
+`parent`, `gen_ai.*`); the transport is a local file, because this holds whole
+prompts and replies, which OTel backends truncate. Exporting over OTLP would be
+a mapping over data already shaped for it.
 
 Spans are written as **two lines, start and end**. A trace written for debugging
 has to make a *hang* visible, and an unpaired start is exactly that: the span
@@ -247,9 +238,7 @@ def event(kind: str, attrs: Mapping[str, Any] | None = None) -> None:
 class TraceHandler(logging.Handler):
     """Every `logger.*` call, into the same file as the spans.
 
-    One file and one format means one thing to grep. It also means the eight
-    `logger.info` calls this project has never displayed finally go somewhere —
-    until this chapter nothing configured logging at all, so they went nowhere.
+    One file and one format means one thing to grep.
     """
 
     def emit(self, record: logging.LogRecord) -> None:

@@ -8,11 +8,8 @@ const WORKLET = new URL("./capture-worklet.js", import.meta.url);
 // `onFrame` receives each Int16Array of PCM; whether to send it (the half-duplex
 // gate) is the caller's decision, not the microphone's.
 //
-// Permission is asked here, at the moment the microphone is actually wanted.
-// It used to be warmed up separately on page load, so that the first press of
-// "listen" felt instant — there is no longer a first press to make instant,
-// and prompting somebody who has only opened a page was the rudest thing this
-// client did.
+// Permission is asked here, when the microphone is actually wanted: the start
+// click, before the greeting can play.
 export async function buildMic(sampleRate, onFrame) {
   // Capture at the recognizer's own rate so nothing resamples anywhere.
   const stream = await navigator.mediaDevices.getUserMedia({

@@ -108,8 +108,7 @@ def test_a_guess_the_user_talks_through_is_discarded(store: SessionStore) -> Non
 
 
 def test_the_cost_of_guessing_wrong_is_reported(store: SessionStore) -> None:
-    """Chapter 4 shipped seven redundant warms and only the on-screen count
-    caught it. A discarded guess is billed output, so it gets counted too."""
+    """A discarded guess is billed output, so it gets counted."""
     llm = FakeLLM(replies=["Riga.", "Riga, and about 600,000 people."])
     script = [
         Transcript("what is the capital", is_final=False),

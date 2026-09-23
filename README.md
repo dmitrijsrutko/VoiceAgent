@@ -3,10 +3,10 @@
 A conversational AI voice agent, built from an empty page — one chapter at a time.
 
 **Try it: <https://voice-agent-chapters.fly.dev>** — pick a reasoning engine and
-a pair of ears, press **start conversation**, then just talk. Headphones help; the agent listens while it
-speaks, so you can cut it off mid-sentence. It speaks 18 languages but hears none of them as well as it
-hears English (see Chapter 12). Conversations are written down on the server,
-and the page says so before you start.
+a pair of ears, press **start conversation**, then just talk. Headphones help:
+the agent listens while it speaks, so you can cut it off mid-sentence.
+Conversations are written down on the server, and the page says so before you
+start.
 
 ## The idea
 
@@ -32,394 +32,107 @@ interfaces. First transport: a WebSocket server with a minimal browser client.
 
 ## Where this stands today
 
-Built in **chapters**, each adding one deliberate piece of functionality on top
-of a working, fully-tested previous chapter. See [CHANGELOG.md](CHANGELOG.md)
-for the full log and the reasoning behind each step.
+Built in **chapters**, each one deliberate piece on top of a working, tested
+previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers.
 
-- **Chapter 0 — the empty page.** No voice agent yet, on purpose. This chapter
-  establishes the method (one increment at a time, never ahead), the working
-  contract for agents and humans ([AGENTS.md](AGENTS.md)), the target behavior
-  of the agent we are building ([prompts/system_prompt.md](prompts/system_prompt.md)),
-  the latency budget it has to hit, and the single quality gate every later
-  chapter must keep green (`uv run verify`). Zero runtime dependencies: every
-  dependency should arrive attached to the chapter that needed it.
-- **Chapter 1 — a talking loop with no voice.** Text in, reasoning out. A
-  browser chat page talks to the server over a WebSocket; loading `/` mints a
-  conversation and redirects to its own link, and reloading that link resumes
-  it. The conversation accumulates in memory and the whole of it is resent as
-  context on every call. The reply streams back token by token from a
-  provider-agnostic `LLM` interface with three backends — **DeepSeek**
-  (default), OpenAI, and Anthropic. Typing `exit` ends the conversation. No
-  audio anywhere yet: this is the shape the microphone will plug into.
-- **Chapter 2 — giving it a voice.** The agent speaks. Every reply is
-  synthesized and played in the browser, sent as a binary frame on the same
-  WebSocket. Provider-agnostic with two backends — **ElevenLabs** (default) and
-  OpenAI — or `--tts none` to stay silent. Synthesis is batched on purpose: the
-  whole reply, then one clip. That costs latency, and every reply is annotated
-  with what each stage spent — `💭 thought for 853 ms · 153 chars in 422 ms` /
-  `🔊 155 kB · synthesized in 524 ms · audio at 1.8 s` — so the next chapter has
-  a number to beat rather than an assertion. Still no ears.
-- **Chapter 3 — ears.** The agent listens. Press **listen** and talk: the
-  transcript appears live and rewrites itself as more audio arrives, firms up
-  after a 1.5 s pause (tunable), and becomes an ordinary user turn. Microphone audio goes
-  up the same WebSocket as PCM16 frames from an AudioWorklet. Turn detection is
-  borrowed from ElevenLabs Scribe's own VAD — zero VAD code, and a cost
-  recorded in the CHANGELOG. The agent is **bi-capable**: typing and speaking
-  enter through the same door, and nothing downstream knows which was used.
-  Half-duplex on purpose — the mic muted while the agent spoke, until Chapter 8.
-- **Chapter 4 — acting before the turn ends.** Partial transcripts feed a
-  LocalAgreement filter; text the recognizer has said twice is treated as
-  settled, and the reasoning engine is prefilled on it while you are still
-  talking. Measured honestly: warming saves ~60-90 ms on a conversation's first
-  turn and ~10 ms after, because the provider's cache is already 80-87% warm
-  from the previous turn. The stable prefix is the point — it settles the whole
-  turn 0.3-1.0 s before the recognizer commits, which is what Chapter 5
-  spends.
-  The agent also opens with a greeting, synthesised once at startup — which
-  absorbs the synthesis engine's cold start (3.1 s on a process's first call)
-  rather than paying it on your first question.
-- **Chapter 5 — speculation.** When a partial adds no new words, the agent
-  assumes you have stopped and starts generating the *real* reply, cancelling it
-  if you carry on. Measured live, time-to-first-token fell from 844 ms to 11 ms
-  on a turn where it fired. It does not fire on short turns — the recognizer is
-  still delivering words when the turn commits, so there is no dead air to use —
-  and the cost of every wrong guess is counted on screen.
-- **Chapter 6 — streaming synthesis.** The reply's audio plays as it is made.
-  The whole text still goes in at once, but speech comes back as raw PCM
-  (24 kHz, 16-bit, mono) over the same WebSocket, and the browser plays it as
-  it arrives through an AudioWorklet queue. The provider's first byte now lands in
-  130-166 ms whatever the reply's length, where batched synthesis took 144 ms
-  to 1.3 s; measured live, a 20-second answer starts
-  speaking ~0.7 s earlier and a 40-second one 1.2-1.7 s earlier. Any stutter —
-  the queue running dry mid-reply — is counted on screen.
-- **Refactor — the browser client as modules.** The page's script, which had
-  grown to ~400 lines inline, is split into native ES modules served from
-  `/static`. Still no build step and no npm; the player's logic now runs under
-  `node --test` instead of being checked as text.
-- **Chapter 7 — streaming synthesis input.** The agent speaks while the reply is
-  still being written. Tokens go to ElevenLabs as they arrive, and its chunk
-  schedule, not our code, decides when there is enough to say aloud. Measured
-  live, a 35-second answer starts speaking 460-800 ms before the reply has
-  finished, and first audio fell from 1.7-1.9 s to 1.0-1.2 s (measured with a 50-char first piece, since raised to 120 for a natural first phrase). Its `auto_mode`,
-  fed tokens, voiced every token as a separate utterance, which is why it is off.
-- **Chapter 8 — barge-in.** Talk over the agent and it stops. The mic stays
-  open while it speaks, the first recognized word stops the voice and any reply
-  still being written, and the history keeps only what you heard — worked out
-  from ElevenLabs' per-character timing and how much audio the page played.
-  Measured live, ~0.85–1.6 s from starting to speak
-  to the stop, all of it recognizer lag: the baseline a local VAD has to beat.
-- **Karaoke.** While the agent speaks, words not yet spoken are dimmed and
-  light up as the voice reaches them — from the same per-character timing and
-  played-sample count barge-in uses, so an interruption freezes them at the cut.
-- **Measurement — LLM latency by provider.** `--bench-llm` compares time to
-  first token through the real adapters: from here, Claude Haiku 4.5 ~520–580 ms,
-  DeepSeek ~720–930 ms. Connections are now kept between turns; they had been
-  reopened on every streamed call. Each turn shows when the provider accepted the
-  request, and whether a connection or a retry was needed.
-- **The agent's grammar matches its voice.** Russian and many other languages
-  put the *speaker's* gender on ordinary past-tense verbs, so the agent was
-  saying «я понял» — a man's form — in a woman's voice. `--voice-gender`
-  (`female` by default, `male`, or `neutral`) tells it which to use, and the
-  startup line shows it next to the voice so a mismatch is visible.
-- **Chapter 15 — the vendors become a choice.** The stack is picked on the start
-  screen: reasoning engine (Anthropic by default, or OpenAI or DeepSeek) and
-  ears (AssemblyAI by default, or ElevenLabs Scribe). The voice stays
-  ElevenLabs and is shown as a choice of one. The page lists only what this
-  deployment holds a key for, says which model each engine means and which
-  languages each recognizer hears. Backends are shared
-  per process, so connections stay warm; the choice is pinned to the
-  conversation, so reloading a link resumes the same agent.
-- **The agent waits to be started.** A **start conversation** screen stands in
-  front of the conversation. Loading the page used to *be* the conversation —
-  the agent greeted somebody still reading it, and then could not be heard
-  until they found the **listen** button. The click is also the gesture
-  browsers require before audio may play, without which the greeting often
-  could not play at all. The microphone is asked for in that same click, before
-  the agent says a word, and listening then starts by itself. The page says what
-  it is — the languages it hears, whether it is writing things down — beside
-  the button rather than a moment after it.
-- **Chapter 14 — off localhost.** The agent gets a public address. It ships as a
-  container and runs as one always-on machine in `iad`, behind TLS — which the
-  microphone requires, `getUserMedia` refusing to run outside a secure context.
-  Measured from Europe against a server 6,500 km away, first audio did not get
-  slower and time to first token got *faster*: the user-side hop is paid once a
-  turn, the vendor-side hops at every stage boundary, so the server belongs next
-  to the vendors. The deployed instance runs Claude Haiku 4.5 rather than the
-  project default, because `--bench-llm` re-run from `iad` put DeepSeek — served
-  from China — at 915 ms to first token against Haiku's 435 ms.
-  A public URL also brings strangers and a bill, so this chapter adds the first
-  caps this project has ever needed: conversations held at once, a per-conversation
-  time budget, new conversations per address, and a ceiling on the store. They
-  are **off unless configured**, so a local run is still the agent of chapters
-  1-13 exactly. The deployed instance writes conversations down, and the page
-  says so before anybody speaks. See [docs/DEPLOY.md](docs/DEPLOY.md).
-- **Chapter 13 — the clock, retuned.** The agent now considers speaking
-  unprompted at 5, 15 and 28 seconds of silence rather than 15 and 28, and the
-  first of those is a new, deliberately small move: follow through on what was
-  just said, not a fresh topic and not "are you still there". The silence is
-  counted from when the agent's *own voice stops*, so the old first nudge landed
-  35 seconds after a 20-second answer. It also knows its own delays now, and
-  says them when asked instead of guessing.
-- **Chapter 12 — a second pair of ears.** Speech recognition now has two
-  backends behind one protocol: AssemblyAI Universal-Streaming (the default)
-  and ElevenLabs Scribe (`--stt elevenlabs`). Nothing downstream of a
-  transcript changed. `--vad-silence` stays the single endpointing knob and
-  means the same thing on both, though the services take it in different units.
-  **AssemblyAI transcribes 18 languages and Russian is not among them** — a
-  language it does not know is turned into confident nonsense rather than
-  refused, so use `--stt elevenlabs` for those (Scribe covers 100, including
-  Russian). What the ears understand is now said in three places: the startup
-  banner, the page's status bar and a note in the log, and the agent's own
-  system prompt, so it stops offering to listen in languages it cannot hear. AssemblyAI has **no** standalone text-to-speech, so the voice stays
-  ElevenLabs — their synthesis exists only inside a managed voice-agent bundle
-  that would replace this pipeline wholesale.
-- **Chapter 11 — the trace.** A machine-readable companion to the record:
-  `traces/<date>-<pid>.jsonl`, one JSON object per line, holding every reasoning
-  call with its whole prompt and reply, every synthesis, every recognizer event,
-  and every log line. It is a **span tree** — `conversation → turn → llm / tts` —
-  using OpenTelemetry's vocabulary and `gen_ai.*` attribute names without taking
-  the dependency, because a local file can hold a whole prompt and an OTLP
-  backend mostly will not. Spans are written as a start and an end, so a span
-  with no end is a hang. API keys are redacted by name and by shape. It also
-  brings the first logging configuration this project has ever had: until now
-  nothing configured it, so every `logger.info` call went nowhere.
-- **Chapter 10 — the record.** Every conversation writes itself to
-  `sessions/<date>-<id>.md` as it happens: turns, timings, decisions, what each
-  one cost. It is tapped off the one socket every frame already goes through, so
-  it cannot drift from what the page showed, and it prints whatever fields a
-  frame carries rather than re-phrasing them. No audio is ever written — binary
-  frames are counted and discarded. Nothing expires; `--purge-sessions` is the
-  delete, and it asks first.
-- **Chapter 9 — the clock.** The agent can speak first. Every turn before this
-  was started by the user; nothing in the process ever woke up on its own, so a
-  silence lasted forever. Now a ticker watches the silence and, at two points in
-  it, asks the agent whether there is anything worth saying — with an explicit
-  licence to answer "nothing", which is what it usually does. It only ever
-  speaks *into* silence, never over you: someone who starts talking mid-decision
-  makes the silence *shorter*, and that is the signal to hold back. After two
-  rungs it is quiet until you speak. The second withdraws — "I'm here whenever
-  you're ready" — and measured against a real model that is most of what it
-  does. Every consideration is drawn on the page, declines and failures
-  included, with what deciding cost, because an agent that keeps choosing not to
-  interrupt is the thing being built and it is invisible otherwise. A third rung
-  at seven seconds was built and then deleted: it never once fired, because its
-  job was to invite you in and the greeting had already done that.
+- **0 — The empty page.** The method, the working contract ([AGENTS.md](AGENTS.md)), and one quality gate: `uv run verify`.
+- **1 — A talking loop.** Browser ↔ WebSocket ↔ a streaming LLM behind one interface (Anthropic, OpenAI, DeepSeek); the link is the conversation.
+- **2 — A voice.** Replies are synthesized (ElevenLabs) and played; every stage's cost is shown under the reply.
+- **3 — Ears.** Speech recognition with a live transcript; speaking and typing enter through the same door.
+- **4 — Acting early.** Partials that agree twice are treated as settled (LocalAgreement), and the greeting is synthesized at startup.
+- **5 — Speculation.** The reply starts before the turn is committed, and is cancelled if the user carries on.
+- **6 — Streaming synthesis.** Speech plays as it is made, as raw PCM through an AudioWorklet.
+- **7 — Streaming synthesis input.** The agent speaks while the reply is still being written (first audio 1.7–1.9 s → 1.0–1.2 s).
+- **8 — Barge-in.** Talk over the agent and it stops; the history keeps only what was heard. Karaoke highlights the words as they are spoken.
+- **9 — The clock.** The agent may speak into a silence, and usually decides not to.
+- **10 — The record.** Each conversation is written to a Markdown file as it happens. No audio is stored.
+- **11 — The trace.** A JSONL span tree of every provider call, for programs to read.
+- **12 — A second pair of ears.** AssemblyAI (default, 18 languages) or ElevenLabs Scribe (100 languages).
+- **13 — The clock, retuned.** Considers speaking at 5, 15 and 28 s of silence, and knows its own delays.
+- **14 — Off localhost.** A public instance on Fly.io, next to the vendors, with spend caps that are off unless configured.
+- **15 — The vendors become a choice.** The start screen picks engine and ears per conversation; backends are shared and kept warm.
+- **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch, and comments cut to their constraints.
 
 ## Requirements
 
-- Python ≥ 3.12
-- [uv](https://docs.astral.sh/uv/)
-- Optional: node ≥ 22, to run the page's own tests (`uv run verify` skips them
-  without it, and says so)
+- Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
+- Optional: node ≥ 22, to run the page's own tests (`uv run verify` skips them without it, and says so)
 
-## Setup
+## Setup and usage
 
 ```bash
-uv sync                 # install dependencies, including dev tools
-cp .env.example .env    # then fill in only the provider keys you need
+uv sync                                     # install, including dev tools
+cp .env.example .env                        # fill in only the keys you need
+uv run voice-agent                          # Anthropic + AssemblyAI + ElevenLabs, on :8000
+uv run voice-agent --provider deepseek      # or openai; --model overrides the model
+uv run voice-agent --stt elevenlabs         # Scribe, for languages AssemblyAI lacks
+uv run voice-agent --tts none --stt none    # silent and deaf: typing only
+uv run voice-agent --initiative off         # never speak first
+uv run voice-agent --help                   # everything else
 ```
 
-`uv run voice-agent` loads `.env` itself. Library code never does, so
-importing the package has no hidden side effects — to run anything else with
-those secrets, pass them explicitly:
-
-```bash
-uv run --env-file .env <command>
-```
-
-## Usage
-
-```bash
-uv run voice-agent                          # Anthropic + AssemblyAI ears + ElevenLabs voice, on :8000
-                                            # (the defaults; the start screen can pick others)
-uv run voice-agent --provider anthropic --model claude-sonnet-5
-uv run voice-agent --tts openai --voice nova
-uv run voice-agent --voice-gender male       # match how the agent refers to itself
-uv run voice-agent --tts none               # no synthesis key needed
-uv run voice-agent --stt elevenlabs         # Scribe: needed for Russian and other
-                                            # languages AssemblyAI does not cover
-uv run voice-agent --stt none               # typing only, no recognition
-uv run voice-agent --vad-silence 2.0        # wait longer before ending a turn
-uv run voice-agent --initiative off         # never speak first; purely reactive
-uv run voice-agent --sessions off           # do not write conversations down
-uv run voice-agent --purge-sessions         # delete every recorded conversation
-uv run voice-agent --trace off               # no technical trace
-uv run voice-agent --initiative 5,20        # when to consider speaking into a silence
-uv run voice-agent --list-voices            # what this account can actually use
-uv run voice-agent --bench-llm              # time to first token per provider (a few billed calls)
-uv run voice-agent --bench-llm anthropic:claude-haiku-4-5 deepseek
-uv run voice-agent --port 9000
-```
-
-Open <http://127.0.0.1:8000> — you land on a fresh conversation at `/c/<key>`.
-Press **start conversation** and talk — the microphone is asked for and turned
-on for you. Typing works too; the agent answers out loud either way. Nothing
-happens until that button is pressed: no greeting, no clock, no socket. Keep
-the link to come back to the same conversation; type `exit` to end it. Everything is in memory, so restarting the
-server clears it all.
+Open <http://127.0.0.1:8000>, press **start conversation**, and talk or type.
+Keep the link to come back to the same conversation; type or say `exit` to end
+it. Conversations live in memory, so a restart clears them.
 
 ## Development
 
 ```bash
-uv run verify                 # ruff + format check + mypy (strict) + pytest
-uv run pytest                 # tests only
-uv run pytest --cov           # tests with coverage
-uv run pytest -m "not audio"  # skip tests needing real audio hardware
-uv run ruff check src tests   # lint only
-uv run ruff format src tests  # auto-format
-uv run mypy                   # type check only
+uv run verify     # ruff + format check + mypy (strict) + pytest (+ node tests)
 ```
 
-`uv run verify` is the single gate — run it before committing. CI runs exactly
-the same command, so local and remote can never disagree.
+`uv run verify` is the single gate: run it before committing.
 
 ## Project layout
 
 ```
-AGENTS.md                 the working contract for agents and humans (CLAUDE.md symlinks here)
-CHANGELOG.md              the chapter log — what was built, and why
-prompts/
-  system_prompt.md        the voice agent's own runtime system prompt
+AGENTS.md, CHANGELOG.md   the working contract; the chapter log
+prompts/system_prompt.md  the agent's runtime system prompt
 src/voice_agent/
-  cli.py                  chapter 1: `uv run voice-agent` (entry point)
-  server.py               chapter 1: routes, the socket's receive loop
-  session.py              one connected conversation: starts, interrupts and cancels turns
-  turn.py                 chapter 1/2/6/7/8: one exchange — the reply spoken while it is written
-  heard.py                chapter 8: what the user actually heard of an interrupted reply
-  channel.py              serialized writes to the socket, shared audio framing
-  mic.py                  chapter 3: one listening session — transcripts, expiry, keepalive
-  greeting.py             chapter 2: the opening line, synthesised once and cached on disk
-  warming.py              chapter 4: prefill on agreed-stable text
-  speculation.py          chapter 5: answering before the question finishes
-  initiative.py           chapter 9: whether to speak into a silence, and when to stay quiet
-  streams.py              closing a provider's stream when whoever read it stops
-  record.py               chapter 10: the conversation, written down as it happens
-  trace.py                chapter 11: the span tree, the bodies, and the redaction
-  timing.py               stage timings on one monotonic clock
-  bench.py                `--bench-llm`: time to first token, provider by provider
-  conversation.py         chapter 1: Message + Conversation — the context itself
-  sessions.py             chapter 1: in-memory store, one conversation per link
-  config.py               chapter 1: env settings + system-prompt loading
-  limits.py               chapter 14: what a public address costs, and the caps that bound it
-  pool.py                 chapter 15: one backend per name, shared so connections stay warm
-  errors.py               errors this project raises deliberately
-  verify.py               the `uv run verify` quality gate
-  web/                    the browser client: native ES modules, no framework, no build step
-    index.html            markup and styles; loads app.js as a module
-    app.js                wiring: the socket, message handling, shared page state
-    player.js             streaming playback rules: stop on interrupt, autoplay, replacement (tested in node)
-    playback-worklet.js   the audio-thread queue that plays PCM seamlessly and counts gaps (tested in node)
-    mic.js                microphone permission and the capture graph
-    capture-worklet.js    the audio-thread processor that emits PCM16 frames
-    karaoke.js            which words have been spoken, from timing and samples played (tested in node)
-    ui.js                 the chat log: append, scroll, enable, paint spoken text
-    protocol.js           the messages the page sends
-  llm/
-    base.py               the LLM protocol every reasoning backend implements
-    registry.py           name -> backend
-    http.py               connections kept between turns, and what opening one cost
-    traced.py             a span around every reasoning call, whoever makes it
-    openai_compatible.py  OpenAI and DeepSeek (same wire format)
-    anthropic_provider.py Anthropic (system prompt and streaming differ)
-  stt/                    chapters 3, 12: speech recognition
-    base.py               Transcript + the STT protocol
-    registry.py           name -> backend, or None for deafness
-    assemblyai_stt.py     Universal-Streaming v3 (default); 18 languages, no ru
-    elevenlabs_stt.py     Scribe realtime over a raw WebSocket (VAD endpointing)
-  tts/                    chapter 2: speech synthesis
-    base.py               the TTS protocol: a text stream in, PCM chunks out
-    registry.py           name -> backend, or None for silence
-    elevenlabs_tts.py     ElevenLabs (default): tokens in over the stream-input WebSocket
-    openai_tts.py         OpenAI: whole text only, so it waits for the reply
-docs/ROADMAP.md           research notes and candidate future chapters
-docs/DEPLOY.md            chapter 14: the runbook for the public instance
-Dockerfile, fly.toml      chapter 14: the image, and the one machine that runs it
-tests/                    pytest suite; tests/web/ holds node tests for the page (`node --test`)
-.env.example              provider keys and settings
+  cli.py, config.py       `uv run voice-agent`; settings from the environment
+  server.py               routes, and one conversation's socket (`serve`)
+  pool.py                 which engines/ears a conversation may pick; one shared instance of each
+  session.py              one connected conversation: turns, interruption, cancellation
+  turn.py                 one exchange: the reply streamed to the page and the voice
+  mic.py                  one listening session: transcripts, expiry, keepalive
+  speculation.py          answering before the question finishes
+  initiative.py, decline.py  speaking into a silence; keeping the decline word unspoken
+  heard.py                what the user actually heard of an interrupted reply
+  greeting.py             the opening line, synthesized once and cached
+  record.py, trace.py     the conversation as Markdown; the span tree as JSONL
+  limits.py, sessions.py  the public caps; the in-memory conversation store
+  llm/ stt/ tts/          one protocol each, the vendor adapters, and a registry
+  web/                    the page: native ES modules, no build step
+    app.js                the socket and one handler per server message
+    start.js              the start screen
+    telemetry.js          the lines under each bubble (tested in node)
+    player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
+    mic.js, capture-worklet.js, ui.js, protocol.js
+docs/                     ROADMAP.md (research), DEPLOY.md (runbook), vendor/ (reference)
+tests/                    pytest; tests/web/ holds node tests
 ```
 
 ## Deployment
 
-The agent runs as a container: one always-on machine, one region, one volume.
-Not a shape chosen for elegance — conversations live in the process's memory and
-the greeting's audio is cached per process, so a second instance would serve 404s
-for half the links and a machine that stops would charge its 3.1 s cold start to
-whoever arrives next. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook; `fly.toml`
-is the configuration, and its comments say why each setting is what it is.
+One always-on machine, one region, one volume on Fly.io: conversations live in
+process memory and the greeting is cached per process, so a second instance
+would break links. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook and
+`fly.toml` the configuration. The public instance turns on the caps in
+`limits.py` and records conversations (never audio); the span-tree trace is off
+there.
 
-```bash
-docker build -t voice-agent . && docker run --rm -p 8000:8000 --env-file .env voice-agent
-```
+## Roadmap
 
-Which provider the deployment uses is set in `fly.toml`, not in the code: the
-fastest one is a property of where the server sits, and the bench should be
-re-run before moving region.
+Measured so far, the round trip is dominated by the recognizer (about 1.3 s to
+commit a turn) and time to first token (about 0.5–0.9 s). Likely next, in order:
 
-The public instance turns on the caps in `src/voice_agent/limits.py` — how many
-conversations at once, how long one may run, how many one address may start.
-They are **off unless configured**, so nothing above behaves differently locally.
+1. **A voice detector in the page**, for barge-in in a few hundred milliseconds and an honest "stopped speaking" time.
+2. **Semantic turn detection**: end the turn when the words sound finished.
+3. **A golden conversation suite**, so later changes are measured rather than felt.
+4. **Cost accounting and small-model routing.**
+5. **Telephony transport.**
 
-### What the public instance records
-
-It writes conversations down, and says so on the page before anybody speaks.
-Per conversation, on the machine's volume: the transcript, the timings and the
-decisions (`sessions/`), and the span tree with whole prompts and replies
-(`traces/`). API keys are redacted; what was said is not. **No audio is ever
-written** — binary frames are counted and discarded.
-
-Nothing expires; `--purge-sessions` is the delete. Setting `VOICE_AGENT_SESSIONS`
-and `VOICE_AGENT_TRACE` to `off` runs it recording nothing, and the page's notice
-follows the setting rather than restating it.
-
-## Roadmap (likely future chapters)
-
-Nothing below is committed to, and nothing below should be built ahead of its
-turn — the order will change as earlier chapters teach us things.
-[docs/ROADMAP.md](docs/ROADMAP.md) has the long version: the latency
-arithmetic, the themes behind these chapters, and the alternatives considered.
-
-Measured so far, the round trip is dominated by two vendor-side waits, not by
-network hops: the recognizer (1.3 s to commit a turn, 0.85–1.6 s to notice
-barge-in) and time to first token (~0.5–0.9 s). So, in order:
-
-1. **A voice detector in the page** (Silero or WebRTC VAD). Barge-in in a few hundred
-   milliseconds instead of the recognizer's second. It also gives the first honest
-   "user stopped speaking" timestamp, and stops paying the recognizer for silence.
-   Chapter 9 made this load-bearing rather than merely next. It is not only that
-   the clock measures silence from the recognizer's last output, which trails
-   real speech by several hundred milliseconds — it is that **nothing in the
-   agent can currently answer "is someone speaking right now?"** The clock
-   infers it from the silence getting shorter. A voice detector is the first
-   component that would simply know.
-2. **Semantic turn detection.** The turn ends when the words sound finished,
-   not when the vendor commits, reported as FEC / MSC / OVER / NDS. It goes after
-   the largest term, and needs step 1's timestamps.
-3. **A golden conversation suite.** Scripted audio replayed through the whole pipeline,
-   with latency and pronunciation as gates, so later changes are measured
-   rather than felt.
-4. **Cost accounting and small-model routing**, made safe by step 3.
-5. **Telephony transport.** Chapter 14 took the deployment half — the server is
-   off localhost and the colocation question has real numbers now. What is left
-   is 8 kHz mono, jitter, drops and resume; WebRTC; and whether the server
-   belongs in the media path at all.
-6. **A duplex speech-to-speech backend** behind the same interface, to A/B against
-   the cascade.
-
-Then, continuing what Chapter 9 started — a **mixed-initiative** agent that
-holds a share of the initiative instead of waiting to be addressed:
-**backchannels** (a cached "mm-hm" placed *over* the user without claiming the
-floor — the first utterance that is not a turn), **transition-relevance-place
-detection** (the same classifier as semantic turn detection, asked "is this a
-place I could come in?"), a **graded floor policy** from backchannel through to
-the rare hard interrupt with a per-exchange budget and a concession rule, and
-**always-on judgement** with a line prepared and held ready. Evaluation for all
-of it is interruption precision, uptake, and sampled human ratings of
-intrusiveness — the decline log Chapter 9 draws is its first row.
-
-Smaller along the way: choosing the default model from the bench's numbers;
-tool calling with confirmation boundaries.
-
-See [CHANGELOG.md](CHANGELOG.md) for what has actually shipped.
+[docs/ROADMAP.md](docs/ROADMAP.md) has the long version.
 
 ## License
 

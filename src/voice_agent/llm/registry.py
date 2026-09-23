@@ -19,16 +19,8 @@ KEYS: dict[str, str] = {
     "openai": OPENAI.api_key_env,
     "anthropic": ANTHROPIC_API_KEY,
 }
-"""What each backend needs in the environment before it can be built at all.
-
-Here rather than anywhere else for the reason this module already gives: it is
-the place that knows which engines exist, and what one requires is part of
-knowing it exists. Taken from the specs where there is one, so the name is
-written down once.
-
-It is needed because every adapter calls `require_env` in its constructor — so
-asking "can this deployment offer OpenAI?" by *building* an OpenAI adapter
-raises rather than answers. Chapter 15 has to answer it for a page."""
+"""What each backend needs in the environment. Adapters call `require_env` when
+built, so this is how to ask whether one is usable without raising."""
 
 DEFAULT_MODELS: dict[str, str] = {
     "deepseek": DEEPSEEK.default_model,

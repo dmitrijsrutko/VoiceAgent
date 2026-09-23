@@ -18,7 +18,7 @@ from openai.types.chat import ChatCompletionMessageParam
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, Warmth
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage
 from voice_agent.llm.http import http_client, record_call
 
 
@@ -114,26 +114,6 @@ class OpenAICompatibleLLM:
             # The SDK wraps failures to connect, but the body is read here
             # straight from httpx2: a connection lost mid-reply arrives raw.
             raise ProviderError(f"{self.provider} reply interrupted: {exc!r}") from exc
-
-    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
-        try:
-            # One token, not zero: the API's minimum. The reply is discarded;
-            # the point is the prefix the provider now holds in cache.
-            completion = await self._client.chat.completions.create(
-                model=self.model,
-                messages=to_openai_messages(system, messages),
-                max_tokens=1,
-                stream=False,
-            )
-        except OpenAIError as exc:
-            raise ProviderError(f"{self.provider} warm failed: {exc}") from exc
-
-        usage = completion.usage
-        if usage is None:
-            return Warmth(prompt_tokens=0, cached_tokens=0)
-        return Warmth(
-            prompt_tokens=usage.prompt_tokens, cached_tokens=cached_tokens(usage.model_dump())
-        )
 
 
 async def read_to_the_end(response: httpx2.Response) -> AsyncIterator[dict[str, Any]]:

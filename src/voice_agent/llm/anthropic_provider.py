@@ -20,7 +20,7 @@ from anthropic.types import (
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, Warmth
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage
 from voice_agent.llm.http import http_client, record_call
 
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
@@ -45,8 +45,7 @@ CACHE_THROUGH_LAST: CacheControlEphemeralParam = {"type": "ephemeral"}
 
 Unlike the OpenAI-compatible backends, Anthropic caches only what is explicitly
 marked. With only the system prompt marked, every turn re-processed the whole
-conversation, and a warm prefilled history the real call could not read back —
-the cost of warming with none of the benefit."""
+conversation."""
 
 OPENING = "(call connected)"
 """The user turn the API requires before the agent's greeting. Fixed text, so
@@ -127,24 +126,3 @@ class AnthropicLLM:
                     usage.output_tokens = final.output_tokens
         except AnthropicError as exc:
             raise ProviderError(f"{self.provider} request failed: {exc}") from exc
-
-    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
-        try:
-            # Zero output tokens: prefill only, the documented way to warm.
-            message = await self._client.messages.create(
-                model=self.model,
-                max_tokens=0,
-                system=cacheable(system),
-                # The same as the reply's: a different effort is a different
-                # cache, and the warm would prefill one the reply cannot read.
-                output_config=await self._effort(),
-                messages=to_anthropic_messages(messages),
-                cache_control=CACHE_THROUGH_LAST,
-            )
-        except AnthropicError as exc:
-            raise ProviderError(f"{self.provider} warm failed: {exc}") from exc
-
-        usage = message.usage
-        cached = usage.cache_read_input_tokens or 0
-        written = usage.cache_creation_input_tokens or 0
-        return Warmth(prompt_tokens=usage.input_tokens + cached + written, cached_tokens=cached)

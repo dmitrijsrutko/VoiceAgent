@@ -97,6 +97,40 @@ def test_the_greeting_becomes_part_of_the_conversation(store: SessionStore) -> N
     assert [(m.role, m.content) for m in store.get(key).messages] == [("assistant", HELLO)]
 
 
+def test_the_model_is_told_about_the_greeting_rather_than_shown_it(store: SessionStore) -> None:
+    """As a turn in the history, a fixed English greeting anchored the reply to
+    a Russian question in English. The page still replays it; the model reads it
+    as a fact in its instructions."""
+    llm = FakeLLM()
+    app = create_app(llm=llm, tts=FakeTTS(), store=store, ears=False, greeting=HELLO)
+    with TestClient(app) as client:
+        key = open_conversation(client)
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            while receive(socket)["type"] != "audio_end":
+                pass
+            socket.send_json({"type": "user_message", "text": "Привет"})
+            while receive(socket)["type"] != "reply_end":
+                pass
+
+    assert [m.content for m in llm.seen[0]] == ["Привет"]
+    assert HELLO in llm.systems[0]
+    assert store.get(key).messages[0].content == HELLO
+
+
+def test_a_cut_greeting_stays_out_of_the_models_context() -> None:
+    """Talked over, the greeting is replaced by what was heard of it, and the
+    replacement must not slip into the model's context."""
+    from voice_agent.conversation import Conversation
+
+    conversation = Conversation("k")
+    conversation.opening = conversation.add_assistant(HELLO)
+    conversation.add_user("hello?")
+    conversation.replace(conversation.opening, "Hi, I'm")
+
+    assert [m.content for m in conversation.context] == ["hello?"]
+    assert [m.content for m in conversation.messages] == ["Hi, I'm", "hello?"]
+
+
 def test_reconnecting_does_not_greet_again(store: SessionStore) -> None:
     client = build(store)
 

@@ -12,20 +12,6 @@ three sentences — so a large ceiling would only buy the chance to generate a
 long answer nobody wants to listen to."""
 
 
-@dataclass(frozen=True, slots=True)
-class Warmth:
-    """What a warming call found already cached.
-
-    `cached` is what the provider says it served from cache, so this reports
-    the state *before* the warm rather than after — which is the honest thing
-    to show, since it is what the real call would otherwise have had to pay
-    for.
-    """
-
-    prompt_tokens: int
-    cached_tokens: int
-
-
 @dataclass(slots=True)
 class Usage:
     """What one streamed reply cost: the tokens the provider says it used, and
@@ -92,14 +78,5 @@ class LLM(Protocol):
         Free: it lists models, which no provider bills. The first request in a
         process also pays for DNS and TLS setup — measured at ~250 ms more than
         any request after it — and the first question is the worst time for it.
-        """
-        ...
-
-    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
-        """Prefill this prompt without generating a reply.
-
-        The request is real and is billed for its input tokens; only the output
-        is thrown away. What it buys is that the provider's prefix cache holds
-        this prompt when the real call arrives moments later.
         """
         ...

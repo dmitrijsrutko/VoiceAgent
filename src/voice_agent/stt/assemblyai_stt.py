@@ -1,22 +1,14 @@
 """AssemblyAI Universal-Streaming speech recognition, over the v3 WebSocket.
 
-Reached over a raw WebSocket rather than through the `assemblyai` SDK, for the
-same reason Scribe is: the protocol is four message types, and a callback-based
-client bridged back into an async iterator would be more code than the protocol
-it hides — plus a dependency this project does not otherwise need.
+A raw WebSocket rather than the SDK: the protocol is four message types, less
+code than bridging the SDK's callbacks into an async iterator.
 
-Endpointing is delegated to the service, as it was in chapter 3. The difference
-is the unit: Scribe takes one silence threshold in seconds, AssemblyAI takes a
-*window* in milliseconds — `min_turn_silence` before it may end a turn it is
-confident about, `max_turn_silence` before it ends one regardless. The single
-`--vad-silence` knob maps onto the ceiling of that window, so the flag keeps
-meaning what it has always meant no matter which ears are listening.
+Endpointing is the service's. `--vad-silence` maps onto its turn-silence
+*window* (milliseconds), so the flag means the same on both recognizers.
 
-Two things here are cost control rather than correctness, and both are easy to
-leave out by accident:
+Two things here are cost control rather than correctness:
 
-- Audio goes up as **binary frames**. Scribe wants base64 inside JSON and the
-  Voice Agent API wants base64 inside JSON; this endpoint wants neither, and
+- Audio goes up as **binary frames** (not base64 in JSON, unlike Scribe);
   frames outside 50-1000 ms of audio close the socket with 3007.
 - The session is **explicitly terminated**. An abandoned socket keeps billing
   until the three-hour cap, so `Terminate` is sent when the audio runs out.
@@ -65,34 +57,19 @@ LANGUAGES = (
 )
 """The 18 languages `universal-3-5-pro` transcribes, as ISO 639-1 codes.
 
-Written down because the failure mode for anything outside this set is not an
-error — it is confident nonsense. Measured: Russian read aloud came back as
-"Раскажем не pravalo вывnutriny produkt kitaia и государствены dolk.", and the
-agent answered the nonsense in English. Passing `language_codes=ru` changes
-nothing; it is accepted at connect and silently ignored.
-
-For a language that is not here, use `--stt elevenlabs`: Scribe covers it and
-keeps partials, punctuation and `--vad-silence` working. AssemblyAI's own
-`whisper-rt` model does cover 99 languages, but emits **no partial transcripts
-at all** — which switches off warming (ch. 4), speculation (ch. 5) and the live
-transcript, and makes `--vad-silence` inert. It is not a drop-in and is not
-offered here."""
+Anything else is not refused but transcribed as confident nonsense, and
+`language_codes` is silently ignored. Use `--stt elevenlabs` for other
+languages; `whisper-rt` covers more but emits no partials at all."""
 
 SAMPLE_RATE = 16000
-"""What we ask for, within the endpoint's 8000-96000 range. The browser opens
-its AudioContext at whatever `sample_rate` the server reports for the chosen
-ears, so nothing resamples anywhere."""
+"""What we ask for; the page opens its microphone at this rate, so nothing resamples."""
 
 ENCODING = "pcm_s16le"
 """16-bit signed little-endian, mono — what the capture worklet already sends."""
 
 DEFAULT_SILENCE_SECONDS = 1.5
-"""How long a pause means "I'm done", carried over from chapter 3 rather than
-re-derived. The argument there still holds: 0.7 s was tried against Scribe and
-was worse, committing "Or rather..." as a finished turn. Keeping the same
-default across both backends is also what makes the two comparable — a latency
-difference measured between them is then the recognizer's, not the threshold's.
-Tune with VOICE_AGENT_VAD_SILENCE / --vad-silence."""
+"""How long a pause means "I'm done": the same default as Scribe, so the two
+recognizers compare on their own latency. `--vad-silence` tunes it."""
 
 SILENCE_FLOOR_MS = 50
 SILENCE_CEILING_MS = 10_000
@@ -102,22 +79,12 @@ SILENCE_CEILING_MS = 10_000
 MIN_SILENCE_FRACTION = 0.5
 """Where the floor of the turn-silence window sits relative to its ceiling.
 
-The service may end a turn any time after `min_turn_silence` if it is confident
-the speaker is finished, and must end it by `max_turn_silence`. Measured
-against the real service on an unfinished phrase, `min_turn_silence` is the one
-that governs in practice and it tracks closely: 200 ms -> 830 ms to the final,
-900 ms -> 1453 ms, 2500 ms -> 1869 ms. The ceiling never fired in any test,
-because a sentence that sounds finished ends the turn confidently first.
-
-Half, therefore, is what makes `--vad-silence 1.5` actually feel like a second
-and a half: the floor lands at 750 ms and the final at roughly 1.3 s. Passing
-the whole value as the floor would overshoot by half a second."""
+The floor is what governs in practice (measured: 200 ms -> 830 ms to the final,
+900 ms -> 1453 ms), so half makes `--vad-silence 1.5` feel like 1.5 s."""
 
 FLUSH_GRACE_SECONDS = 2.0
-"""After the audio ends and `Terminate` goes up, how long to wait for a last
-turn before closing the socket ourselves. Usually unused: the service answers
-`Terminate` with `Termination` well inside this, and that is what actually ends
-the loop."""
+"""After `Terminate`, how long to wait for a last turn before closing the
+socket ourselves. Usually the service's `Termination` ends the loop first."""
 
 BEGIN = "Begin"
 TURN = "Turn"
@@ -136,13 +103,8 @@ payload — and the codes alone say nothing about what to do."""
 
 
 def explain(exc: Exception) -> str:
-    """One actionable line from whatever the socket died of.
-
-    Read off `rcvd`, the close frame the *service* sent, rather than the
-    exception's own `code` — that shortcut is deprecated (websockets 13.1) and
-    warns on every use. A failure with no close frame from the peer simply has
-    no hint, which is correct: the codes above are things the service said.
-    """
+    """One actionable line from whatever the socket died of. Read off `rcvd`,
+    the close frame the service sent (`exc.code` is deprecated)."""
     code = getattr(getattr(exc, "rcvd", None), "code", None)
     hint = CLOSE_HINTS.get(code) if isinstance(code, int) else None
     return f"assemblyai transcription failed: {exc}" + (f" — {hint}" if hint else "")
@@ -188,17 +150,13 @@ class AssemblyAISTT:
         )
 
     async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
-        # Set before we close the socket ourselves, so an orderly shutdown is
-        # not reported to the user as a failed transcription — the bug chapter
-        # 3 shipped against Scribe, which this path would otherwise repeat.
+        # Set before closing the socket ourselves: an orderly shutdown is not a failure.
         closing = asyncio.Event()
 
         async def pump(socket: websockets.ClientConnection) -> None:
             async for data in audio:
                 await socket.send(data)  # binary frame: no envelope, no base64
-            # The audio ran out mid-utterance (the user stopped listening rather
-            # than stopping speaking). Terminate rather than wait for a VAD
-            # pause that will never arrive — and so the session stops billing.
+            # Audio over (listening stopped): terminate, which also stops billing.
             with contextlib.suppress(websockets.WebSocketException):
                 await socket.send(json.dumps({"type": "Terminate"}))
                 await asyncio.sleep(FLUSH_GRACE_SECONDS)
@@ -215,9 +173,7 @@ class AssemblyAISTT:
         )
         try:
             async with websockets.connect(
-                # The raw key, with no `Bearer` prefix. The prefix is required
-                # on exactly one AssemblyAI product — the Voice Agent API — and
-                # generalising either way is how this returns a 1008.
+                # The raw key, no `Bearer` (only the Voice Agent API wants one).
                 self.url,
                 additional_headers={"Authorization": self._api_key},
             ) as socket:
@@ -226,8 +182,6 @@ class AssemblyAISTT:
                     async for transcript in self._turns(socket):
                         yield transcript
                 finally:
-                    # A listening session that stops reading must not leave
-                    # audio flowing into a socket that is closing.
                     task.cancel()
                     with contextlib.suppress(asyncio.CancelledError):
                         await task
@@ -242,12 +196,8 @@ class AssemblyAISTT:
             raise ProviderError(explain(exc)) from exc
 
     async def _turns(self, socket: websockets.ClientConnection) -> AsyncIterator[Transcript]:
-        """What the user has said, up to the service's own goodbye.
-
-        `finalized` is local to the session on purpose. `turn_order` counts from
-        zero again on every connection, so remembering it across sessions would
-        make the first turn after a reconnect look like one already answered.
-        """
+        """What the user has said, up to the service's own goodbye. `finalized`
+        is per session: `turn_order` restarts at zero on every connection."""
         finalized: set[int] = set()
         async for raw in socket:
             if isinstance(raw, bytes):
@@ -260,12 +210,8 @@ class AssemblyAISTT:
 
             kind = payload.get("type")
             if kind == BEGIN:
-                # The accepted configuration, traced because an unrecognised
-                # query parameter here is *ignored* rather than refused.
-                # It reports the model and mode but **not** the turn-silence
-                # bounds — measured, those come back absent even when they are
-                # demonstrably in effect — so this documents what was accepted,
-                # it does not confirm the pause landed. Only timing does that.
+                # Traced because unknown parameters are ignored, not refused. It
+                # omits the turn-silence bounds even when they are in effect.
                 trace.event("stt.begin", {k: v for k, v in payload.items() if k != "type"})
                 continue
             if kind == TERMINATION:
@@ -279,12 +225,8 @@ class AssemblyAISTT:
                 yield Transcript(text=text, is_final=False)
                 continue
 
-            # One final per turn, however many the service sends. A turn can
-            # arrive twice — once as it ends, again once formatted — and the
-            # second would drive a whole extra turn through the pipeline: the
-            # agent answering the same sentence twice. Downstream cannot tell
-            # them apart, so they are collapsed here, where `turn_order` still
-            # exists.
+            # One final per turn: a turn can arrive again once formatted, which
+            # would make the agent answer the same sentence twice.
             order = payload.get("turn_order")
             if isinstance(order, int):
                 if order in finalized:

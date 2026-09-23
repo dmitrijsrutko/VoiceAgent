@@ -41,8 +41,7 @@ class Greeting:
         """Keyed by everything that changes the audio, so editing the greeting
         or switching voice produces a different file rather than a stale one."""
         assert self._speaker is not None
-        # The format is part of the key: a cache written by the MP3 chapters,
-        # read back as PCM, would not fail — it would play as noise.
+        # The format is part of the key: MP3 read back as PCM plays as noise.
         key = f"{self._speaker.provider}:{self._speaker.voice}:{MEDIA_TYPE}:{self.text}"
         return self._cache_dir / f"greeting-{sha256(key.encode()).hexdigest()[:16]}.pcm"
 
@@ -114,6 +113,7 @@ class Greeting:
         if conversation.messages or conversation.ended:
             return None
         message = conversation.add_assistant(self.text)
+        conversation.opening = message
         await channel.send_json({"type": "greeting", "text": self.text})
         if self._pcm is None:
             return None

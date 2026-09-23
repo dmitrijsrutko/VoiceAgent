@@ -1,25 +1,13 @@
 """The clock: what lets the agent speak without having been spoken to.
 
-Every turn before this chapter was started by the user — typed, or committed by
-the recognizer. Nothing in the process ever woke up on its own, so a user who
-said nothing got nothing, forever. This is the smallest honest piece of a
-mixed-initiative agent: a ticker that notices a silence the user has left and
-asks whether there is anything worth saying into it.
+A ticker notices a silence the user has left and asks the model whether there is
+anything worth saying into it. Declining is the normal answer, and every
+consideration is reported to the page, declines included.
 
-The headline is not that the agent speaks unprompted. It is that it considers
-speaking and usually decides not to. Declining is the normal answer, it is
-reported to the page like any other event, and the ratio of declines to nudges
-is what this chapter is judged on — not a latency number.
+Two rules:
 
-Two rules hold the whole design up:
-
-- **It only ever speaks into silence.** Never over the user. Silence-filling
-  and talking over someone need the same machinery — a clock, a yield rule, a
-  budget, a judgement — but only one of them can be embarrassing while the
-  thresholds are being tuned.
-- **The budget is hard.** Three unprompted lines per stretch of silence, then
-  quiet for good until the user speaks. A proactive agent without a ceiling is
-  not a partner, it is a nuisance.
+- **It only ever speaks into silence**, never over the user.
+- **The budget is hard**: one line per rung, then quiet until the user speaks.
 """
 
 import asyncio
@@ -41,33 +29,18 @@ from voice_agent.timing import elapsed_ms
 logger = logging.getLogger(__name__)
 
 TICK_SECONDS = 1.0
-"""How often the ladder is checked. The same cadence as the microphone's
-watchdog, and far finer than the delays it measures — the thresholds here are
-seconds, so a second of granularity costs nothing."""
+"""How often the ladder is checked."""
 
 MAX_LINE_CHARS = 300
-"""Longer than this and the answer is treated as malformed rather than spoken.
-
-`MAX_OUTPUT_TOKENS` is 1024, and a model that ignores "one sentence, two at the
-very most" would otherwise deliver a paragraph nobody asked for — the worst
-failure this feature has available, since the user did not even open the
-exchange. Two long sentences fit comfortably inside this."""
+"""Longer than this and an unprompted line is treated as malformed, not spoken:
+the brevity instruction did not land."""
 
 
 @dataclass(frozen=True, slots=True)
 class Rung:
-    """One step of the escalation: when it may fire, what it is for, and how
-    willing the agent should be to take it.
-
-    `after` is counted from the last thing the user said, not from the previous
-    rung, so the ladder is read as absolute positions in a silence.
-
-    `disposition` is the correction that came out of measuring this against a
-    real model. Weighted the same at every rung, the veto made the agent
-    reticent to the point of uselessness — eleven declines out of twelve
-    considerations, including at forty-five seconds of dead silence. The bias
-    towards saying nothing has to *fall* as the silence grows, because what is
-    tactful at seven seconds is neglectful at forty-five.
+    """One step of the escalation: when it may fire (`after`, seconds into the
+    silence), what it is for, and how willing the agent should be to take it.
+    The willingness rises as the silence grows: tactful early is neglectful late.
     """
 
     after: float
@@ -121,43 +94,14 @@ LADDER: tuple[Rung, ...] = (
         "told them you would.",
     ),
 )
-"""Three rungs: follow through, offer something concrete, then withdraw.
-
-The shape is the design; the delays are tuning. The first *follows through* on
-the exchange that just happened. The second *offers something concrete* rather
-than asking again — "are you there? … ARE YOU THERE?" is the needy pattern, and
-it is what makes proactive agents unbearable to sit with. The third is a
-withdrawal, which is a social act in its own right: it hands control back
-explicitly and earns the trust that lets the agent speak first at all. After it,
-silence until the user says something.
-
-A rung at *seven* seconds was tried in chapter 9 and deleted, having never once
-fired in eighteen measured considerations. The reason was structural rather than
-shy: its job was to leave the door open and invite the user in, the rules forbid
-rewording an invitation already made, and the greeting *is* an invitation — so
-every move available to it was prohibited and a paid call had a foregone
-conclusion. **That was an argument about the intent, not about short delays**,
-and this file read it as the latter for two chapters.
-
-The five-second rung avoids the trap by being about the *exchange* rather than
-the silence: five seconds after an answer, there is a real last answer to follow
-through on. Where there is not — straight after the greeting — it declines, and
-that is the correct move rather than a dead rung. The difference from the seven-
-second one is that only some of its situations are illegal, not all of them.
-
-Chapter 13 moved the first nudge here from fifteen seconds. Fifteen was measured
-from the moment the agent *stopped speaking* (`Mic.expect_silence` pushes the
-marker forward by the reply's own audio), so after a twenty-second answer it was
-thirty-five seconds of dead air before anything happened."""
+"""Three rungs: follow through on what was just said, offer something concrete
+(never "are you still there?"), then withdraw and hand control back. After the
+withdrawal, silence until the user speaks."""
 
 
 def nudge_prompt(rung: Rung, quiet: float) -> str:
-    """The transient message that asks the model whether to speak.
-
-    Appended after the history for one call and never recorded. After, not
-    before: a volatile element early in the prompt invalidates the provider's
-    prefix cache from that point on, and the history is the part worth caching.
-    """
+    """The message that asks the model whether to speak. Used for one call and
+    never recorded; placed after the history so the cached prefix survives."""
     return (
         "[This is not the other person speaking. It is your own sense of the pause.]\n\n"
         f"They have said nothing for about {quiet:.0f} seconds. Nobody has asked you "
@@ -174,13 +118,7 @@ def nudge_prompt(rung: Rung, quiet: float) -> str:
 
 
 def spoken_line(reply: str) -> str | None:
-    """The line to say, or `None` if the model declined.
-
-    The recognition itself lives in `decline.is_decline`, because the sentinel
-    has two halves that must agree: this path, which expects it, and the
-    ordinary turn, which must never emit it. They were separate once and that
-    is exactly how `NOTHING` came to be said out loud.
-    """
+    """The line to say, or `None` if the model declined (see `decline.py`)."""
     line = reply.strip().strip("\"'").strip()
     if not line or is_decline(reply):
         return None
@@ -190,11 +128,8 @@ def spoken_line(reply: str) -> str | None:
 class Initiative:
     """One session's clock: the ladder, the budget, and the decision to speak.
 
-    Deliberately knows nothing about `Session`. What it can see of the
-    conversation arrives as `quiet` — seconds of usable silence, or `None` for
-    "not now" — and what it can do arrives as `speak`. That keeps the yield
-    rule in one place (the session, which owns the state) and the policy in
-    another (here), and it makes this testable without a socket.
+    Knows nothing of `Session`: it sees `quiet` (usable silence, or `None` for
+    "not now") and can `speak`. The yield rule stays with the session.
     """
 
     def __init__(
@@ -225,10 +160,7 @@ class Initiative:
 
     async def stop(self) -> None:
         task, self._task = self._task, None
-        # Never awaited from inside the ticker's own task: cancelling and then
-        # awaiting yourself deadlocks until something else tears the session
-        # down. Unreachable today — a nudge runs in its own task — but it is one
-        # chapter away from being reachable, and `Mic.stop` already guards it.
+        # Never awaited from inside its own task, which would deadlock.
         if task is not None and task is not asyncio.current_task():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -246,8 +178,7 @@ class Initiative:
             except VoiceAgentError as exc:
                 logger.info("an unprompted turn was not taken: %s", exc)
             except Exception:
-                # A defect here must not take the ticker down silently and
-                # leave the agent mute for the rest of the conversation.
+                # A defect must not stop the ticker silently.
                 logger.exception("the initiative clock failed")
 
     async def tick(self) -> None:
@@ -260,17 +191,13 @@ class Initiative:
         rung = self._ladder[self._rung]
         if quiet < rung.after:
             return
-        # Consumed before the call, whatever comes back. A rung is an
-        # opportunity, not a debt: a decline must not leave the agent
-        # re-deciding the same rung once a second for the rest of the silence.
+        # Spent before the call, whatever comes back: an opportunity, not a debt.
         index, self._rung = self._rung, self._rung + 1
         await self._consider(index, rung, quiet)
 
     async def _consider(self, index: int, rung: Rung, quiet: float) -> None:
         started = time.perf_counter()
-        # A call on a timer is a spend decision. This project has already lost a
-        # month's quota to one, so what a decision costs goes on screen beside
-        # what it decided — including, and especially, the ones that say nothing.
+        # A call on a timer is a spend decision, so its cost is reported too.
         usage = Usage()
         nudge = nudge_prompt(rung, quiet)
         try:
@@ -281,11 +208,8 @@ class Initiative:
             ):
                 reply = await self._ask(nudge, usage)
         except VoiceAgentError as exc:
-            # Reported, not merely logged. The rung stays spent — the budget is
-            # a ceiling, and an outage must not turn the clock into a retry loop
-            # — but a clock that fails in silence looks exactly like one that
-            # chose to say nothing, and those are opposite facts. This project's
-            # position on that is already written down in `mic.py`.
+            # Reported: a clock failing silently looks like one choosing silence.
+            # The rung stays spent, so an outage is not a retry loop.
             logger.warning("could not decide whether to speak: %s", exc)
             await self._note(index, quiet, "failed", started, usage, message=str(exc))
             return
@@ -294,17 +218,13 @@ class Initiative:
         if line is None:
             decision = "declined"
         elif len(line) > MAX_LINE_CHARS:
-            # Not spoken and not silently dropped: an answer this long means the
-            # brevity instruction is not landing, which is a thing to see.
             decision, line = "overran", None
         elif self._broken(quiet):
             decision, line = "yielded", None
         else:
             decision = "spoke"
         await self._note(index, quiet, decision, started, usage, line=line or "")
-        # One socket write stands between the gate above and the line going out.
-        # `Session.speak` re-checks for itself, so what is left is the width of
-        # that write.
+        # `Session.speak` re-checks the moment itself.
         if line is not None:
             await self._speak(line, index + 1)
 
@@ -336,33 +256,17 @@ class Initiative:
         )
 
     def _broken(self, before: float) -> bool:
-        """Did the silence we decided about survive the deciding?
-
-        The subtle half of the yield rule, and the half the first version got
-        wrong. Someone who starts talking mid-decision does not make the moment
-        *unavailable* — `quiet` does not become `None`, because none of the
-        conditions the session watches for have changed yet. What happens is
-        that the recognizer's first partial restarts the silence, so `quiet`
-        comes back **smaller than it went in**. Watching only for `None` waited
-        for the commit, a second or more later, by which time the agent was
-        already talking over them.
-
-        A shrinking silence is therefore the signal, and it needs no new state
-        and no new source — only the number we already had.
-        """
+        """Did the silence survive the deciding? Someone who starts talking
+        restarts it through the recognizer's first partial, so `quiet` comes
+        back *smaller* — long before the commit would make it `None`."""
         after = self._quiet()
         return after is None or after < before
 
     async def _ask(self, nudge: str, usage: Usage | None = None) -> str:
-        """One small call, drained rather than streamed.
-
-        Nobody is waiting for this — the agent chose the moment — so an
-        unprompted turn is the one thing in this project with no latency budget.
-        That is what makes deciding first and speaking second affordable here,
-        where on a reply to a question it would be unthinkable.
-        """
+        """One small call, drained rather than streamed: nobody is waiting on
+        it, so deciding first and speaking second is affordable."""
         messages: list[Message] = [
-            *self._conversation.messages,
+            *self._conversation.context,
             Message(role="user", content=nudge),
         ]
         fragments: list[str] = []

@@ -71,8 +71,7 @@ class Voice:
     id: str
     name: str
     usable: bool
-    """False for a voice the account can see but not synthesize with — the
-    distinction that cost an afternoon in chapter 2."""
+    """False for a voice the account can see but not synthesize with."""
 
 
 async def once(text: str) -> AsyncIterator[str]:

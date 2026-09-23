@@ -142,8 +142,7 @@ async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> N
 
 async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() -> None:
     """Only what is marked is cached. With the system prompt alone marked,
-    every turn re-read the whole history and a warm cached nothing a turn
-    could use."""
+    every turn re-read the whole history."""
     calls: dict[str, dict[str, Any]] = {}
     final = SimpleNamespace(
         input_tokens=1, output_tokens=0, cache_read_input_tokens=0, cache_creation_input_tokens=0
@@ -153,21 +152,12 @@ async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() ->
         calls["stream"] = kwargs
         return FakeAnthropicStream(["ok"], final)
 
-    async def create(**kwargs: Any) -> SimpleNamespace:
-        calls["warm"] = kwargs
-        return SimpleNamespace(usage=final)
-
-    client = SimpleNamespace(
-        messages=SimpleNamespace(stream=stream, create=create), models=models(effort=True)
-    )
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream), models=models(effort=True))
     llm = AnthropicLLM(client=client)  # type: ignore[arg-type]
 
     [_ async for _ in llm.stream("s", CONVERSATION, Usage())]
-    await llm.warm("s", CONVERSATION)
 
     assert calls["stream"]["cache_control"] == CACHE_THROUGH_LAST
-    assert calls["warm"]["cache_control"] == CACHE_THROUGH_LAST
-    assert calls["warm"]["max_tokens"] == 0, "a warm should bill no output"
 
 
 def models(effort: bool) -> SimpleNamespace:
@@ -194,18 +184,13 @@ async def test_effort_is_sent_only_to_a_model_that_accepts_it(supported: bool) -
         calls.append(kwargs)
         return FakeAnthropicStream(["ok"], final)
 
-    async def create(**kwargs: Any) -> SimpleNamespace:
-        calls.append(kwargs)
-        return SimpleNamespace(usage=final)
-
     lookup = models(effort=supported)
-    client = SimpleNamespace(messages=SimpleNamespace(stream=stream, create=create), models=lookup)
+    client = SimpleNamespace(messages=SimpleNamespace(stream=stream), models=lookup)
     llm = AnthropicLLM("some-model", client=client)  # type: ignore[arg-type]
 
     await llm.connect()
     [_ async for _ in llm.stream("s", CONVERSATION, Usage())]
-    await llm.warm("s", CONVERSATION)
 
     sent = [call["output_config"] for call in calls]
-    assert sent == ([EFFORT, EFFORT] if supported else [omit, omit])
+    assert sent == ([EFFORT] if supported else [omit])
     assert lookup.lookups == ["some-model"], "the model was looked up more than once"

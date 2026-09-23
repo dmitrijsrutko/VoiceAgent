@@ -9,7 +9,7 @@ import pytest
 
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import Usage, Warmth
+from voice_agent.llm.base import Usage
 from voice_agent.stt.base import Transcript
 from voice_agent.tts.base import Alignment, AudioChunk, Voice
 
@@ -36,7 +36,6 @@ class FakeLLM:
         self.delay = delay
         self.pace = pace
         self.seen: list[list[Message]] = []
-        self.warmed: list[list[Message]] = []
         # Generations currently running. A speculation that outlives its socket
         # keeps billing, so "nothing is still generating" is a thing to assert.
         self.active = 0
@@ -48,14 +47,6 @@ class FakeLLM:
         self.connects += 1
         if self.fail:
             raise ProviderError("provider exploded")
-
-    async def warm(self, system: str, messages: Sequence[Message]) -> Warmth:
-        """Records what it was asked to warm. `warmed` is the point of it: the
-        assertion that only *stable* text is ever prefilled is made here."""
-        self.warmed.append(list(messages))
-        if self.fail:
-            raise ProviderError("provider exploded")
-        return Warmth(prompt_tokens=1200, cached_tokens=1024)
 
     async def stream(
         self, system: str, messages: Sequence[Message], usage: Usage | None = None

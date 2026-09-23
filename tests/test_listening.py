@@ -1,7 +1,5 @@
 """End-to-end listening over a real WebSocket; only the recognizer is faked."""
 
-import asyncio
-import threading
 import time
 from typing import Any
 
@@ -10,8 +8,6 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, receive
 from voice_agent import mic as mic_module
-from voice_agent.errors import ProviderError
-from voice_agent.llm.base import Warmth
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
 from voice_agent.stt.base import Transcript
@@ -397,30 +393,7 @@ AGREEING = [
 ]
 
 
-def test_only_agreed_text_is_ever_warmed(store: SessionStore) -> None:
-    """Warming on a hypothesis prefills a prompt the real call will not match:
-    the spend with none of the benefit. Only twice-agreed words go up."""
-    llm = FakeLLM()
-    client = build(store, FakeSTT(script=AGREEING), llm)
-    key = start(client)
-
-    with client.websocket_connect(f"/ws/{key}") as socket:
-        text_frame(socket)
-        socket.send_json({"type": "listen_start"})
-        text_frame(socket)
-        for _ in range(3):
-            socket.send_bytes(FRAME)
-        while text_frame(socket)["type"] != "reply_end":
-            pass
-
-    assert llm.warmed, "nothing was warmed at all"
-    warmed = [m[-1].content for m in llm.warmed]
-    assert warmed == ["what is the capital"], warmed
-    # "of Latvia" was only ever said once before the commit, so it never settled.
-    assert all("Latvia" not in text for text in warmed)
-
-
-def test_the_turn_still_sends_the_committed_text_not_the_warmed_prefix(
+def test_the_turn_still_sends_the_committed_text_not_the_agreed_prefix(
     store: SessionStore,
 ) -> None:
     llm = FakeLLM()
@@ -459,9 +432,6 @@ def test_the_commit_reports_whether_the_agreed_prefix_held(store: SessionStore) 
     commit = frames[-1]
     assert commit["prefix_held"] is True
     assert commit["stable_words"] == 4
-    assert commit["warms"] == 1
-    assert commit["warm_cached_tokens"] == 1024
-    assert isinstance(commit["warm_lead_ms"], int)
 
 
 def test_a_prefix_that_did_not_hold_is_reported_as_such(store: SessionStore) -> None:
@@ -487,121 +457,6 @@ def test_a_prefix_that_did_not_hold_is_reported_as_such(store: SessionStore) -> 
                 break
 
     assert frame["prefix_held"] is False
-
-
-def test_a_failing_warm_costs_only_the_warm(store: SessionStore) -> None:
-    """Warming is an optimisation. It must never be able to break a turn."""
-    llm = FakeLLM()
-
-    async def explode(system: str, messages: object) -> object:
-        raise ProviderError("warm exploded")
-
-    llm.warm = explode  # type: ignore[method-assign, assignment]
-    client = build(store, FakeSTT(script=AGREEING), llm)
-    key = start(client)
-
-    with client.websocket_connect(f"/ws/{key}") as socket:
-        text_frame(socket)
-        socket.send_json({"type": "listen_start"})
-        text_frame(socket)
-        for _ in range(3):
-            socket.send_bytes(FRAME)
-        while text_frame(socket)["type"] != "reply_end":
-            pass
-
-    assert [m.content for m in store.get(key).messages] == [
-        "What is the capital of Latvia?",
-        "Sure thing. ",
-    ]
-
-
-def test_each_turn_warms_again_rather_than_only_the_first(store: SessionStore) -> None:
-    """The growth counter was never reset between turns, so after turn one the
-    throttle blocked every later warm. A real session showed warm lines on some
-    turns and not others because of it."""
-    llm = FakeLLM()
-    script = [
-        Transcript("what is the capital", is_final=False),
-        Transcript("what is the capital of Latvia", is_final=False),
-        Transcript("What is the capital of Latvia?", is_final=True),
-        Transcript("and how many people", is_final=False),
-        Transcript("and how many people live there", is_final=False),
-        Transcript("And how many people live there?", is_final=True),
-    ]
-    client = build(store, FakeSTT(script=script), llm)
-    key = start(client)
-
-    with client.websocket_connect(f"/ws/{key}") as socket:
-        text_frame(socket)
-        socket.send_json({"type": "listen_start"})
-        text_frame(socket)
-        replies = 0
-        for _ in range(6):
-            socket.send_bytes(FRAME)
-        while replies < 2:
-            frame = receive(socket)
-            if frame["type"] == "reply_end":
-                replies += 1
-
-    assert len(llm.warmed) == 2, f"only {len(llm.warmed)} turns warmed: {llm.warmed}"
-    assert llm.warmed[0][-1].content == "what is the capital"
-    assert llm.warmed[1][-1].content == "and how many people"
-
-
-def test_a_warm_that_lands_after_its_turn_is_not_credited_to_the_next(
-    store: SessionStore,
-) -> None:
-    """Real spend, no benefit — and reporting it against the following turn
-    produced an impossible lead of 7.6 s on a two-second utterance.
-
-    Turn two is written so that nothing ever agrees (every partial starts with
-    a different word), so it warms nothing of its own. Any warm it reports can
-    only have leaked from turn one.
-    """
-    release = threading.Event()
-
-    async def blocked_warm(system: str, messages: object) -> Warmth:
-        await asyncio.get_running_loop().run_in_executor(None, release.wait, 5)
-        return Warmth(prompt_tokens=1200, cached_tokens=1024)
-
-    llm = FakeLLM()
-    llm.warm = blocked_warm  # type: ignore[method-assign]
-    script = [
-        Transcript("alpha beta", is_final=False),
-        Transcript("alpha beta gamma", is_final=False),  # agrees -> warms, and blocks
-        Transcript("Alpha beta gamma.", is_final=True),
-        Transcript("xxx one", is_final=False),
-        Transcript("yyy two", is_final=False),  # never agrees -> no warm of its own
-        Transcript("Zzz three.", is_final=True),
-    ]
-    client = build(store, FakeSTT(script=script), llm)
-    key = start(client)
-
-    def run_turn(socket: object) -> dict[str, object]:
-        commit: dict[str, object] = {}
-        for _ in range(3):
-            socket.send_bytes(FRAME)  # type: ignore[attr-defined]
-        while True:
-            frame = receive(socket)
-            if frame["type"] == "transcript" and frame["final"]:
-                commit = frame
-            if frame["type"] == "reply_end":
-                return commit
-
-    try:
-        with client.websocket_connect(f"/ws/{key}") as socket:
-            text_frame(socket)
-            socket.send_json({"type": "listen_start"})
-            text_frame(socket)
-
-            run_turn(socket)
-            release.set()  # turn one's warm completes only now, far too late
-            time.sleep(0.2)  # ...and lands squarely inside turn two's window
-            second = run_turn(socket)
-    finally:
-        release.set()
-
-    assert second["warms"] == 0, f"turn two inherited turn one's warm: {second}"
 
 
 def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
@@ -649,41 +504,6 @@ def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
     assert commit is not None
     assert commit["prefix_held"] is True, f"stale words leaked into the next turn: {commit}"
     assert commit["stable_words"] == 4, commit
-    assert llm.warmed, "agreement was wedged, so nothing warmed"
-    assert llm.warmed[-1][-1].content == "what is the weather"
-
-
-def test_a_warm_that_does_not_land_in_time_is_still_counted(store: SessionStore) -> None:
-    """A missing warm line is otherwise ambiguous between "nothing was warmed"
-    and "a warm was billed and arrived too late to help" — and those two want
-    opposite responses from whoever is reading the screen."""
-    release = threading.Event()
-
-    async def slow_warm(system: str, messages: object) -> Warmth:
-        await asyncio.get_running_loop().run_in_executor(None, release.wait, 5)
-        return Warmth(prompt_tokens=1200, cached_tokens=1024)
-
-    llm = FakeLLM()
-    llm.warm = slow_warm  # type: ignore[method-assign]
-    client = build(store, FakeSTT(script=AGREEING), llm)
-    key = start(client)
-
-    try:
-        with client.websocket_connect(f"/ws/{key}") as socket:
-            text_frame(socket)
-            socket.send_json({"type": "listen_start"})
-            text_frame(socket)
-            for _ in range(3):
-                socket.send_bytes(FRAME)
-            while True:
-                frame = receive(socket)
-                if frame["type"] == "transcript" and frame["final"]:
-                    break
-    finally:
-        release.set()
-
-    assert frame["warms"] == 0, "a warm that never returned was reported as landed"
-    assert frame["warms_attempted"] == 1, "the warm that was paid for is invisible"
 
 
 def test_stopping_the_mic_mid_reply_neither_waits_for_nor_cuts_the_reply(

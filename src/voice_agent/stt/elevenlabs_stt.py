@@ -6,9 +6,7 @@ but binds no client method to it, so there is nothing to call.
 
 Endpointing is delegated to the service. Connecting with
 `commit_strategy=vad` makes Scribe decide when the user's turn has ended, after
-`vad_silence_threshold_secs` of silence, and emit a committed transcript. That
-is this chapter's turn detection in its entirety — see the CHANGELOG for what
-handing that decision to the STT vendor costs later.
+`vad_silence_threshold_secs` of silence, and emit a committed transcript.
 """
 
 import asyncio

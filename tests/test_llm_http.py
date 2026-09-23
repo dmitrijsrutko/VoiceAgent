@@ -208,7 +208,7 @@ async def test_an_idle_connection_is_kept_for_minutes_not_seconds(
 
 
 async def test_concurrent_calls_are_each_charged_only_for_their_own_connection() -> None:
-    """Calls run concurrently — a warm, a guess and a turn — and each must be
+    """Calls run concurrently — a guess and a turn — and each must be
     charged only for the connections its own request opened."""
     async with Provider() as provider:
         llm = openai_compatible(provider.port)

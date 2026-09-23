@@ -50,8 +50,7 @@ Read `CHANGELOG.md` for what has actually shipped. `docs/ROADMAP.md` collects
 research and candidate directions — it is a thinking document, and appearing in
 it is never a reason to build something. **Never infer the current state from
 this file or from the roadmap** — only from the CHANGELOG and the
-code. As of Chapter 0, this project has no functionality at all: it is a
-skeleton with a quality gate.
+code.
 
 ---
 
