@@ -456,7 +456,14 @@ class Session:
             with contextlib.suppress(asyncio.CancelledError):
                 await settling
 
-    async def end(self) -> None:
+    async def end(self, reason: str = "") -> None:
+        """`reason` says why, when it was not the user typing `exit`.
+
+        Carried on the existing `ended` frame rather than as a message of its
+        own: the page already knows how to be told a conversation is over, and
+        this only gives it something to say about it. Omitted when empty, so a
+        frame the record prints verbatim gains no blank field.
+        """
         self.conversation.end()
         # Stopped first: a tick that fires during the teardown would otherwise
         # start a turn into a conversation that is already over.
@@ -464,7 +471,10 @@ class Session:
         # Cancelled before announcing, so nothing from a reply can follow it.
         await self._cancel_turns()
         await self._cancel_settling()
-        await self._channel.send_json({"type": "ended"})
+        ended: dict[str, object] = {"type": "ended"}
+        if reason:
+            ended["reason"] = reason
+        await self._channel.send_json(ended)
         if self.mic is not None:
             await self.mic.stop()
 

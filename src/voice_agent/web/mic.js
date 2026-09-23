@@ -5,17 +5,14 @@
 // does not hard-code where static files are mounted.
 const WORKLET = new URL("./capture-worklet.js", import.meta.url);
 
-export async function warmUpMicPermission() {
-  // Ask on page load so the prompt is out of the way and the first press of
-  // "listen" is instant. The tracks are stopped immediately: the grant is
-  // remembered, so re-acquiring later costs nothing and the recording
-  // indicator does not sit lit for the whole session.
-  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  stream.getTracks().forEach((t) => t.stop());
-}
-
 // `onFrame` receives each Int16Array of PCM; whether to send it (the half-duplex
 // gate) is the caller's decision, not the microphone's.
+//
+// Permission is asked here, at the moment the microphone is actually wanted.
+// It used to be warmed up separately on page load, so that the first press of
+// "listen" felt instant — there is no longer a first press to make instant,
+// and prompting somebody who has only opened a page was the rudest thing this
+// client did.
 export async function buildMic(sampleRate, onFrame) {
   // Capture at the recognizer's own rate so nothing resamples anywhere.
   const stream = await navigator.mediaDevices.getUserMedia({

@@ -9,6 +9,10 @@ export const meta = document.getElementById("meta");
 export const status = document.getElementById("status");
 export const mute = document.getElementById("mute");
 export const listen = document.getElementById("listen");
+export const start = document.getElementById("start");
+export const begin = document.getElementById("begin");
+export const startNotices = document.getElementById("start-notices");
+export const startStack = document.getElementById("start-stack");
 
 const NEAR_BOTTOM_PX = 48;
 
@@ -22,11 +26,21 @@ export function stick(mutate) {
   if (following) log.scrollTop = log.scrollHeight;
 }
 
+// The utterance still being spoken, which stays the last thing in the log
+// until it is committed or dropped. Its bubble is made at the first partial, so
+// a reply to the *previous* utterance that starts after the user has already
+// carried on used to be drawn below it — and the user's words, finishing in
+// that bubble, then read as said before the reply they actually followed.
+let pinned = null;
+
+export function pinLast(el) { pinned = el; }
+
 export function add(text, cls) {
   const el = document.createElement("div");
   el.className = cls;
   el.textContent = text;
-  stick(() => wrap.appendChild(el));
+  const below = pinned?.parentNode === wrap ? pinned : null;
+  stick(() => wrap.insertBefore(el, below));
   return el;
 }
 

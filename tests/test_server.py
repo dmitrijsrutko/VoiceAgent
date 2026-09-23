@@ -1,7 +1,9 @@
 """End-to-end tests over a real WebSocket; only the provider is faked."""
 
 import asyncio
+import json
 import logging
+import re
 from collections.abc import AsyncIterator, Sequence
 
 import pytest
@@ -833,3 +835,186 @@ def test_the_prompt_quotes_the_ladder_that_is_actually_running(
         drain(socket, audio=False)
 
     assert "3 and 9 seconds" in llm.systems[0]
+
+
+def served_facts(page: str) -> dict[str, object]:
+    """What the server wrote into the page for the start screen to read."""
+    block = re.search(r'<script id="facts" type="application/json">(.*?)</script>', page)
+    assert block, "the page carries no facts"
+    loaded = json.loads(block.group(1))
+    assert isinstance(loaded, dict)
+    return loaded
+
+
+def test_the_page_carries_the_same_facts_the_socket_will_send(
+    client: TestClient, store: SessionStore
+) -> None:
+    """The start screen has to say what starting entails before there is a
+    socket to ask over, so the facts are written into the page. Two statements
+    of the same three things is exactly the drift between what the page claims
+    and what the server does that they must not be allowed."""
+    key = start(client)
+    served = served_facts(client.get(f"/c/{key}").text)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        ready = receive(socket)
+
+    assert served["recording"] == ready["recording"]
+    assert served["voice"] == ready["voice"]
+    assert served["ears"] == ready["ears"]
+
+
+def test_a_silent_deaf_unrecorded_agent_says_so_on_the_page(llm: FakeLLM) -> None:
+    """Every fact the start screen renders is a `null` or a `false` away from
+    claiming something the server will not do."""
+    silent = TestClient(create_app(llm=llm, voice=False, ears=False, greeting="", record=False))
+    key = start(silent)
+    served = served_facts(silent.get(f"/c/{key}").text)
+
+    assert (served["voice"], served["ears"], served["recording"]) == (None, None, False)
+    # And offers no ears to choose between, having none.
+    choices = served["choices"]
+    assert isinstance(choices, dict)
+    assert choices["stt"] == []
+
+
+def test_a_closing_tag_in_the_facts_cannot_end_the_block_early() -> None:
+    """Every value is a server-side constant today. A `</script>` reaching the
+    page verbatim would end the block and leave the rest of the document as
+    text, and foreclosing that costs one call."""
+    from voice_agent.server import FACTS_BLOCK, with_facts
+
+    page = with_facts(f"<html>{FACTS_BLOCK}</html>", {"voice": "</script><b>evil"})
+
+    assert "</script><b>" not in page
+    assert served_facts(page) == {"voice": "</script><b>evil"}
+
+
+# --- chapter 15: the stack is chosen when the conversation starts -----------
+
+
+def stacked(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> TestClient:
+    """An app that really does offer a choice. The fakes stand in for every
+    backend (`Pool` returns an injected one for any name), so what is under
+    test is the *selection*, not the vendors."""
+    for name in (
+        "ANTHROPIC_API_KEY",
+        "DEEPSEEK_API_KEY",
+        "ASSEMBLYAI_API_KEY",
+        "ELEVENLABS_API_KEY",
+    ):
+        monkeypatch.setenv(name, "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("VOICE_AGENT_PROVIDER", "anthropic")
+    monkeypatch.setenv("VOICE_AGENT_STT", "assemblyai")
+    return TestClient(create_app(llm=llm, tts=tts, stt=stt, greeting=""))
+
+
+def test_the_page_offers_only_backends_this_deployment_has_keys_for(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Offering a backend that cannot be built is offering an error."""
+    client = stacked(llm, tts, stt, monkeypatch)
+    choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
+    assert isinstance(choices, dict)
+
+    assert [o["name"] for o in choices["llm"]] == ["deepseek", "anthropic"]
+    assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
+    assert [o["name"] for o in choices["llm"] if o["default"]] == ["anthropic"]
+    assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
+
+
+def test_the_page_says_what_each_recognizer_hears_without_holding_its_key(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Chapter 12's lesson, at the moment of choosing rather than mid-sentence."""
+    client = stacked(llm, tts, stt, monkeypatch)
+    choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
+    assert isinstance(choices, dict)
+    heard = {o["name"]: o["languages"] for o in choices["stt"]}
+
+    assert "ru" not in heard["assemblyai"]
+    assert "rus" in heard["elevenlabs"]
+
+
+def test_the_query_string_chooses_the_stack(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The socket opening is what starts a conversation, so the choice rides
+    with it."""
+    store = SessionStore()
+    stacked(llm, tts, stt, monkeypatch)  # for the environment it sets
+    client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek&stt=elevenlabs") as socket:
+        receive(socket)
+
+    assert (store.get(key).engine, store.get(key).ears) == ("deepseek", "elevenlabs")
+
+
+def test_a_reconnect_keeps_the_stack_it_started_on(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The history was produced by the engine already chosen and the prompt
+    names the ears already chosen; a reconnect that swapped either would leave
+    the agent contradicting its own transcript."""
+    client = stacked(llm, tts, stt, monkeypatch)
+    store = SessionStore()
+    client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek&stt=elevenlabs") as socket:
+        receive(socket)
+    chose = (store.get(key).engine, store.get(key).ears)
+
+    with client.websocket_connect(f"/ws/{key}?llm=anthropic&stt=assemblyai") as socket:
+        receive(socket)
+
+    assert (store.get(key).engine, store.get(key).ears) == chose
+    assert chose == ("deepseek", "elevenlabs")
+
+
+@pytest.mark.parametrize("query", ["?llm=bogus&stt=bogus", "?llm=openai", ""])
+def test_an_unknown_or_keyless_choice_falls_back_to_the_default(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch, query: str
+) -> None:
+    """A URL a stranger can type, not configuration — so it is repaired rather
+    than refused. `openai` is a real backend with no key here, which is the
+    same situation from the visitor's side."""
+    store = SessionStore()
+    for name in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "ASSEMBLYAI_API_KEY"):
+        monkeypatch.setenv(name, "sk-test")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("VOICE_AGENT_PROVIDER", "anthropic")
+    client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}{query}") as socket:
+        receive(socket)
+
+    assert store.get(key).engine == "anthropic"
+
+
+def test_the_page_names_the_model_the_deployment_would_actually_run(
+    llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Found on the deployed page: it advertised `claude-opus-5` — the
+    registry's default for the provider — beside a deployment configured for
+    `claude-haiku-4-5`. Every other fact on that screen is assembled in one
+    place precisely so the page cannot say what the server will not do, and
+    the model had slipped out of that arrangement."""
+    stacked(llm, tts, stt, monkeypatch)
+    monkeypatch.setenv("VOICE_AGENT_MODEL", "claude-haiku-4-5")
+    client = TestClient(create_app(tts=tts, stt=stt, greeting=""))
+
+    choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
+    assert isinstance(choices, dict)
+    advertised = {o["name"]: o["model"] for o in choices["llm"]}
+
+    assert advertised["anthropic"] == "claude-haiku-4-5"
+    # And the override belongs to its provider: DeepSeek keeps its own default,
+    # since asking DeepSeek for a Claude model would simply fail.
+    assert advertised["deepseek"] == "deepseek-chat"

@@ -13,7 +13,8 @@ import pytest
 
 from tests.conftest import FakeLLM
 from voice_agent.conversation import Conversation
-from voice_agent.initiative import DECLINE, Initiative, Rung, nudge_prompt, spoken_line
+from voice_agent.decline import DECLINE
+from voice_agent.initiative import Initiative, Rung, nudge_prompt, spoken_line
 
 WAIT = 2.0
 """Ceiling on any wait in this file, so a hang fails as a test rather than

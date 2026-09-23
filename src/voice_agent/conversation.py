@@ -24,6 +24,16 @@ class Conversation:
     id: str
     messages: list[Message] = field(default_factory=list)
     ended: bool = False
+    engine: str | None = None
+    ears: str | None = None
+    """Which backends this conversation runs on, chosen when it was started.
+
+    Pinned rather than re-read on every connection, because resuming a link has
+    to resume the same agent: the history below was produced by that engine,
+    and the system prompt names the languages *those* ears have. A reconnect
+    that quietly swapped either would leave the agent contradicting its own
+    transcript.
+    """
 
     def add_user(self, content: str) -> Message:
         return self._add("user", content)

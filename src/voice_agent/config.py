@@ -7,7 +7,19 @@ from pathlib import Path
 
 from voice_agent.errors import ConfigError
 
-DEFAULT_PROVIDER = "deepseek"
+DEFAULT_PROVIDER = "anthropic"
+"""The reasoning engine a conversation runs on unless it picks another.
+
+Was DeepSeek, from chapter 1 when it was the only one wired up. Moved here by
+the measurement: `--bench-llm` puts Claude Haiku 4.5 at 435 ms to first token
+against DeepSeek's 915 ms from `iad`, and ~520-580 ms against ~720-930 ms from
+Europe — faster from both places this has been run, and by more where it is
+deployed. Latency is the product; the default should be the fast one.
+
+Note that `anthropic_provider.DEFAULT_MODEL` is Opus 5, which is not the model
+that was measured. A deployment that cares sets `VOICE_AGENT_MODEL`, as
+`fly.toml` does. Choosing the project's default *model* from the bench's
+numbers is its own change, and `docs/ROADMAP.md` already lists it."""
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
 DEFAULT_EARS_PROVIDER = "assemblyai"
 
@@ -80,6 +92,15 @@ record and gitignored for the same reason. API keys are redacted on the way out
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
 
+"""The caps below are all unset by default, which means off.
+
+They exist for chapter 14, where the server acquired a public address and with
+it strangers, crawlers, and a bill. On localhost none of them should fire: the
+only person who can open a conversation is the person who started the server,
+and a development run that throttled itself would no longer be the thing that
+gets deployed. `fly.toml` turns them on. See `limits.py` for what each bounds
+and why the exposure is larger than it looks."""
+
 SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system_prompt.md"
 """Resolved relative to the source checkout. Chapter 1 assumes the server runs
 from this repo; packaging the prompt as installed data is a later concern."""
@@ -106,6 +127,10 @@ class Settings:
     trace: Path | None
     host: str
     port: int
+    max_live: int | None
+    session_budget: float | None
+    mints_per_ip: int | None
+    max_stored: int | None
 
 
 def load_settings() -> Settings:
@@ -125,11 +150,43 @@ def load_settings() -> Settings:
         initiative=_delays(os.environ.get("VOICE_AGENT_INITIATIVE", DEFAULT_INITIATIVE_DELAYS)),
         host=os.environ.get("VOICE_AGENT_HOST", DEFAULT_HOST),
         port=int(os.environ.get("VOICE_AGENT_PORT", DEFAULT_PORT)),
+        max_live=_positive_int("VOICE_AGENT_MAX_LIVE"),
+        session_budget=_positive_float("VOICE_AGENT_SESSION_BUDGET"),
+        mints_per_ip=_positive_int("VOICE_AGENT_MINTS_PER_IP"),
+        max_stored=_positive_int("VOICE_AGENT_MAX_STORED"),
     )
 
 
 def _optional_float(raw: str | None) -> float | None:
     return float(raw) if raw else None
+
+
+def _positive_int(name: str) -> int | None:
+    """A cap, or `None` for no cap. Unset and `off` both mean no cap.
+
+    Refused rather than repaired, like `_delays`: a typo in a spend ceiling is
+    exactly the kind of mistake that should stop a deployment rather than
+    quietly become an unlimited one.
+    """
+    value = _positive_float(name)
+    if value is None:
+        return None
+    if value != int(value):
+        raise ConfigError(f"{name} must be a whole number: {os.environ[name]!r}")
+    return int(value)
+
+
+def _positive_float(name: str) -> float | None:
+    raw = os.environ.get(name, "").strip()
+    if raw.casefold() in ("", "off", "none"):
+        return None
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ConfigError(f"{name} is not a number: {raw!r}") from exc
+    if value <= 0:
+        raise ConfigError(f"{name} must be positive, or 'off' for no limit: {raw!r}")
+    return value
 
 
 def _directory(raw: str) -> Path | None:
@@ -270,6 +327,25 @@ def _delays(raw: str) -> tuple[float, ...]:
     if any(a >= b for a, b in pairwise(delays)) or any(d <= 0 for d in delays):
         raise ConfigError(f"VOICE_AGENT_INITIATIVE must increase and be positive: {raw!r}")
     return delays
+
+
+def build_prompt(
+    languages: tuple[str, ...], gender: str, delays: tuple[float, ...], base: str | None = None
+) -> str:
+    """The whole system prompt for one conversation's stack.
+
+    Assembled in one place because the order is load-bearing and was previously
+    spelled out inline: everything appended here is a fact about the agent's
+    *body* rather than its character — which voice it has, which languages it
+    can hear, when its clock speaks — and all of it is fixed for as long as the
+    conversation lasts, so it sits below the part a provider caches.
+
+    Built per conversation since chapter 15, because the ears are chosen rather
+    than configured, and what the agent can hear is one of the things this says.
+    """
+    prompt = with_voice_gender(load_system_prompt() if base is None else base, gender)
+    prompt = with_languages(prompt, languages)
+    return with_initiative(prompt, delays)
 
 
 def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:

@@ -2,6 +2,12 @@
 
 A conversational AI voice agent, built from an empty page — one chapter at a time.
 
+**Try it: <https://voice-agent-chapters.fly.dev>** — pick a reasoning engine and
+a pair of ears, press **start conversation**, then just talk. Headphones help; the agent listens while it
+speaks, so you can cut it off mid-sentence. It speaks 18 languages but hears none of them as well as it
+hears English (see Chapter 12). Conversations are written down on the server,
+and the page says so before you start.
+
 ## The idea
 
 > Latency is the product. The orchestration is the asset.
@@ -115,6 +121,38 @@ for the full log and the reasoning behind each step.
   saying «я понял» — a man's form — in a woman's voice. `--voice-gender`
   (`female` by default, `male`, or `neutral`) tells it which to use, and the
   startup line shows it next to the voice so a mismatch is visible.
+- **Chapter 15 — the vendors become a choice.** The stack is picked on the start
+  screen: reasoning engine (Anthropic by default, or OpenAI or DeepSeek) and
+  ears (AssemblyAI by default, or ElevenLabs Scribe). The voice stays
+  ElevenLabs and is shown as a choice of one. The page lists only what this
+  deployment holds a key for, says which model each engine means and which
+  languages each recognizer hears. Backends are shared
+  per process, so connections stay warm; the choice is pinned to the
+  conversation, so reloading a link resumes the same agent.
+- **The agent waits to be started.** A **start conversation** screen stands in
+  front of the conversation. Loading the page used to *be* the conversation —
+  the agent greeted somebody still reading it, and then could not be heard
+  until they found the **listen** button. The click is also the gesture
+  browsers require before audio may play, without which the greeting often
+  could not play at all. The microphone is asked for in that same click, before
+  the agent says a word, and listening then starts by itself. The page says what
+  it is — the languages it hears, whether it is writing things down — beside
+  the button rather than a moment after it.
+- **Chapter 14 — off localhost.** The agent gets a public address. It ships as a
+  container and runs as one always-on machine in `iad`, behind TLS — which the
+  microphone requires, `getUserMedia` refusing to run outside a secure context.
+  Measured from Europe against a server 6,500 km away, first audio did not get
+  slower and time to first token got *faster*: the user-side hop is paid once a
+  turn, the vendor-side hops at every stage boundary, so the server belongs next
+  to the vendors. The deployed instance runs Claude Haiku 4.5 rather than the
+  project default, because `--bench-llm` re-run from `iad` put DeepSeek — served
+  from China — at 915 ms to first token against Haiku's 435 ms.
+  A public URL also brings strangers and a bill, so this chapter adds the first
+  caps this project has ever needed: conversations held at once, a per-conversation
+  time budget, new conversations per address, and a ceiling on the store. They
+  are **off unless configured**, so a local run is still the agent of chapters
+  1-13 exactly. The deployed instance writes conversations down, and the page
+  says so before anybody speaks. See [docs/DEPLOY.md](docs/DEPLOY.md).
 - **Chapter 13 — the clock, retuned.** The agent now considers speaking
   unprompted at 5, 15 and 28 seconds of silence rather than 15 and 28, and the
   first of those is a new, deliberately small move: follow through on what was
@@ -192,7 +230,8 @@ uv run --env-file .env <command>
 ## Usage
 
 ```bash
-uv run voice-agent                          # DeepSeek + AssemblyAI ears + ElevenLabs voice, on :8000
+uv run voice-agent                          # Anthropic + AssemblyAI ears + ElevenLabs voice, on :8000
+                                            # (the defaults; the start screen can pick others)
 uv run voice-agent --provider anthropic --model claude-sonnet-5
 uv run voice-agent --tts openai --voice nova
 uv run voice-agent --voice-gender male       # match how the agent refers to itself
@@ -213,8 +252,10 @@ uv run voice-agent --port 9000
 ```
 
 Open <http://127.0.0.1:8000> — you land on a fresh conversation at `/c/<key>`.
-Type, or press **listen** and talk; the agent answers out loud either way. Keep that link to come back to the same
-conversation; type `exit` to end it. Everything is in memory, so restarting the
+Press **start conversation** and talk — the microphone is asked for and turned
+on for you. Typing works too; the agent answers out loud either way. Nothing
+happens until that button is pressed: no greeting, no clock, no socket. Keep
+the link to come back to the same conversation; type `exit` to end it. Everything is in memory, so restarting the
 server clears it all.
 
 ## Development
@@ -259,6 +300,8 @@ src/voice_agent/
   conversation.py         chapter 1: Message + Conversation — the context itself
   sessions.py             chapter 1: in-memory store, one conversation per link
   config.py               chapter 1: env settings + system-prompt loading
+  limits.py               chapter 14: what a public address costs, and the caps that bound it
+  pool.py                 chapter 15: one backend per name, shared so connections stay warm
   errors.py               errors this project raises deliberately
   verify.py               the `uv run verify` quality gate
   web/                    the browser client: native ES modules, no framework, no build step
@@ -289,9 +332,44 @@ src/voice_agent/
     elevenlabs_tts.py     ElevenLabs (default): tokens in over the stream-input WebSocket
     openai_tts.py         OpenAI: whole text only, so it waits for the reply
 docs/ROADMAP.md           research notes and candidate future chapters
+docs/DEPLOY.md            chapter 14: the runbook for the public instance
+Dockerfile, fly.toml      chapter 14: the image, and the one machine that runs it
 tests/                    pytest suite; tests/web/ holds node tests for the page (`node --test`)
 .env.example              provider keys and settings
 ```
+
+## Deployment
+
+The agent runs as a container: one always-on machine, one region, one volume.
+Not a shape chosen for elegance — conversations live in the process's memory and
+the greeting's audio is cached per process, so a second instance would serve 404s
+for half the links and a machine that stops would charge its 3.1 s cold start to
+whoever arrives next. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook; `fly.toml`
+is the configuration, and its comments say why each setting is what it is.
+
+```bash
+docker build -t voice-agent . && docker run --rm -p 8000:8000 --env-file .env voice-agent
+```
+
+Which provider the deployment uses is set in `fly.toml`, not in the code: the
+fastest one is a property of where the server sits, and the bench should be
+re-run before moving region.
+
+The public instance turns on the caps in `src/voice_agent/limits.py` — how many
+conversations at once, how long one may run, how many one address may start.
+They are **off unless configured**, so nothing above behaves differently locally.
+
+### What the public instance records
+
+It writes conversations down, and says so on the page before anybody speaks.
+Per conversation, on the machine's volume: the transcript, the timings and the
+decisions (`sessions/`), and the span tree with whole prompts and replies
+(`traces/`). API keys are redacted; what was said is not. **No audio is ever
+written** — binary frames are counted and discarded.
+
+Nothing expires; `--purge-sessions` is the delete. Setting `VOICE_AGENT_SESSIONS`
+and `VOICE_AGENT_TRACE` to `off` runs it recording nothing, and the page's notice
+follows the setting rather than restating it.
 
 ## Roadmap (likely future chapters)
 
@@ -320,8 +398,10 @@ barge-in) and time to first token (~0.5–0.9 s). So, in order:
    with latency and pronunciation as gates, so later changes are measured
    rather than felt.
 4. **Cost accounting and small-model routing**, made safe by step 3.
-5. **Deployment or telephony transport.** Colocation, WebRTC, and whether the
-   server belongs in the media path become real questions here, not on localhost.
+5. **Telephony transport.** Chapter 14 took the deployment half — the server is
+   off localhost and the colocation question has real numbers now. What is left
+   is 8 kHz mono, jitter, drops and resume; WebRTC; and whether the server
+   belongs in the media path at all.
 6. **A duplex speech-to-speech backend** behind the same interface, to A/B against
    the cascade.
 

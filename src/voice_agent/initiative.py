@@ -28,10 +28,10 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
-from string import punctuation
 
 from voice_agent import trace
 from voice_agent.conversation import Conversation, Message
+from voice_agent.decline import DECLINE, is_decline
 from voice_agent.errors import VoiceAgentError
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
@@ -52,11 +52,6 @@ MAX_LINE_CHARS = 300
 very most" would otherwise deliver a paragraph nobody asked for — the worst
 failure this feature has available, since the user did not even open the
 exchange. Two long sentences fit comfortably inside this."""
-
-DECLINE = "NOTHING"
-"""What the model answers to say it has nothing worth saying. A sentinel rather
-than an empty reply, so that "the model chose silence" and "the call produced
-nothing" stay distinguishable — the first is the feature, the second is a bug."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,17 +176,13 @@ def nudge_prompt(rung: Rung, quiet: float) -> str:
 def spoken_line(reply: str) -> str | None:
     """The line to say, or `None` if the model declined.
 
-    Forgiving about how the sentinel comes back — quoted, punctuated, in a
-    sentence of its own — because a decline misread as a line is the one
-    failure that gets spoken out loud.
+    The recognition itself lives in `decline.is_decline`, because the sentinel
+    has two halves that must agree: this path, which expects it, and the
+    ordinary turn, which must never emit it. They were separate once and that
+    is exactly how `NOTHING` came to be said out loud.
     """
     line = reply.strip().strip("\"'").strip()
-    if not line:
-        return None
-    # Every kind of trailing punctuation, not a chosen few: `NOTHING?` and
-    # `NOTHING,` were read as lines and synthesised aloud, which is precisely
-    # the failure this function exists to prevent.
-    if line.strip(punctuation).strip().casefold() == DECLINE.casefold():
+    if not line or is_decline(reply):
         return None
     return line
 

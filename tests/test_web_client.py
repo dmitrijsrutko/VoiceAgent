@@ -52,6 +52,7 @@ needs_node = pytest.mark.skipif(NODE_PROBLEM is not None, reason=NODE_PROBLEM or
 
 BROWSER_GLOBALS = {
     "Array",
+    "URLSearchParams",
     "AudioContext",
     "AudioWorkletNode",
     "AudioWorkletProcessor",
@@ -253,7 +254,21 @@ def test_every_function_a_module_calls_is_defined_or_imported(module: str) -> No
 
 @pytest.mark.parametrize(
     "element",
-    ["input", "send", "listen", "mute", "log", "wrap", "form", "meta", "status"],
+    [
+        "input",
+        "send",
+        "listen",
+        "mute",
+        "log",
+        "wrap",
+        "form",
+        "meta",
+        "status",
+        "start",
+        "begin",
+        "start-notices",
+        "start-stack",
+    ],
 )
 def test_every_element_the_script_reaches_for_exists_in_the_markup(element: str) -> None:
     page = PAGE.read_text(encoding="utf-8")
@@ -356,3 +371,149 @@ def test_the_cached_token_percentage_cannot_divide_by_zero() -> None:
     """A provider that reports no usage yields a zero prompt-token count, and
     `NaN%` on screen is how you would find out."""
     assert "const pct = msg.warm_prompt_tokens" in source("app.js"), "the division is unguarded"
+
+
+def test_the_socket_is_not_opened_by_loading_the_page() -> None:
+    """The whole point of the start screen. Opening the socket *is* starting the
+    conversation — the server greets, and starts the clock that decides whether
+    to speak into a silence — so a page that opens one on load greets somebody
+    who has not said they are ready, and cannot play the greeting anyway,
+    autoplay being forbidden without a gesture."""
+    app = without_comments(source("app.js"))
+    connect = re.search(r"function connect\(\).*?\n\}", app, re.DOTALL)
+
+    assert connect, "connect() is gone"
+    assert app.count("new WebSocket(") == 1, "more than one place opens a socket"
+    assert "new WebSocket(" in connect.group(0), "the socket is opened outside connect()"
+
+
+def test_starting_gives_the_browser_its_gesture_before_anything_else() -> None:
+    """`player.resume()` must be the first statement of the click handler and
+    must not sit behind an `await`: user activation is what permits audio, and
+    it does not survive being handed to a later task. Losing it puts the page
+    back on 'click anywhere to hear the agent', which is the failure this
+    change exists to remove."""
+    app = without_comments(source("app.js"))
+    handler = re.search(r"begin\.onclick\s*=\s*async\s*\(\)\s*=>\s*\{(.*?)\n\};", app, re.DOTALL)
+
+    assert handler, "nothing handles the start button"
+    body = [line.strip() for line in handler.group(1).strip().splitlines() if line.strip()]
+    assert body[0] == "const resumed = player.resume();", f"the gesture is not first: {body[0]!r}"
+    # Awaiting *before* the resume would hand the gesture to a later task and
+    # lose it; awaiting the resume itself is what keeps the greeting from
+    # racing it.
+    gesture = body.index("const resumed = player.resume();")
+    assert not any("await" in line for line in body[:gesture]), "an await above the gesture"
+    assert "await resumed" in handler.group(1), "the resume is not waited for"
+    assert body.index("connect();") > body.index("await resumed.catch(() => {});"), (
+        "the socket opens before the audio context is running, and the greeting will race it"
+    )
+
+
+def test_the_microphone_is_asked_for_before_the_greeting_can_play() -> None:
+    """Asked on `ready`, the permission prompt appeared while the greeting was
+    already playing, and on a phone nothing is heard behind that prompt — the
+    intro was lost. The socket, which is what makes the server greet, opens
+    only once the prompt has been answered."""
+    app = without_comments(source("app.js"))
+    handler = re.search(r"begin\.onclick\s*=\s*async\s*\(\)\s*=>\s*\{(.*?)\n\};", app, re.DOTALL)
+
+    assert handler, "nothing handles the start button"
+    body = handler.group(1)
+    assert "await buildMic(" in body, "the start button no longer asks for the microphone"
+    assert body.index("await buildMic(") < body.rindex("connect();"), (
+        "the socket opens before the microphone is asked for"
+    )
+
+
+def test_a_refused_microphone_is_not_asked_for_again_over_the_greeting() -> None:
+    """Refused on the start click, the old `ready` path asked again — a second
+    prompt over the greeting on a phone, and a second error in the log."""
+    app = without_comments(source("app.js"))
+
+    assert "micRefused = true;" in app
+    assert "if (msg.ears && !micRefused) beginListening();" in app
+
+
+def test_the_utterance_being_spoken_stays_last_in_the_log() -> None:
+    """A reply to the previous utterance can start after the user has already
+    carried on; appended below the live bubble, it put the user's next words
+    above the reply they followed. Seen live on the deployed instance."""
+    ui = without_comments(source("ui.js"))
+    app = without_comments(source("app.js"))
+
+    assert "wrap.insertBefore(el, below)" in ui
+    assert app.count("pinLast(") == 3, "the live bubble is not pinned and released on every path"
+    assert 'live = add("", "msg user volatile"); pinLast(live);' in app
+
+
+def test_listening_starts_itself_once_the_agent_is_ready() -> None:
+    """Somebody who has just pressed 'start conversation' has said they are
+    ready. Making them then press 'listen' is asking twice."""
+    app = without_comments(source("app.js"))
+
+    assert "if (msg.ears && !micRefused) beginListening();" in app
+    # In the `ready` handler and nowhere earlier: that frame is what confirms
+    # the rate the microphone was built at, and that the socket can carry it.
+    auto_listen = "if (msg.ears && !micRefused) beginListening();"
+    assert app.index('msg.type === "ready"') < app.index(auto_listen)
+
+
+def test_the_page_carries_a_default_facts_block() -> None:
+    """The start screen says what beginning entails, from facts the server
+    writes into the page. Served any other way, an empty object has to leave a
+    start screen that claims nothing rather than one that throws."""
+    from voice_agent.server import FACTS_BLOCK
+
+    assert FACTS_BLOCK in PAGE.read_text(encoding="utf-8")
+    assert 'getElementById("facts")' in source("app.js")
+
+
+def test_the_chosen_stack_travels_with_the_socket() -> None:
+    """The socket opening is what starts a conversation, so the choice has to
+    be on it. A selector the server never hears is a selector that lies."""
+    app = without_comments(source("app.js"))
+    connect = re.search(r"function connect\(\).*?\n\}", app, re.DOTALL)
+
+    assert connect, "connect() is gone"
+    body = connect.group(0)
+    assert "URLSearchParams" in body and "picked(group)" in body
+    assert '"llm", "stt"' in body, "both halves of the stack must be sent"
+
+
+def test_the_languages_notice_follows_the_chosen_ears() -> None:
+    """Scribe hears 100 languages and AssemblyAI 18, and which is running is
+    the visitor's choice now — so a notice fixed at page load would describe a
+    recognizer they did not pick."""
+    app = without_comments(source("app.js"))
+
+    assert 'startStack.addEventListener("change", paintEars)' in app
+    assert "languages: <code>" in app
+
+
+def test_the_start_screen_warns_about_no_particular_language() -> None:
+    """The languages line is the fact; which of them a visitor might have
+    wanted is theirs to read off it, not a warning the page singles out."""
+    assert "russian" not in source("app.js").lower()
+
+
+def test_the_voice_is_a_group_of_one_that_is_never_sent() -> None:
+    """`openai_tts.py` exists, but it waits for the whole reply before
+    synthesising — offering it as a peer would be offering a worse agent. The
+    voice is drawn like the other two parts of the stack, with one option, and
+    the socket never carries a choice of it."""
+    app = without_comments(source("app.js"))
+    choosing = re.findall(r'choose\("(\w+)"', app)
+
+    assert choosing == ["llm", "stt", "tts"], f"the pickers changed: {choosing}"
+    assert "{ single: true }" in app, "the voice is no longer drawn as a group of one"
+    assert 'for (const group of ["llm", "stt"])' in app, "the socket now carries something else"
+
+
+def test_each_picker_draws_its_default_first() -> None:
+    """The server lists providers in registry order — DeepSeek before
+    Anthropic — which put the default on the right."""
+    app = without_comments(source("app.js"))
+
+    assert "sort((a, b) => Number(!!b.default) - Number(!!a.default))" in app
+    assert "ordered.map(" in app

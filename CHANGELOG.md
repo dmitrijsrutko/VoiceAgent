@@ -14,6 +14,663 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 15 — The vendors become a choice
+
+`AGENTS.md` opens with the claim this whole project is built to prove: **the
+orchestration is the asset, not the vendors.** Fourteen chapters have been
+written to it — `LLM`, `STT` and `TTS` are narrow protocols behind registries
+that are "the only place that knows which backends exist", and chapter 12
+collected on that by putting AssemblyAI behind the same interface as ElevenLabs
+Scribe without touching a line downstream of a transcript.
+
+A visitor could see none of it. The stack was fixed at process start, and
+changing it meant an environment variable and a restart. The claim was true in
+the code and invisible in the product.
+
+Now the start screen offers it: a **reasoning engine** (Anthropic, OpenAI,
+DeepSeek) and **ears** (AssemblyAI, ElevenLabs Scribe), chosen before the
+conversation begins. The voice stays ElevenLabs and is shown as a choice of
+one — `openai_tts.py` exists, but it waits for the whole reply before it
+begins synthesising, which would undo the two chapters spent getting the voice
+to start before the reply is written. Offering it as a peer would be offering a
+worse agent.
+
+**The registries made this small, which was the point of them.** Nothing
+downstream of the choice changed: not the turn loop, not warming, not
+speculation, not barge-in, not the record. The chapter is almost entirely about
+*where things are built* rather than what they do.
+
+**What changed**
+
+- `src/voice_agent/pool.py`: new. One backend per name, built on first use and
+  kept. Shared rather than per-conversation because `llm/http.py` holds the warm
+  HTTP connection on the adapter — handing each visitor a fresh adapter would
+  have quietly undone the chapter that found every streamed call reopening one.
+  Lazy because every adapter calls `require_env` in its constructor, so building
+  the full set would crash any deployment holding some keys and not others.
+- `src/voice_agent/llm/registry.py`, `stt/registry.py`: `KEYS`, `available()`
+  and, for the ears, `describe()`. The registries already claimed to be the only
+  place that knows which backends exist; what one *requires* is part of knowing
+  it exists.
+- `src/voice_agent/conversation.py`: a conversation remembers the stack it was
+  started on. Pinned rather than re-read per connection — the history was
+  produced by that engine and the prompt names those ears, so a reconnect that
+  swapped either would leave the agent contradicting its own transcript.
+- `src/voice_agent/config.py`: `build_prompt`, assembling what was three inline
+  calls, now per conversation. `DEFAULT_PROVIDER` moves from DeepSeek to
+  Anthropic — see below.
+- `src/voice_agent/server.py`: `facts` gained `choices`; the socket resolves the
+  stack from its query string; `lifespan` warms every available engine.
+- `src/voice_agent/web/`: two radio groups, a voice shown as a choice of one, and a
+  languages notice that follows the chosen recognizer.
+
+**Design decisions**
+
+- **The choice rides on the socket URL.** Opening the socket is already what
+  starts a conversation (chapter 14), so the stack travels with it —
+  `/ws/{key}?llm=anthropic&stt=elevenlabs`. No new protocol message, and no
+  state on the server waiting for one.
+- **An unknown or keyless name is repaired, not refused.** This is a URL a
+  stranger can type, not configuration. The rule this project applies elsewhere
+  — refuse rather than repair — exists to stop silent disagreement between what
+  was asked for and what runs, and here there is nothing silent about it: the
+  `ready` frame reports the stack that actually started and the page prints it
+  in the meta bar.
+- **The page offers only what this deployment holds a key for.** Offering a
+  backend that cannot be built is offering an error. It also means the start
+  screen honestly differs between a laptop and Fly, which it should.
+- **`VOICE_AGENT_MODEL` now belongs to its provider.** A model belongs to one
+  vendor; handing the deployment's `claude-haiku-4-5` to DeepSeek would ask for
+  a model it has never heard of. The override applies only when the chosen
+  engine is the configured default.
+- **Anthropic becomes the default engine**, replacing the DeepSeek of chapter 1.
+  Decided by `--bench-llm` rather than taste: Haiku 4.5 reaches first token in
+  435 ms against DeepSeek's 915 ms from `iad`, and ~520-580 against ~720-930 ms
+  from Europe — faster from both places this has ever been run. The project's
+  default *model* is still Opus 5, which is not what was measured; choosing that
+  from the bench is its own change and the roadmap already lists it.
+
+**A bug the rendered page caught that every test missed**
+
+The languages notice warns when a recognizer cannot hear Russian — chapter 12's
+expensive lesson, moved to the moment of choosing. Written in the page, it asked
+`langs.includes("ru")`, and so announced that **ElevenLabs Scribe cannot hear
+Russian** — the exact opposite of true, and the reason Scribe is still in this
+project.
+
+`stt/base.py` had already written the warning: *"AssemblyAI answers in
+two-letter codes, ElevenLabs in three-letter ones, and normalising them by hand
+would invent facts."* A hardcoded `"ru"` duly invented one. Scribe answers
+`rus`.
+
+The comparison now lives in `stt/registry.describe()`, which carries `russian`
+as a fact alongside the languages, because knowing which convention a backend
+answers in is that module's business and not a page's. Every Python test passed
+before and after; what found it was reading the words the browser actually put
+on screen. (The flag and the warning were later removed; see Fixes.)
+
+**And a second lie the deployed page told**
+
+Found the same way, minutes later, by reading what the live instance served:
+the start screen offered `anthropic — claude-opus-5` while `fly.toml` configures
+`VOICE_AGENT_MODEL=claude-haiku-4-5`, and the `ready` frame confirmed Haiku was
+what actually ran. The choices were being labelled from the registry's default
+for each provider rather than from the model this deployment would use.
+
+Every other fact on that screen is assembled in one place for exactly this
+reason — so the page cannot claim what the server will not do — and the model
+had slipped outside the arrangement. `facts` now takes the same resolver the
+pool does, so the label and the adapter cannot disagree. Two pages read, two
+statements found to be false: both times the page was honest about the things
+that had been given one source of truth, and wrong about the one that had not.
+
+**Latency impact**
+
+None intended, and one thing protected. `lifespan` now connects **every**
+available engine rather than only the default, because `connect` lists models
+and no provider bills for it — so choosing the non-default engine does not cost
+the 297 ms (Anthropic) to 1172 ms (DeepSeek) of DNS and TLS that the first
+request in a process pays. The pool keeps adapters shared, so connections stay
+warm between turns and between conversations exactly as before.
+
+The cost is to prompt caching: the system prompt is now built per conversation,
+so a provider's cached prefix is keyed per stack rather than per process. Within
+a conversation it is as stable as it ever was, which is what caching needs.
+
+**Deliberately not done**
+
+- No mid-conversation switching. The prompt names the ears' languages, so a swap
+  means rebuilding it and discarding the cached prefix; its own chapter if ever.
+- No model choice within a provider — the selector picks a vendor.
+- No OpenAI TTS in the selector, and no change to `openai_tts.py`.
+
+**Verification**
+
+- `uv run verify` green: 519 tests, up 26.
+- `tests/test_pool.py`: one instance per name and reused; different names are
+  different instances; nothing built until asked for; an injected fake serves
+  every name; the model override is asked per provider; availability follows the
+  environment and treats an empty key as absent; ears describable with no key at
+  all.
+- `tests/test_server.py`: the query string selects the stack; a reconnect keeps
+  what it started on and ignores a different query string; unknown, keyless and
+  absent choices all fall back to the default; the page offers only what has
+  keys.
+- Driven in a real browser against a local server, `--tts none` throughout so no
+  synthesis was spent: the selector renders both engines with their models and
+  both recognizers with their language counts; switching the ears radio moves
+  the notice from 18 languages to 100 live; starting on the *non-default* stack
+  produced a meta bar reading `anthropic · claude-opus-5 · 🎤 elevenlabs 16kHz ·
+  100 languages`, listening began by itself, and no console errors. Reading that
+  page is what found the Russian bug above.
+
+**Fixes**
+
+- The utterance still being spoken stays last in the log: a reply that started after the user had carried on was drawn below their live bubble, so their words read as said before it.
+- The microphone is asked for on the start click, before the socket opens: asked on `ready`, the prompt covered the greeting, which on a phone was not heard at all.
+- The start screen states which languages the chosen ears hear and warns about none in particular; `describe()` no longer carries a `russian` flag.
+- The start screen draws each default first, and the voice as a picker of one, so the three parts of the stack look alike.
+
+## The agent waits to be started
+
+Loading the page *was* the conversation. The socket opened at module scope, so
+arriving at a link made the server mint a session, speak its greeting and start
+the clock that decides whether to speak into a silence — at somebody who was
+still reading the page and had not found their headphones. Being *heard* then
+took a second, separate press of **listen**, which meant the agent greeted you
+out loud and then ignored you when you answered it.
+
+The two halves were wrong in opposite directions, and one button fixes both. A
+**Start conversation** screen now stands in front of the conversation. Pressing
+it is the person saying they are ready — and it is also the browser gesture that
+permits audio, which is the part that was quietly broken rather than merely
+eager: autoplay is refused without one, so the greeting frequently *could not
+play at all* and the page fell back to "click anywhere to hear the agent". A
+voice agent whose first act is to ask you to click before it can speak has
+already lost the demo. Listening then starts by itself, because somebody who has
+just said they are ready should not have to say it twice.
+
+The same screen is where the agent now says what it is. The languages notice and
+the recording notice used to arrive on connect, as dismissible notes — correct,
+but a moment late: by then the conversation had started and was already being
+written down. They are now what the button is surrounded by, so pressing it is
+an informed act rather than one explained afterwards.
+
+**What changed**
+
+- `src/voice_agent/web/app.js`: the socket is created in `connect()`, called by
+  the start button, instead of at module scope. `beginListening()` is lifted out
+  of `listen.onclick` and called from the `ready` handler — there and not in the
+  click, because `buildMic` needs the sample rate that only the `ready` frame
+  carries. Four guards that touch the socket go through one null-safe
+  `sending()`.
+- `src/voice_agent/server.py`: `facts()` — the voice, the ears and whether this
+  run writes things down — used by both the `ready` frame and, through
+  `with_facts`, the served page. The start screen has to say what beginning
+  entails before there is a socket to ask over.
+- `src/voice_agent/web/index.html`: the start screen, and an empty `#facts`
+  block for the server to fill.
+- `src/voice_agent/web/mic.js`: `warmUpMicPermission` deleted. It existed to
+  move the permission prompt to page load so the first **listen** press felt
+  instant; there is no first press any more, and prompting somebody who has
+  only opened a page was the rudest thing this client did.
+
+**Design decisions**
+
+- **The socket opening is the start; there is no `start` message.** The server
+  already does nothing until a connection arrives, so the gate costs no
+  protocol and no state. It also means an unopened page holds no slot against
+  `VOICE_AGENT_MAX_LIVE` and ticks no clock — a page that is merely *open* is
+  now free, where before it was a running conversation.
+- **The facts are written into the page, not fetched.** A second endpoint would
+  have been another round trip and a second statement of the same three things;
+  one helper feeding both paths is what keeps the page from claiming a voice the
+  server does not have.
+- **The microphone opens during the greeting, not after it.** Chapter 8 already
+  keeps the mic open while the agent speaks, so this is the existing design
+  rather than a new risk, and it means barge-in can be discovered in the first
+  two seconds instead of by accident later.
+- **Permission is asked where it is used.** Denied, the conversation starts
+  anyway, says so in the log, and leaves **listen** pressable to try again.
+
+**Latency impact**
+
+The greeting now costs one WebSocket handshake after the click, where the socket
+used to be open in advance — measured locally at 20 ms from connect to the
+greeting frame, with the audio itself served from the on-disk cache
+(`synthesis_ms 0`). Against that, the greeting now *plays*, which it often did
+not.
+
+**Deliberately not done**
+
+- `GET /` still mints on page load: the link has to exist for the page to load
+  at all, and chapter 1's "the link is the conversation" rests on it.
+- Barge-in is not suppressed during the greeting — talking over it from the
+  first second is the point.
+
+**Verification**
+
+- `uv run verify` green: 493 tests, up 10.
+- Driven in a real browser (headless Chrome over the debug protocol), against a
+  local server, with the greeting served from cache so no synthesis was spent:
+  - Before the click: the start screen renders both notices from the served
+    facts, and `performance.getEntriesByType("resource")` shows **zero**
+    `/ws/` connections. Three page loads produced **no** session records —
+    nothing starts.
+  - After it: the start screen is gone, the greeting arrives and plays, the
+    listen chip reads **⏹ stop** and the status line **· listening** without
+    anything else being pressed, and no console errors.
+  - With the microphone denied: the conversation still starts, "microphone
+    failed: Permission denied" appears in the log, typing works, and **listen**
+    is pressable.
+- **A race the browser caught and the tests could not.** `player.resume()` is
+  asynchronous, and the greeting follows the socket by ~20 ms — fast enough to
+  arrive while the resume is still in flight, where `player.chunk` reads the
+  context as "suspended" and tells the user to click to hear audio already on
+  its way. The click handler now awaits the resume before opening the socket.
+  Every structural test passed both before and after that fix; only running it
+  showed the difference.
+
+## Fix — The decline sentinel escaped into an ordinary turn
+
+Somebody said "Nothing specifically. What's on yours?" to the public instance,
+and the agent answered, out loud: **`NOTHING`**.
+
+`NOTHING` is not an answer. It is `DECLINE`, the reserved word Chapter 9 gave
+the agent for *"I have considered speaking into this pause and I would rather
+not"*. The trace of that conversation shows it exactly:
+
+```
+16:07:29.924  span=turn  parent=conversation  said="Nothing specifically. What's on yours?"
+16:07:30.419  llm.reply   text='NOTHING'   (5 output tokens)
+16:07:30.621  tts.spoken  text='NOTHING'   <- synthesised and played
+```
+
+Seven and seventeen seconds later, two `initiative.consider` spans got the same
+`NOTHING` back from the same model and have **no `tts` child at all** — the
+filter working, on the path that has one. That contrast is the whole bug.
+
+**What was actually wrong.** `prompts/system_prompt.md` told the agent how to
+decline — "reply with exactly `NOTHING`" — in the *base* system prompt, sent on
+every call. Only `initiative.spoken_line` ever checked for it. So the
+instruction was global and the enforcement was local: every ordinary turn was
+primed to emit a token that nothing downstream would catch, and the phrasing of
+`nudge_prompt` already carried the same instruction per call, making the copy in
+the base prompt redundant as well as dangerous.
+
+**Why it surfaced now, which is the uncomfortable part.** Chapter 14 switched
+the deployed provider to Haiku on the strength of a 480 ms latency win, and did
+not re-exercise a conversation on it. Measured against the provocations
+afterwards:
+
+| said to the agent | Haiku 4.5 | DeepSeek |
+| --- | --- | --- |
+| "Nothing specifically. What's on yours?" | **`NOTHING`** | "Not much — no tasks queued up…" |
+| "Nothing much, you?" | ok | ok |
+| "Nothing." | **`NOTHING`** | "No problem. I'm here whenever you need me." |
+| "I've got nothing. What do you think?" | **`NOTHING`** | "Nothing wrong with a quiet moment…" |
+
+Three in four against nought in four. The flaw is Chapter 9's and had been
+latent since it shipped; the provider choice is what fired it. A benchmark is
+not an exercise, and `--bench-llm` measures a model's speed while saying nothing
+whatever about whether it can hold this project's conversation.
+
+**What changed**
+
+- `prompts/system_prompt.md`: the sentinel is gone from the base prompt
+  entirely. The section now says outright that none of it applies to an
+  ordinary turn, and points at the bracketed note as the only place that says
+  how to decline. `nudge_prompt` already ended with the instruction, so the
+  initiative path lost nothing.
+- `src/voice_agent/decline.py`: new. `DECLINE`, `is_decline`, and `guard` — a
+  token and the two halves that have to agree about it, in one file, because
+  they were in two and that is how this happened.
+- `src/voice_agent/turn.py`: every reply now streams through `guard`.
+- `src/voice_agent/initiative.py`: `spoken_line` defers to `is_decline`.
+
+**Design decisions**
+
+- **Both a prompt change and a guard.** The prompt change alone fixes the
+  measured failure — Haiku goes 3-of-4 to 0-of-4 — and it is still only a
+  request made of a model. The guard is the guarantee, and it is fifteen lines.
+- **The guard buffers by prefix, not by reply.** Waiting for the last token to
+  check the first would undo Chapter 7, whose entire purpose is starting the
+  voice before the reply is finished. Instead the reply is held only while it
+  could still *become* the sentinel — at "Hey" that is nothing at all, at "No
+  problem" one fragment, and never more than seven characters. A mid-word space
+  counts as divergence, which a test insisted on after the first version held
+  "No " needlessly.
+- **A leak costs one extra call rather than a silence.** Saying `NOTHING` aloud
+  is bad; saying nothing at all in reply to a direct question is worse, because
+  it reads as a crash. The retry goes to the engine even when the leak came
+  from a speculation — re-running a guess would only produce the guess again.
+
+**Latency impact**
+
+None measurable. The guard yields the first fragment of an ordinary reply
+without holding it, because the first fragment almost never looks like the
+sentinel. The retry costs one full call, on an event now measured at 0 in 4.
+
+**The fix's own regression: stage directions**
+
+The first version of the prompt change caused a second leak of the same family,
+found by re-running the provocations against the live instance afterwards. Asked
+"Nothing.", the agent replied **`[I'll wait]`** — and the record shows it
+synthesised and played: `audio_end: bytes 40124 · seconds 0.836`.
+
+Removing the named sentinel had left this, in the base prompt, pointing at
+nothing:
+
+> **Saying nothing is always available to you.**
+
+An unanchored licence to say nothing, with no sanctioned way to express it. So
+the model improvised one, and reached for the format the same prompt reserves
+for the *system*: the bracketed note. `[waiting]`, `[Listening.]`,
+`[No response needed. Waiting for the user to speak.]`, and — giving the game
+away completely — `[Silence — 5 seconds]`, which is the shape of `nudge_prompt`'s
+own first line. **A reserved format is as leakable as a reserved word.**
+
+It surfaces where the model has least to go on: a history truncated by barge-in.
+Chapter 8 rewrites an interrupted reply down to what was actually heard, so a
+user who talks over the greeting leaves a three-character assistant turn in the
+context. Measured against that history, `Nothing.`, sixteen samples each:
+
+| base prompt | bracketed replies |
+| --- | --- |
+| before this chapter's change | 0 / 16 |
+| after the first version of it | **5 / 16** |
+| after the repair below | 2 / 16 |
+
+That is a regression this chapter introduced, and the middle row is the number
+that matters: a demo whose headline feature is barge-in had a one-in-three
+chance of answering a short sentence with a stage direction.
+
+**What repaired it**
+
+- `prompts/system_prompt.md`: the dangling bullet is gone — the per-call note
+  already says the agent may stay quiet, and each rung's `disposition` already
+  says how readily, so it had no remaining job here. Beside "never use
+  markdown", which is the same kind of rule, a new one: **never write a stage
+  direction**, because everything produced here is spoken and there is no
+  channel for describing oneself. It ends by naming the asymmetry directly —
+  square brackets are how the agent *is addressed*, never how it replies.
+- `src/voice_agent/decline.py`: `is_aside` — a reply whose first non-blank
+  character is `[` or `(` is not speech. Unlike the sentinel this is decidable
+  on the first fragment, so nothing is held and nothing streams before the
+  retry replaces it. The closing bracket is deliberately not looked for:
+  `[laughs] Sure` is no more speakable than `[laughs]`.
+
+The prompt alone takes it from 5-in-16 to 2-in-16 — better, and not a fix. The
+guard is what makes it zero, and this is the clearest argument the chapter
+produced for why the earlier decision to do both was right. A prompt is a
+request; only the guard is a guarantee.
+
+**Verification**
+
+- `uv run verify` green: 483 tests, up 46.
+- `tests/test_decline.py`: the sentinel recognised however it comes back;
+  ordinary answers that merely contain the word "nothing" left alone; fragments
+  keeping their shape; a sentinel arriving in pieces still caught; `No.`
+  surviving as the short answer it is.
+- Re-run against the live provider: **0 leaks in 4 provocations on Haiku**,
+  where the same script produced 3 before the change.
+- One test earned its place immediately. The first version of `guard` looped
+  over the provider's generator and yielded onward without `streams.closing`,
+  which is the precise shape that helper's own docstring warns about — and
+  `test_closing_mid_reply_stops_generating` failed with "a reply nobody will
+  receive is still being billed". A wrapper written to stop one leak had opened
+  another.
+
+## Chapter 14 — Off localhost: the agent gets a public address
+
+For thirteen chapters this has run on `127.0.0.1:8000`, and the whole thesis of
+the project — *latency is the product* — has only ever been measured with the
+browser and the server on the same machine. `docs/ROADMAP.md` §5 says so
+outright: the usual ordering for latency work is *instrument, colocate, keep
+connections warm, stream, leave the media path*, and the first four were nearly
+free here **because** there was no network. It also says the ordering "becomes
+relevant again" off localhost. This chapter is that — the deployment half of
+roadmap item 5, arriving because the AssemblyAI hackathon needs a URL and
+because the colocation argument has never been tested.
+
+The shape is one always-on machine, in one region, with a volume. That is not a
+modest start to scale from later; it is what the code already is. `SessionStore`
+holds conversations in this process's memory, so a link only means anything to
+the machine that minted it — a second instance would 404 half of them. The
+greeting's PCM is cached per process and `lifespan` pays a 3.1 s synthesis cold
+start to fill it, so a machine that stops charges that to whoever arrives next.
+And the transport is a long-lived WebSocket carrying PCM both ways, which rules
+out everything serverless before the first line of configuration. Deploying it
+as anything cleverer would have meant either lying about what it does or
+building the persistence chapter first, unasked.
+
+What a public address genuinely *required* — the only new logic here — is a set
+of caps. Not for security: `limits.py` is defeated by anyone who changes their
+address, and says so. The exposure is larger than "a stranger reads the page",
+because `GET /` mints a conversation on every load and an open socket starts the
+initiative clock, which makes a billed reasoning call at each rung of a silence.
+A crawler following one link can spend money at a rate nobody chose without ever
+saying a word. So: conversations held at once, a per-conversation time budget,
+new conversations per address, and a ceiling on the store.
+
+**What changed**
+
+- `Dockerfile`, `.dockerignore`: new. The image keeps the checkout's layout and
+  `uv sync`'s editable install, rather than installing a wheel into a slim
+  runtime, because `config.py` resolves the system prompt at
+  `Path(__file__).parents[2] / "prompts"` — true of a source tree and of nothing
+  else.
+- `fly.toml`: new. One machine that does not stop, a health check on `/healthz`,
+  a volume at `/data`, and the caps. Its comments carry the reasoning for each.
+- `src/voice_agent/limits.py`: new. `Live` (conversations at once), `MintLimit`
+  (a token bucket per address), `client_address` (who to count a request
+  against from behind a proxy), and the wording a conversation is ended with.
+- `src/voice_agent/server.py`: `/healthz` answers 200 only once the greeting is
+  synthesised and the engine connected — ready, not merely alive. The socket
+  claims a slot before accepting and releases it in a `finally` that covers the
+  whole connection. A conversation over its budget is ended *and hung up on*.
+  Refusals now `accept()` before closing (see below). The `ready` frame carries
+  whether this run is writing things down.
+- `src/voice_agent/session.py`: `end()` takes an optional `reason`, carried on
+  the existing `ended` frame and omitted when empty. No new protocol message.
+- `src/voice_agent/sessions.py`: `SessionStore` takes an optional cap and drops
+  the oldest conversation past it. Uncapped — every local run — it behaves as
+  before.
+- `src/voice_agent/config.py`: the four caps, all unset by default, refused
+  rather than repaired when malformed.
+- `src/voice_agent/web/app.js`: the dismissible note Chapter 12 built for
+  languages becomes `saidOnce`, and says two things with it — what the ears
+  understand, and that the conversation is being written down. `onclose` shows
+  the server's reason when it gave one.
+- `docs/DEPLOY.md`: new. The runbook, and what the public instance records.
+
+**Design decisions**
+
+- **Fly.io over Render, Cloud Run or a VPS.** The deciding property was the
+  region, not the price. The recognizer's commit is now the largest single term
+  in the round trip, so the server belongs next to AssemblyAI rather than next
+  to us, and that is a hypothesis worth being able to test. Everything else is a
+  Docker image on a box; the same one runs on Render unchanged if Fly disappoints.
+  Cloud Run was rejected for needing `min-instances=1` and session affinity to
+  behave like the single always-on machine this code requires — the same result
+  through more configuration.
+- **The caps are opt-in, not on by default.** The temptation was to make them
+  always-on with generous defaults. That would mean the thing developed and
+  measured on localhost is no longer the thing deployed, which is the quiet
+  divergence this project rejects everywhere else. `fly.toml` turns them on;
+  `test_limits.py` asserts they are inert otherwise.
+- **The budget hangs up as well as ending.** Ending alone leaves the socket, and
+  the slot it occupies, held by a conversation that is already over: the receive
+  loop only re-reads `conversation.ended` when another frame arrives, and a
+  browser sitting in silence sends none. The cap would then have been defeated by
+  the very conversations it was capping.
+- **Recording stays on, with the page saying so.** Off would have been the easy
+  privacy answer, and the wrong one for a demo whose point is that every decision
+  is visible. The honest version costs two things: a volume, because otherwise
+  `sessions/` and `traces/` are destroyed by each deploy and the persistence is a
+  fiction nothing announces; and a notice in the log before the first word, not a
+  policy page. The flag rides the `ready` frame and follows the setting, so the
+  page cannot claim one while the server does the other.
+- **The reason for a refusal is worth a chapter's attention.** A rate-limited or
+  turned-away visitor who sees only "disconnected" concludes the demo is broken.
+  The `ended` frame gained a `reason` rather than a new message type, because the
+  page already knows how to be told a conversation is over.
+- **The store's cap evicts rather than refuses.** Refusing to mint once full
+  would break the site for everyone the moment a crawler filled it. Dropping the
+  oldest costs an abandoned conversation its link — which is exactly what
+  restarting the server already does to every conversation.
+
+**Two bugs this chapter's own tests and smoke runs found**
+
+- **Refusing a socket before accepting it loses the reason.** `close()` before
+  `accept()` reads correctly and is what this did for thirteen chapters, but it
+  abandons the handshake: a browser gets HTTP 403, therefore close code 1006 and
+  an empty reason, indistinguishable from the network dropping. **The test client
+  surfaces the code either way**, so the unit test passed and the real thing did
+  not — found only by pointing a real WebSocket client at the running container
+  (AGENTS.md §6, exactly). Both refusals now accept and then close, and the
+  reasons are kept inside the 123 bytes a close frame allows. This also fixes the
+  `4404` path, which has been silent since Chapter 1.
+- **A token bucket that re-records its balance on every refusal never refills.**
+  Writing `(tokens, now)` back on the refusal path — to stop a caller resetting
+  its own clock — recomputes the balance from its own last estimate, so a caller
+  retrying every second adds a tenth a hundred times. Float error left a
+  one-per-ten-seconds bucket at 0.999… after a full ten seconds, refusing
+  forever. Refusals now write nothing; from an untouched `since` the refill is
+  one subtraction and one multiply however often it is asked.
+
+**Latency impact**
+
+The reason this is a chapter rather than an errand. Typed turns, so no
+recognizer in the loop; measured from a real WebSocket client, from a dev
+machine in Europe, against a server in `iad` — about 6,500 km away.
+
+| | container, same machine | deployed, `iad` |
+| --- | --- | --- |
+| Time to first token | 611–1052 ms | **488–713 ms** |
+| Question to first audio | 1897–2251 ms | **1871–2119 ms** |
+| Greeting delivered | 28–36 ms | 74–352 ms |
+
+Both columns are DeepSeek, so they compare like with like. **Moving the server
+6,500 km away from the user did not cost first-audio time, and time to first
+token improved.** That is `docs/ROADMAP.md` §5's colocation claim coming out
+ahead, and it is worth saying why rather than just that: the user-side hop is
+paid *once per turn*, while the vendor-side hops are paid at every stage
+boundary — endpointing, reasoning, synthesis — and there are more of them. Sit
+the server next to the vendors and the arithmetic favours you even when the
+person is on another continent.
+
+What the distance actually costs is visible in exactly one row. The greeting is
+synthesised at startup and served from memory, so its delivery time is the
+network and nothing else: **28–36 ms became 74–352 ms**. That is the honest
+price of the hop, and the table above is what it buys back.
+
+**The bench, re-run from the deploy region** (`--bench-llm`, 5 billed calls
+each, time to first token p50):
+
+| | from Europe (Chapter "Measurement") | from `iad` |
+| --- | --- | --- |
+| Anthropic Haiku 4.5 | ~520–580 ms | **435 ms** (332–520) |
+| DeepSeek | ~720–930 ms | **915 ms** (522–945) |
+
+DeepSeek is served from China and `iad` is the wrong side of the planet for it:
+the gap widened from ~1.5x to ~2.1x. So **the deployed instance runs Haiku**,
+set in `fly.toml` and not in the code — which provider is fastest is a property
+of where the deployment sits, and the project's own default stays DeepSeek until
+some chapter measures that question rather than this one. Re-run the bench before
+moving region.
+
+And then the finding that was not expected. Switching the deployed provider took
+time to first token from 488–713 ms to **375–550 ms**, and moved question-to-
+first-audio essentially not at all (1799–2224 ms). The ~150 ms did not vanish —
+it is absorbed by Chapter 7's first phrase, which holds the first 120 characters
+back so the voice opens on a natural clause instead of a word. For a typed turn
+that wait is now **the largest single term between the question and the sound**,
+larger than the reasoning engine it was meant to hide behind. Nothing is being
+done about it here. It is named because a number that survives a provider getting
+150 ms faster is the next thing worth attacking.
+
+**And the part of the provider swap that was not free.** Every call on the
+deployed instance reports `cached_tokens: 0`. Measured directly against the
+Anthropic API on two consecutive calls sharing a prefix: `input=2470, read=0,
+write=0` — the cache is never even *written*, so there is nothing to read.
+
+The adapter is not at fault; `cache_control` is placed correctly. **Haiku 4.5's
+minimum cacheable prefix is 4096 tokens, and this project's is about 2,470.**
+Below the minimum, caching silently does not engage — no error, no warning, a
+zero. The minimum is also not monotonic across model generations (512 on the
+newest models, 1024 on Sonnet 5, 4096 on Haiku 4.5), so "a newer model" is not a
+safe assumption in either direction.
+
+What this costs: Chapter 4's warming and Chapter 5's speculation were both built
+on a prefix the provider keeps warm, and on the deployed instance that premise is
+simply false. In practice the loss is small — Chapter 4 already measured warming
+as worth ~60-90 ms on a conversation's first turn and **~10 ms after** — and
+Haiku at 435 ms to first token without a cache still beats DeepSeek at 915 ms
+with one. So the provider choice stands. It is written down here because a
+mechanism two chapters were built around is inert in production, and a thing
+that is quietly not working is worse than one that is loudly not working.
+
+**Not measured:** everything on the spoken path. The recognizer's commit,
+barge-in detection and playback stutter over a real network all need a real
+microphone in a real browser, and none of them are claimed here.
+
+**Deliberately not done**
+
+- Persistence of conversations across restarts. `SessionStore` stays in memory,
+  and a link still dies with the process. That is its own chapter and the
+  precondition for ever running more than one machine.
+- Horizontal scaling, sticky sessions, a second region serving traffic.
+- WebRTC, telephony, and taking the server out of the media path — the other
+  half of roadmap item 5.
+- Any authentication. The decision was an open URL with caps, and the caps are a
+  spend ceiling rather than a defence.
+- Continuous deployment from CI. Deploys stay manual while the keys are live.
+
+**Verification**
+
+- `uv run verify` green: 437 tests, ruff, format, mypy strict.
+- `tests/test_limits.py`: 32 tests over the caps themselves and over the server
+  applying them, including that all four are inert when unconfigured.
+- `docker build` and `docker run --env-file .env`, then a real WebSocket client
+  against it — not the test client, which is what hid the refusal bug:
+  - `/healthz` 503 before the lifespan, 200 after.
+  - The system prompt resolved and the agent started: the failure this image
+    layout exists to prevent, and one that would have appeared at the first
+    request rather than at build time.
+  - Greeting synthesised at startup and delivered in 28–36 ms.
+  - A real typed turn end to end: DeepSeek replied, ElevenLabs returned 196–327 kB
+    of PCM, first audio at 1.9–2.3 s.
+  - `mints_per_ip=3`: three 303s then a 429 — hit for real, mid-session, by my
+    own probe script.
+  - `max_live=1`: the second socket closed with 4429 and a readable reason; a
+    made-up key with 4404 and one of its own.
+  - `session_budget=20`: ended at 20.0 s with the reason, then hung up (code
+    1000), and the slot came back.
+  - `/data/sessions` and `/data/traces` written, and still there after
+    `docker restart`. The record printed the `ended` frame's new `reason` field
+    without being taught it, which is Chapter 10's design working.
+- **Deployed and exercised**: `https://voice-agent-chapters.fly.dev`, one
+  machine in `iad`, volume mounted, health check passing.
+  - The health check did its job on the first boot: failing at 15:49:00 while
+    the greeting was being synthesised, passing at 15:49:11. Traffic was never
+    routed to a machine that would have made somebody wait for hello.
+  - Four typed turns over `wss:` through Fly's proxy, twice — once on DeepSeek
+    and once on Haiku. Numbers above.
+  - `--bench-llm` run on the machine itself, which is the only place the
+    region's numbers exist.
+  - The caps, against the public URL: mints refused with a 429 at the
+    allowance; a fifth simultaneous conversation closed with 4429 and its
+    reason, four held; `recording=True` and `claude-haiku-4-5` on the `ready`
+    frame, as configured.
+  - `/data/sessions` and `/data/traces` written on the volume, and still there
+    after a redeploy — which is the whole reason the volume is there.
+
+**Fixes**
+
+- The app is `voice-agent-chapters`; `voice-agent-demo` was taken. Fly app names
+  are unique across all of Fly.io, not per organisation.
+
 ## Chapter 13 — The clock, retuned: the agent speaks sooner, and knows when it will
 
 Chapter 9 gave the agent a clock and tuned it patient. Sat with, it is too

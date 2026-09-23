@@ -1,13 +1,13 @@
 // Wiring: the socket, the messages it carries, and the page's two controls.
 // Each module below owns one job; this file owns the state they share.
 
-import { buildMic, warmUpMicPermission } from "./mic.js";
+import { buildMic } from "./mic.js";
 import { addMarks, spokenChars } from "./karaoke.js";
 import { createPlayer } from "./player.js";
 import { interrupted, listenStart, listenStop, playback, userMessage } from "./protocol.js";
 import {
-  add, form, input, listen, meta, ms, mute, note, paintListening as paint, paintText, setEnabled,
-  status, stick, wrap,
+  add, begin, form, input, listen, meta, ms, mute, note, paintListening as paint, paintText, pinLast,
+  setEnabled, start, startNotices, startStack, status, stick, wrap,
 } from "./ui.js";
 
 const key = location.pathname.split("/").pop();
@@ -18,7 +18,8 @@ let live = null;           // the user bubble being transcribed into, if any
 let listening = false;
 let speaking = false;      // the agent's voice is audible
 let cut = null;            // the reply the user talked over; its late audio is ignored until the next reply
-let mic = null;            // { context, node, stream } once built
+let mic = null;            // { context, node, stream, rate } once built
+let micRefused = false;    // the start click asked and was refused; not asked again unprompted
 
 // Karaoke: per agent bubble, its text, each character's end time, and how far
 // the voice has got. `shown` is fixed once the reply finishes (all of it) or
@@ -58,9 +59,14 @@ function schedule(el) {
 }
 let sampleRate = 16000;
 
-const proto = location.protocol === "https:" ? "wss:" : "ws:";
-const ws = new WebSocket(`${proto}//${location.host}/ws/${key}`);
-ws.binaryType = "arraybuffer";
+// Not opened here. Opening the socket *is* starting the conversation — it is
+// what makes the server greet, and start the clock that decides whether to
+// speak into a silence — so it waits for someone to say they are ready.
+let ws = null;
+
+function sending() {
+  return ws !== null && ws.readyState === WebSocket.OPEN;
+}
 
 function paintListening() { paint(listening, speaking); }
 
@@ -71,7 +77,7 @@ function setSpeaking(active, report = {}) {
   // and a stuck hold keeps the idle timer suspended with nothing said.
   if (speaking === active) return;
   speaking = active;
-  if (ws.readyState === WebSocket.OPEN) ws.send(playback(active, report));
+  if (sending()) ws.send(playback(active, report));
   paintListening();
 }
 
@@ -110,40 +116,128 @@ function sendFrame(pcm) {
   // Full duplex: sent while the agent talks too, so the user can talk over it.
   // The browser's echo cancellation (requested in mic.js) is what keeps the
   // agent's own voice out of these frames.
-  if (listening && ws.readyState === WebSocket.OPEN) ws.send(pcm.buffer);
+  if (listening && sending()) ws.send(pcm.buffer);
 }
 
-async function prepareMic() {
+// What the server wrote into the page (`server.with_facts`). Read here rather
+// than waited for on the socket, because the start screen has to say what
+// starting entails *before* anything is opened — and the socket is the thing
+// being opened.
+function servedFacts() {
   try {
-    await warmUpMicPermission();
-    listen.disabled = false;
-  } catch (err) {
-    listen.title = "microphone blocked: " + err.name;
-    status.textContent = "· microphone unavailable";
+    return JSON.parse(document.getElementById("facts").textContent) || {};
+  } catch {
+    return {};
   }
 }
 
-// Said once, in the log, and dismissible. A recognizer handed a language it
-// does not have returns confident nonsense rather than an error, so the only
-// moment this can be cheap to learn is before anybody speaks.
-function noteLanguages(langs) {
+function notice(html) {
   const el = document.createElement("div");
-  el.className = "note";
-  el.innerHTML =
-    `The microphone understands <strong>${langs.length}</strong> languages: ` +
-    `<code>${langs.join(" ")}</code>.<br>` +
-    "Anything else is transcribed as nonsense rather than refused. " +
-    '<a href="#" id="dismiss-langs">Got it</a>';
-  // Through `stick`, like every other append: a note that does not scroll into
-  // view is a note nobody reads.
-  stick(() => wrap.appendChild(el));
-  el.querySelector("#dismiss-langs").addEventListener("click", (e) => {
-    e.preventDefault();
-    el.remove();
-  });
+  el.className = "notice";
+  el.innerHTML = html;
+  startNotices.appendChild(el);
 }
 
-ws.onmessage = (event) => {
+const ENGINE_LABELS = { anthropic: "Anthropic", openai: "OpenAI", deepseek: "DeepSeek" };
+const EARS_LABELS = { assemblyai: "AssemblyAI", elevenlabs: "ElevenLabs Scribe" };
+const VOICE_LABELS = { elevenlabs: "ElevenLabs", openai: "OpenAI" };
+
+function picked(group) {
+  return startStack.querySelector(`input[name="${group}"]:checked`)?.value ?? "";
+}
+
+// One radio group. Only what the server offered: it lists what this deployment
+// holds a key for, and a choice that cannot be built is not a choice. The
+// default is drawn first, whatever order the server's registry keeps.
+// `single` draws a group of one anyway — the voice, which is one of a kind
+// today but belongs beside the other two parts of the stack.
+function choose(group, label, options, describe, { single = false } = {}) {
+  if (options.length < (single ? 1 : 2)) return;  // nothing to choose between; the notices say what it is
+  const ordered = [...options].sort((a, b) => Number(!!b.default) - Number(!!a.default));
+  const el = document.createElement("div");
+  el.className = "pick";
+  el.innerHTML =
+    `<span>${label}</span>` +
+    ordered.map((o) =>
+      `<label><input type="radio" name="${group}" value="${o.name}"` +
+      `${o.default ? " checked" : ""}>${describe(o)}</label>`).join("");
+  startStack.appendChild(el);
+}
+
+// The languages line is rebuilt whenever the ears change, because that is the
+// fact most worth knowing before choosing and it differs most between the two:
+// Scribe hears 100 languages, AssemblyAI 18.
+function describeEars(known) {
+  const choices = known.choices?.stt ?? [];
+  const ears = choices.find((o) => o.name === picked("stt")) ?? choices[0] ?? known.ears;
+  const langs = ears?.languages ?? [];
+  if (!langs.length) return "";
+  return `It hears <strong>${langs.length}</strong> languages: <code>${langs.join(" ")}</code>.`;
+}
+
+// Both of these were dismissible notes in the log, said on connect. They are
+// the two things somebody should know *before* they decide to begin, not a
+// moment after — so they are now what the button is surrounded by.
+function describe(known) {
+  const engines = known.choices?.llm ?? [];
+  const ears = known.choices?.stt ?? [];
+  choose("llm", "Reasoning engine", engines,
+    (o) => `${ENGINE_LABELS[o.name] ?? o.name} <small>${o.model}</small>`);
+  choose("stt", "Ears", ears,
+    (o) => `${EARS_LABELS[o.name] ?? o.name} <small>${o.languages.length} languages</small>`);
+
+  // Drawn as a group of one, and never sent: the only other synthesis backend
+  // this project has waits for the whole reply before it starts, which undoes
+  // the two chapters spent getting the voice to begin before the reply is written.
+  if (known.voice) {
+    choose("tts", "Voice", [{ name: known.voice.provider, voice: known.voice.voice, default: true }],
+      (o) => `${VOICE_LABELS[o.name] ?? o.name} <small>${o.voice.slice(0, 10)}</small>`,
+      { single: true });
+  }
+
+  const heard = document.createElement("div");
+  heard.className = "notice";
+  const paintEars = () => { heard.innerHTML = describeEars(known); };
+  paintEars();
+  if (heard.innerHTML) startNotices.appendChild(heard);
+  startStack.addEventListener("change", paintEars);
+
+  if (!known.ears) notice("This agent has <strong>no microphone</strong> — typing only.");
+  if (!known.voice) notice("This agent is <strong>silent</strong> — it will not speak.");
+  if (known.recording) {
+    notice(
+      "This conversation is <strong>written down on the server</strong> — what is said, " +
+      "what is typed, and how long each part took.<br>No audio is ever stored.");
+  }
+}
+
+function connect() {
+  // The stack rides with the socket, because opening it is what starts the
+  // conversation. Ignored by the server on a reconnect, which keeps whatever
+  // this conversation was started on.
+  const stack = new URLSearchParams();
+  for (const group of ["llm", "stt"]) {
+    const value = picked(group);
+    if (value) stack.set(group, value);
+  }
+  const query = stack.toString();
+  ws = new WebSocket(
+    `${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws/${key}` +
+    (query ? `?${query}` : ""));
+  ws.binaryType = "arraybuffer";
+  ws.onmessage = onMessage;
+  // The server's reason, when it gave one. A refusal at the door — no such
+  // conversation, or too many of them at once — otherwise looks exactly like
+  // the network dropping, which is the one thing it is not.
+  ws.onclose = (event) => {
+    status.textContent = "· disconnected";
+    setEnabled(false);
+    if (event.reason) add(event.reason, "note");
+  };
+  ws.onerror = () => { status.textContent = "· connection error"; };
+}
+
+function onMessage(event) {
   if (event.data instanceof ArrayBuffer) {
     // Binary frames only ever arrive between `audio_start` and `audio_end`.
     player.chunk(event.data);
@@ -161,10 +255,27 @@ ws.onmessage = (event) => {
     // The codes themselves on hover: too long for the bar, and the count alone
     // is enough to make someone look before they speak.
     meta.title = langs.length ? `heard: ${langs.join(" ")}` : "";
-    if (langs.length) noteLanguages(langs);
     sampleRate = msg.ears ? msg.ears.sample_rate : 16000;
+    // Built before the socket at the rate the page expected. Should the server
+    // disagree, a microphone at the wrong rate would pitch every word it sends.
+    // The rate *asked for*, not the context's: a browser that does not honour
+    // the request would otherwise reopen the microphone on every start.
+    if (mic?.rate && mic.rate !== sampleRate) {
+      mic.stream.getTracks().forEach((t) => t.stop());
+      mic.context.close();
+      mic = null;
+    }
     if (msg.voice) player.setRate(msg.voice.sample_rate);
-    if (msg.ears) prepareMic();
+    // Enabled before the attempt, not after it: a microphone that was refused
+    // or is busy must leave a way to try again, and the conversation carries
+    // on by typing either way.
+    listen.disabled = !msg.ears;
+    // The whole point of the button that opened this socket — somebody who has
+    // just said they are ready should not have to say it twice.
+    // Unless the start click was just refused: asking again here put a second
+    // prompt over the greeting, and a second "microphone failed" in the log.
+    // The listen button is still there to try again.
+    if (msg.ears && !micRefused) beginListening();
     for (const m of msg.history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
     if (msg.ended) { add("This conversation has ended.", "note"); setEnabled(false); }
     else setEnabled(true);
@@ -237,7 +348,7 @@ ws.onmessage = (event) => {
     // audio of this reply still in flight is ignored until the next one starts.
     cut = reply;
     player.stop((playedMs) => {
-      if (ws.readyState !== WebSocket.OPEN) return;
+      if (!sending()) return;
       // Less what is still on its way to the speaker: pulled from the queue is
       // not the same as out of the speaker.
       const latency = (player.outputLatency?.() ?? 0) * 1000;
@@ -279,7 +390,7 @@ ws.onmessage = (event) => {
 
   } else if (msg.type === "transcript") {
     if (!msg.text.trim() && !msg.final) return;
-    if (!live) live = add("", "msg user volatile");
+    if (!live) { live = add("", "msg user volatile"); pinLast(live); }
     stick(() => { live.textContent = msg.text; });
     if (msg.final) {
       live.classList.remove("volatile");
@@ -303,6 +414,7 @@ ws.onmessage = (event) => {
         note(live, `🔥 warmed ${msg.warms}× · ${msg.warm_cached_tokens}/${msg.warm_prompt_tokens} tokens already cached (${pct}%) · last one ${ms(msg.warm_lead_ms)} before the turn ended`);
       }
       live = null;
+      pinLast(null);
     }
 
   } else if (msg.type === "transcript_dropped") {
@@ -311,7 +423,7 @@ ws.onmessage = (event) => {
     // downstream ever saw it, and leaving it behind is worse than cosmetic —
     // the *next* utterance would be written into it, appearing wherever this
     // one was rather than at the end of the conversation.
-    if (live) { stick(() => live.remove()); live = null; }
+    if (live) { stick(() => live.remove()); live = null; pinLast(null); }
 
   } else if (msg.type === "initiative") {
     // Every consideration, spoken or not. The declines are the point: an agent
@@ -356,19 +468,16 @@ ws.onmessage = (event) => {
     setEnabled(true);
 
   } else if (msg.type === "ended") {
-    add("Conversation ended. Reload to start a new one.", "note");
+    add(msg.reason || "Conversation ended. Reload to start a new one.", "note");
     setEnabled(false);
   }
-};
+}
 
-ws.onclose = () => { status.textContent = "· disconnected"; setEnabled(false); };
-ws.onerror = () => { status.textContent = "· connection error"; };
-
-listen.onclick = async () => {
-  if (listening) {
-    ws.send(listenStop());
-    return;
-  }
+// Shared by the button and by the start of a conversation, which want exactly
+// the same thing. `sampleRate` is only known from the `ready` frame, so this
+// can never run before one has arrived — which is why starting to listen is
+// triggered there rather than in the click that opened the socket.
+async function beginListening() {
   listen.disabled = true;
   try {
     player.resume();  // a gesture: the one moment autoplay is allowed
@@ -376,16 +485,67 @@ listen.onclick = async () => {
     await mic.context.resume();
     ws.send(listenStart());
   } catch (err) {
+    // In the log, not the status line: `paintListening` repaints that on every
+    // change of listening or speaking, so the one message explaining why
+    // nobody can be heard would be wiped by the next one.
     add("microphone failed: " + err.message, "error");
   } finally {
     listen.disabled = false;
   }
+}
+
+listen.onclick = () => (listening ? ws.send(listenStop()) : beginListening());
+
+begin.onclick = async () => {
+  // First, and with nothing awaited above it: this is the user gesture, and it
+  // is the only moment the browser will allow audio to start. Everything else
+  // here can happen a tick later; this cannot.
+  const resumed = player.resume();
+  start.remove();
+  add("Just talk — it is already listening. Or type. Say or type “exit” to end.", "note");
+  // Awaited *before* the socket opens, because the greeting follows it by about
+  // 20 ms — comfortably fast enough to beat a resume that has been asked for
+  // but has not finished. `player.chunk` would then see a context still reading
+  // "suspended" and tell the user to click to hear audio that was already on
+  // its way, which is the exact complaint this whole screen exists to end.
+  // Swallowed rather than guarded: a refusal here is reported when the audio
+  // actually fails, and must not cost the conversation.
+  await resumed.catch(() => {});
+  // The microphone is asked for before the conversation exists, not on `ready`.
+  // Asked after, the permission prompt appeared while the greeting was already
+  // playing — and on a phone nothing is heard behind that prompt, so the intro
+  // was lost to it. Refused or failed, the conversation still starts: typing
+  // works, and the listen button stays there to try again.
+  const rate = earsRate(servedFacts());
+  if (rate) {
+    try {
+      mic = { ...(await buildMic(rate, sendFrame)), rate };
+    } catch (err) {
+      micRefused = true;
+      add("microphone failed: " + err.message, "error");
+    }
+    // Opening the microphone can make the system pause playback (iOS switches
+    // its audio session); resuming again is free when nothing was paused.
+    await player.resume().catch(() => {});
+  }
+  connect();
 };
+
+// The rate the chosen ears will ask for, so the microphone built before the
+// socket opens is the one `ready` would have built. Null when there are none.
+function earsRate(known) {
+  const choices = known.choices?.stt ?? [];
+  const ears = choices.find((o) => o.name === picked("stt")) ?? choices[0] ?? known.ears;
+  return ears?.sample_rate ?? null;
+}
+
+describe(servedFacts());
+setEnabled(false);
 
 form.onsubmit = (event) => {
   event.preventDefault();
   const text = input.value.trim();
-  if (!text || ws.readyState !== WebSocket.OPEN) return;
+  if (!text || !sending()) return;
   add(text, "msg user");
   // The words go first. Everything after is audio, and a browser that refuses
   // the output context (one without a requested sample rate) throws here —

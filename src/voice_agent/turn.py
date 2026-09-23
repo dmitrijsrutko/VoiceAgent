@@ -14,6 +14,7 @@ from collections.abc import AsyncIterator
 
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation, Message
+from voice_agent.decline import guard
 from voice_agent.errors import VoiceAgentError
 from voice_agent.heard import Spoken
 from voice_agent.llm import LLM
@@ -83,11 +84,18 @@ async def run_turn(
         # Everything after this point is identical either way, which is the point:
         # a turn does not know whether its reply was guessed at.
         usage = usage if usage is not None else Usage()
-        source = (
-            fragments
-            if fragments is not None
-            else engine.stream(system_prompt, conversation.messages, usage)
-        )
+
+        def ask() -> AsyncIterator[str]:
+            return engine.stream(system_prompt, conversation.messages, usage)
+
+        # Guarded whichever of the three sources the words come from. A
+        # speculation claimed before the question finished is the same model
+        # answering the same prompt, so it can leak the sentinel the same way;
+        # an unprompted line cannot, having already passed `spoken_line`, and
+        # is guarded anyway rather than given an exception to carry around.
+        # The retry always goes to the engine — re-running a guess would only
+        # produce the guess again.
+        source = guard(fragments if fragments is not None else ask(), ask)
         try:
             async with closing(source) as fragments:
                 async for fragment in fragments:

@@ -23,6 +23,10 @@ from voice_agent.errors import ProviderError
 from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, Warmth
 from voice_agent.llm.http import http_client, record_call
 
+ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
+"""Named once, so `registry.KEYS` can say what this backend needs without
+restating it. The OpenAI-compatible backends carry theirs on their spec."""
+
 DEFAULT_MODEL = "claude-opus-5"
 
 EFFORT: OutputConfigParam = {"effort": "low"}
@@ -70,7 +74,7 @@ class AnthropicLLM:
         self.provider = "anthropic"
         self.model = model or DEFAULT_MODEL
         self._client = client or AsyncAnthropic(
-            api_key=require_env("ANTHROPIC_API_KEY"),
+            api_key=require_env(ANTHROPIC_API_KEY),
             http_client=http_client(DefaultAsyncHttpxClient),
         )
 

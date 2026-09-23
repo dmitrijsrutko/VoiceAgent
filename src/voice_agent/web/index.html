@@ -58,7 +58,29 @@
   .msg.volatile { opacity: .55; font-style: italic; }
   .note.think { opacity: .45; font-size: 11.5px; font-style: italic; }
   .unheard { opacity: .4; }
+  /* The start screen: what this is, what it will do, and the one button that
+     begins it. Removed from the page once pressed. */
+  #start { align-self: center; text-align: center; max-width: 34em; padding: 28px 0 8px; }
+  #start h1 { font-size: 17px; margin: 0 0 6px; }
+  #start p { color: var(--muted); font-size: 13.5px; margin: 0 0 10px; }
+  #start .notice { font-size: 13px; color: var(--muted); margin: 10px 0; }
+  #start .notice strong { color: var(--fg); }
+  #begin { margin-top: 14px; padding: 12px 26px; font-size: 15px; }
+  /* The stack this conversation will run on. Radios rather than a dropdown:
+     the whole point is that the alternatives are visible. */
+  .pick { margin: 14px 0; text-align: left; }
+  .pick > span { display: block; font-size: 12px; color: var(--muted); margin-bottom: 5px; }
+  .pick label {
+    display: inline-flex; align-items: baseline; gap: 6px; cursor: pointer;
+    padding: 6px 11px; margin: 0 6px 6px 0; border: 1px solid var(--line); border-radius: 10px;
+  }
+  .pick label:has(:checked) { border-color: var(--fg); }
+  .pick label small { color: var(--muted); font-size: 11.5px; }
 </style>
+<!-- What this agent is, written in by the server (`server.with_facts`). The
+     start screen has to say what beginning entails before there is a socket
+     to ask over; an empty object means a page served some other way. -->
+<script id="facts" type="application/json">{}</script>
 </head>
 <body>
   <header>
@@ -71,7 +93,14 @@
   </header>
 
   <div id="log"><div class="wrap" id="wrap">
-    <div class="note">Type, or press <strong>listen</strong> and talk — the agent answers out loud.<br>Say or type <code>exit</code> to end the conversation.</div>
+    <div id="start">
+      <h1>A conversational voice agent</h1>
+      <p>It speaks, it listens while it speaks, and you can talk over it.</p>
+      <div id="start-stack"></div>
+      <div id="start-notices"></div>
+      <button type="button" id="begin">Start conversation</button>
+      <p style="margin-top:10px;">Your microphone will be asked for, and turned on.</p>
+    </div>
   </div></div>
 
   <form id="form">
