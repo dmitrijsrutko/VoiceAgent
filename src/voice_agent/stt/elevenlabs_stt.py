@@ -21,7 +21,7 @@ import websockets
 from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import Transcript, batched
 
 ENDPOINT = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 DEFAULT_MODEL = "scribe_v2_realtime"
@@ -217,7 +217,7 @@ class ElevenLabsSTT:
             )
 
         async def pump(socket: websockets.ClientConnection) -> None:
-            async for data in audio:
+            async for data in batched(audio, self.sample_rate):
                 await socket.send(chunk(data, commit=False))
             # The audio ran out mid-utterance (the user stopped listening rather
             # than stopping speaking), so commit explicitly instead of waiting

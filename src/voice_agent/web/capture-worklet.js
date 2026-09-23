@@ -1,8 +1,9 @@
 // Runs on the audio thread. Converts float samples to the PCM16 the recognizer
-// wants and posts them in ~100 ms chunks (1600 samples at 16 kHz) rather than
-// the 128-sample blocks the audio graph delivers.
+// wants and posts them in 32 ms frames (512 samples at 16 kHz): one VAD window
+// each, so the server hears a pause a window late rather than a 100 ms buffer
+// late. The server regroups them into larger chunks for the recognizer.
 class Capture extends AudioWorkletProcessor {
-  constructor() { super(); this.buf = new Int16Array(1600); this.n = 0; }
+  constructor() { super(); this.buf = new Int16Array(512); this.n = 0; }
   process(inputs) {
     const ch = inputs[0][0];
     if (!ch) return true;

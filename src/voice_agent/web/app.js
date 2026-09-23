@@ -1,6 +1,7 @@
 // Wiring: the socket, the messages it carries, and the page's two controls.
 // Each module below owns one job; this file owns the state they share.
 
+import { paintFloor, record as recordFloor } from "./floor.js";
 import { buildMic } from "./mic.js";
 import { addMarks, spokenChars } from "./karaoke.js";
 import { createPlayer } from "./player.js";
@@ -10,7 +11,7 @@ import {
   audioLine, committedLine, gapsLine, initiativeLine, replyLines, truncatedLine, unpromptedLine,
 } from "./telemetry.js";
 import {
-  add, begin, details, form, input, listen, meta, mute, note, paintListening as paint, paintText,
+  add, begin, details, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
   pinLast, setEnabled, start, status, stick,
 } from "./ui.js";
 
@@ -23,6 +24,7 @@ let listening = false;
 let speaking = false;      // the agent's voice is audible
 let cut = null;            // the reply the user talked over; its late audio is ignored until the next reply
 let mic = null;            // { context, node, stream, rate } once built
+const floorEvents = [];   // the floor by the server's VAD, for the strip
 let micRefused = false;    // the start click asked and was refused; not asked again unprompted
 
 // Karaoke: per agent bubble, its text, each character's end time, and how far
@@ -276,9 +278,14 @@ const handlers = {
 
   initiative(msg) { add(initiativeLine(msg), "note think telemetry"); },
 
+  floor(msg) { recordFloor(floorEvents, msg, performance.now()); },
+
   listening(msg) {
     listening = msg.active;
     paintListening();
+    // A new session starts its floor from nothing; the old one's last state
+    // would otherwise keep being painted, growing, with nobody listening.
+    if (!msg.active) { floorEvents.length = 0; floor.replaceChildren(); }
     if (msg.reason) add(msg.reason + " — press listen to resume", "note");
   },
 
@@ -394,3 +401,9 @@ form.onsubmit = (event) => {
     add("audio unavailable: " + err.message, "error");
   }
 };
+
+// The strip moves with time, not only with events: a pause grows while nothing
+// arrives. Painted only while it can be seen.
+setInterval(() => {
+  if (floorEvents.length && details.checked) paintFloor(floor, floorEvents, performance.now());
+}, 100);

@@ -296,6 +296,45 @@ than what was documented.
 
 ---
 
+### J. Cooperative interjection: the sparring partner
+
+The agent stops only answering and starts leading. It drives, steers, asks the
+sharper question, and cuts in when it's worth it. Background thinking lives in
+`prompts/interjecting_agent_prompt.md`; this is the design it led to.
+
+- **The relationship licenses the interruption.** The first role is a general
+  sparring partner: the user sets a topic and a goal, and so opts in to being
+  interrupted. Roles are data (prompt files) with a license, triggers, and an
+  **assertiveness dial**. Patient: one "hm?" then wait. Normal: one "sorry—"
+  then yield. Assertive: persist until the user stops. Firm, never insulting.
+- **Self-repair first; false positives cost more than misses.** The cheap end of
+  the ladder (backchannel, a marked "hm?", a recast) should carry most of the
+  value. Hard interrupts are the exception.
+- **Three loops at three speeds.** *Perceive* (32 ms: VAD floor state, Ch 16).
+  *Think* (on each stable-prefix update: a dedicated fast model keeps running
+  notes and at most **one pending thought**, with type, urgency 0–3, a
+  one-line *why*, and a draft line, as in Inner Thoughts, Liu et al., CHI 2025).
+  *Act* (deterministic code: urgency × opening × dial × budget → silent,
+  backchannel, take the next opening, cut in, or yield). The thinker never
+  decides timing and the actor never decides content. A separate lightweight
+  turn controller with a style dial is also where the 2026 full-duplex work
+  landed; even trained, interruptive-take F1 is ~0.6, so the controller stays
+  simple and the dial stays explicit.
+- **Sounding like a person cutting in.** Flash v2.5 has no audio tags, and
+  `eleven_v3` has them (`[interrupting]`) but isn't real-time. So: a bank of
+  v3 openers ("mm—", "wait, wait—", "sorry, can I stop you there—"),
+  synthesised once and cached like the greeting. The body streams on Flash
+  behind the opener, which hides its latency the way people do.
+- **Ch 8 needs a new state.** "The user kept talking over my interjection" is not
+  "the user interrupted my turn".
+- **Offline evaluation** as the benchmarks do it (Full-Duplex-Bench, HumDial):
+  scripted scenarios with labelled error windows. Fire inside the window, stay
+  silent on clean scripts, and count thoughts computed but never spoken.
+
+Chapters: **16** ears that hear pauses (shipped) · **17** the inner voice,
+thoughts shown but not spoken · **18** cut in at a pause · **19** speak over,
+with the dial · **20** lead: an agenda and a goal state for the whole session.
+
 ## 3. Candidate chapter order
 
 Not a commitment — the order will change as earlier chapters teach us things.
@@ -308,22 +347,21 @@ bench with connections kept between turns. The original list put measurement
 fifth and speculation eleventh; in practice instrumentation grew chapter by
 chapter, and speculation came early because it was cheap to try.
 
-**Where the time goes now**, measured: the recognizer takes 1.3 s from the end
-of speech to a committed turn and 0.85–1.6 s to notice barge-in; time to first
+**Where the time goes now**, measured: the recognizer takes ~1.0 s (AssemblyAI)
+or 1.8–1.9 s (Scribe) from the end of speech, as the Chapter 16 VAD hears it, to
+a committed turn, and 0.85–1.6 s to notice barge-in; time to first
 token is ~0.5–0.9 s depending on provider; first audio after the first words is
 164–313 ms; connection setup is ~0 per turn. Network hops are not a significant
 term here (see §5).
 
 **Next, in order:**
 
-1. **A voice detector in the page** — Silero or WebRTC VAD on the capture
-   worklet's frames. Barge-in in a few hundred milliseconds, a true end-of-speech
-   timestamp (the one number the project still cannot measure from inside), no
-   recognizer billing for silence, and a way to see self-interruption from echo.
-   The trigger-happy detector §2B and §5 argue for.
+1. **The sparring partner** (§2J), chapters 17–20. The voice detector this
+   list used to open with shipped in Chapter 16, on the server rather than in
+   the page. VAD-triggered barge-in follows once echo is checked.
 2. **Semantic turn detection** — our own end-of-turn decision from VAD silence
    plus transcript completeness, instead of waiting for the vendor's commit.
-   Reports FEC / MSC / OVER / NDS. Needs 1.
+   Reports FEC / MSC / OVER / NDS. Builds on Chapter 16's VAD.
 3. **Golden conversation suite** — replay scripted audio (Chapter 8's scripted
    client already does this) with latency and pronunciation gates.
 4. **Cost accounting** — per-call cost sheet; small-model routing, gated by 3.

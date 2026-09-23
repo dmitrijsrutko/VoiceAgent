@@ -86,3 +86,14 @@ test("a voice that arrived late says how late, and where", () => {
   assert.ok(!audioLine({ ...base, late_ms: 120 }).includes("late"));
   assert.ok(audioLine({ ...base, late_ms: 2300, late_after: "Достоевский —" }).endsWith("⚠ voice 2.3 s late after “Достоевский —”"));
 });
+
+test("a commit is timed from when the VAD heard you stop, when it did", () => {
+  const line = committedLine({ endpoint_ms: 400, speech_end_ms: 1300, first_words_ms: 900 });
+  assert.match(line, /committed 1\.3 s after you stopped speaking · 400 ms after your last recognised word/);
+  assert.match(line, /first words shown 900 ms after you began/);
+});
+
+test("without the VAD, a commit keeps the recognizer's own clock", () => {
+  const line = committedLine({ endpoint_ms: 400, speech_end_ms: null, first_words_ms: null });
+  assert.equal(line, "🎙 committed 400 ms after your last recognised word");
+});

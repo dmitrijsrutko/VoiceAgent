@@ -341,6 +341,10 @@ Rules that follow from it:
   `ASYNC` ruff rules are on and will catch the obvious cases.
 - Providers live behind narrow protocols (`STT`, `LLM`, `TTS`, `Transport`).
   Vendor SDK types must not leak past the adapter that wraps them.
+- **Check live vendor docs before writing adapter code.** APIs change; memorized
+  parameter names go stale. Start from `docs/vendor/` (`AssemblyAI.md`,
+  `ElevenLabs.md`), then fetch the vendor's `llms.txt` — e.g.
+  `https://elevenlabs.io/docs/llms.txt`, `https://www.assemblyai.com/docs/llms.txt`.
 - **No inline comments that restate the code.** Comment only genuinely
   non-obvious *why*: a constraint, an API quirk, a sample-rate gotcha, a
   deliberate trade-off. Those comments are valuable — write them.

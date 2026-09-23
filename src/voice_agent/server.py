@@ -35,7 +35,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
-from voice_agent import trace
+from voice_agent import trace, vad
 from voice_agent.channel import Channel
 from voice_agent.config import Settings, build_prompt, load_settings
 from voice_agent.conversation import Conversation, Message
@@ -237,9 +237,11 @@ def create_app(
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         # Before anyone is waiting: the first synthesis in a process takes
         # seconds, and every offered engine's first request pays DNS and TLS
-        # (`connect` only lists models, which nobody bills).
+        # (`connect` only lists models, which nobody bills). The VAD model loads
+        # here too, off the loop, rather than inside the first user's `listen`.
         await asyncio.gather(
             agent.opening.prepare(),
+            asyncio.to_thread(vad.load),
             *(connect(agent.pool.engine(name)) for name in stack.engines),
         )
         agent.ready = True

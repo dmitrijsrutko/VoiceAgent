@@ -14,6 +14,123 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 16 — Ears that hear pauses: the agent knows who holds the floor
+
+This is the first step toward a sparring partner that leads the conversation
+and cuts in when it's worth it, not only when it's asked. Cutting in well is
+about timing: a human leaves a 200–500 ms opening, and the recognizer only
+reports the end of speech 1–2 s later. Everything that follows (the background
+thinker, speaking into a pause, speaking over the user) needs a faster signal.
+So this chapter builds only that signal, and measures it. The agent says
+nothing new.
+
+A Silero VAD now runs on the server over the audio the page already sends. It
+turns each 32 ms window into a **floor state**: `speaking`, `micro_pause`
+(≥ 200 ms), `pause` (≥ 600 ms) or `yielded` (≥ 1.5 s). The state goes to the
+page as a live strip and to the trace, and it times each commit from when the
+user actually stopped.
+
+**What changed**
+- `vad.py` (new): Silero VAD v5 through onnxruntime, with the model vendored
+  in `models/` (MIT, 2.3 MB). One session per process, recurrent state per
+  conversation, frames of any size cut into 512-sample windows.
+- `floor.py` (new): the state machine. It uses audio time rather than the
+  clock, so the same audio always gives the same states, and it has hysteresis
+  on both edges.
+- `mic.py`: every page frame also goes to the VAD, off the event loop, in
+  arrival order. Floor changes are sent as `floor` frames and carry whether the
+  agent's reply was playing, so echo can be told apart. A committed transcript
+  now carries `speech_end_ms` (the VAD's stop → commit) and `first_words_ms`
+  (the VAD's onset → first partial).
+- `capture-worklet.js`: 32 ms frames instead of 100 ms, one VAD window each.
+  `stt/base.batched` regroups them into the same 100 ms chunks both
+  recognizers received before. AssemblyAI closes the socket on chunks under
+  50 ms.
+- Page: `floor.js` draws the last 12 s as a strip under the header, behind
+  **details**. Silences are labelled with their length, and speech heard while
+  the agent talks is shown red. The line under a commit now leads with the
+  VAD's timing.
+- `record.py`: floor frames stay out of the Markdown record. The trace keeps
+  them.
+- `server.py`: the model loads at startup, off the loop, next to the greeting,
+  so the first person to press listen doesn't pay for it.
+
+**Design decisions**
+- **On the server, not in the page** (ROADMAP §3 said the page). The audio
+  already passes through the server, so there is one implementation, it runs
+  under pytest, and the actor that uses it will live here too. The page would
+  only have saved the network hop.
+- **Silero over webrtcvad or an energy gate.** Silero is robust to noise and to
+  AGC-boosted rooms, with no torch needed. On the fixture: 0.11 ms per window,
+  starts exact and ends 15–47 ms late.
+- **States, not probabilities, on the wire.** The states are the words the next
+  chapters will time interjections against. Thresholds are named constants with
+  their reasons; there is no configuration surface until something needs one.
+- **The frame shrank, the chunk didn't.** The recognizers see exactly what they
+  saw before. Only the VAD sees the finer grain.
+
+**Latency impact**
+Measured by streaming `tests/fixtures/pause.wav` in real time to a local server
+(5 sessions):
+
+| Ears | Stop → commit (VAD) | Old `endpoint_ms` | Onset → first words |
+|---|---|---|---|
+| AssemblyAI (3 runs) | 977–985 ms | 1216–1317 ms | 625–629 ms |
+| Scribe (2 runs) | 1795–1938 ms | 672–711 ms | 2134–2210 ms |
+
+The floor calls a `micro_pause` 224 ms after the stop and a `pause` 608 ms
+after it. That is **~750 ms ahead of AssemblyAI's commit and ~1.6 s ahead of
+Scribe's**. On Scribe, the old clock understated the wait by over a second. On
+AssemblyAI it read *higher* than the VAD's. That means the last new word
+arrived ~300 ms before the VAD heard the speech end, which is **unexplained**.
+One suspect: the fixture says the same phrase twice, and the model may finish
+the second one early. A recording without repetition should settle it.
+
+- VAD inference: 0.11 ms per 32 ms window, off the loop. Loading the model
+  adds ~39 MB peak RSS (macOS; Linux not measured).
+- Effect on reply latency: **not measured**. Nothing on the reply path waits
+  on the VAD, but the extra frames and `floor` messages share the loop.
+
+**Deliberately not done**
+- No new speech, no thinker, no roles. Those are chapters 17–20 (ROADMAP §2J).
+- The clock (`initiative.py`) still measures silence from the recognizer. Moving
+  it to the VAD changes behaviour, so it gets its own entry.
+- Barge-in is not VAD-triggered yet, although it could be ~1 s faster. The echo
+  check below has to come first.
+- No pitch, breath or filled-pause cues. The floor is speech or not speech.
+- A planned VAD-backed `quiet_for` was left out: nothing reads it yet.
+- The VAD handles 16 kHz only. Ears at another rate go without a floor.
+
+**Verification**
+- `uv run verify`: 547 tests pass. New: `test_floor.py`, `test_vad.py`
+  (against a checked-in recording with labelled speech, ±64 ms), floor frames
+  through `Mic`, and the strip and commit line in node.
+- Five live sessions as above; floor frames reached the client and the trace
+  with no errors. The client was a script, not a browser.
+- A review pass before commit fixed four defects in the new bookkeeping:
+  - An onset heard but never transcribed (a cough, echo) dated the next
+    utterance.
+  - An empty commit or a reconnect froze the first-words measure.
+  - The strip kept painting after listening stopped.
+  - A restarted session reset a detector a worker thread could still be using.
+    It now gets a fresh one.
+  Each has a test, except the strip, which is DOM-bound.
+- **Not yet checked: echo.** Whether browser AEC leaves enough of the agent's
+  voice for the VAD to call `speaking` needs a real speaker and microphone. The
+  strip shows it in red if it happens.
+
+## Docs — ElevenLabs reference for coding agents
+
+Not a chapter, and no code changes. AssemblyAI ships one coding-agent prompt
+(`docs/vendor/AssemblyAI.md`). ElevenLabs ships no such file. Its guidance is
+split between `llms.txt` and the `elevenlabs/skills` repo.
+`docs/vendor/ElevenLabs.md` now indexes both and pins a snapshot of four
+skills (speech-to-text, text-to-speech, speech-engine, agents) under
+`docs/vendor/elevenlabs/`. It also records why the managed Speech Engine and
+Agents runtimes don't fit an agent that interjects: they own turn-taking and
+only answer the user. AGENTS.md §8 gains one rule: check live vendor docs
+before writing adapter code.
+
 ## Simplification — a review, and less to carry
 
 Not a chapter: a review of the requirements, the architecture and the code,

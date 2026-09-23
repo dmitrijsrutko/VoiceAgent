@@ -16,15 +16,18 @@ import websockets
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.frames import Close
 
+from voice_agent import vad
 from voice_agent.config import load_settings
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.stt import assemblyai_stt, create_stt
 from voice_agent.stt.assemblyai_stt import AssemblyAISTT, explain
+from voice_agent.stt.base import batched
 
 
 async def audio_of(chunks: int) -> AsyncIterator[bytes]:
+    """Whole 100 ms chunks, so each arrives at the server as it was sent."""
     for _ in range(chunks):
-        yield b"\x00\x01" * 800
+        yield b"\x00\x01" * 1600
 
 
 def turn(order: int, text: str, end: bool, formatted: bool = False) -> str:
@@ -146,7 +149,7 @@ async def test_audio_goes_up_as_binary_frames(endpoint: Endpoint) -> None:
     async for _ in stt.stream(audio_of(2)):
         pass
 
-    assert recorder.binary == [b"\x00\x01" * 800] * 2
+    assert recorder.binary == [b"\x00\x01" * 1600] * 2
 
 
 async def test_an_error_payload_raises(endpoint: Endpoint) -> None:
@@ -263,16 +266,10 @@ def test_an_unmapped_failure_still_says_something_useful() -> None:
     )
 
 
-def test_the_browser_sends_chunks_this_endpoint_will_accept() -> None:
-    """A frame outside 50-1000 ms closes the session with 3007.
-
-    The worklet buffers a fixed number of *samples*, so how long a frame lasts
-    is a function of the recognizer's rate — 1600 samples is 100 ms only
-    because that rate is 16 kHz. Raise `SAMPLE_RATE` to 48 kHz for a backend
-    that wants it and every frame silently becomes 33 ms, under the floor, and
-    listening dies on connect. The two constants live in different languages,
-    so nothing but this test ties them together.
-    """
+def test_the_browser_frame_is_one_vad_window() -> None:
+    """The worklet posts one VAD window per frame, so the server hears a pause
+    a window late. The two constants live in different languages, so nothing
+    but this test ties them together."""
     worklet = (
         Path(__file__).resolve().parent.parent
         / "src"
@@ -282,9 +279,25 @@ def test_the_browser_sends_chunks_this_endpoint_will_accept() -> None:
     ).read_text(encoding="utf-8")
     samples = int(re.findall(r"new Int16Array\((\d+)\)", worklet)[0])
 
-    frame_ms = samples / assemblyai_stt.SAMPLE_RATE * 1000
+    assert samples == vad.WINDOW_SAMPLES
+    assert assemblyai_stt.SAMPLE_RATE == vad.SAMPLE_RATE
 
-    assert 50 <= frame_ms <= 1000, f"{samples} samples is {frame_ms:.0f} ms — 3007 territory"
+
+async def test_the_recognizer_is_sent_chunks_this_endpoint_will_accept() -> None:
+    """A chunk outside 50-1000 ms closes the session with 3007. The page's 32 ms
+    frames are under that floor, so they are regrouped — tail included."""
+
+    async def frames() -> AsyncIterator[bytes]:
+        for _ in range(10):  # 320 ms: three whole chunks and a 20 ms tail
+            yield b"\x00\x01" * vad.WINDOW_SAMPLES
+
+    rate = assemblyai_stt.SAMPLE_RATE
+    chunks = [chunk async for chunk in batched(frames(), rate)]
+
+    for chunk in chunks:
+        chunk_ms = len(chunk) / 2 / rate * 1000
+        assert 50 <= chunk_ms <= 1000, f"{chunk_ms:.0f} ms — 3007 territory"
+    assert len(chunks) == 3
 
 
 def test_russian_is_not_among_the_languages_this_backend_hears() -> None:

@@ -22,7 +22,7 @@ from voice_agent.stt.elevenlabs_stt import ElevenLabsSTT
 
 async def audio_of(chunks: int) -> AsyncIterator[bytes]:
     for _ in range(chunks):
-        yield b"\x00\x01" * 800
+        yield b"\x00\x01" * 1600
 
 
 async def scribe(connection: ServerConnection) -> None:

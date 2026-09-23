@@ -9,6 +9,7 @@ export const meta = document.getElementById("meta");
 export const status = document.getElementById("status");
 export const mute = document.getElementById("mute");
 export const details = document.getElementById("details");
+export const floor = document.getElementById("floor");
 export const listen = document.getElementById("listen");
 export const start = document.getElementById("start");
 export const begin = document.getElementById("begin");

@@ -52,6 +52,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers.
 - **14 — Off localhost.** A public instance on Fly.io, next to the vendors, with spend caps that are off unless configured.
 - **15 — The vendors become a choice.** The start screen picks engine and ears per conversation; backends are shared and kept warm.
 - **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch, and comments cut to their constraints.
+- **16 — Ears that hear pauses.** A voice detector on the server shows who holds the floor, ~0.75 s before AssemblyAI commits (~1.6 s before Scribe).
 
 ## Requirements
 
@@ -95,6 +96,7 @@ src/voice_agent/
   session.py              one connected conversation: turns, interruption, cancellation
   turn.py                 one exchange: the reply streamed to the page and the voice
   mic.py                  one listening session: transcripts, expiry, keepalive
+  vad.py, floor.py        speech per 32 ms window (Silero, in models/); who holds the floor
   speculation.py          answering before the question finishes
   initiative.py, decline.py  speaking into a silence; keeping the decline word unspoken
   heard.py                what the user actually heard of an interrupted reply
@@ -106,9 +108,10 @@ src/voice_agent/
     app.js                the socket and one handler per server message
     start.js              the start screen
     telemetry.js          the lines under each bubble (tested in node)
+    floor.js              the floor strip (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js
-docs/                     ROADMAP.md (research), DEPLOY.md (runbook), vendor/ (reference)
+docs/                     ROADMAP.md (research), DEPLOY.md (runbook), vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
 tests/                    pytest; tests/web/ holds node tests
 ```
 
@@ -123,14 +126,17 @@ there.
 
 ## Roadmap
 
-Measured so far, the round trip is dominated by the recognizer (about 1.3 s to
-commit a turn) and time to first token (about 0.5–0.9 s). Likely next, in order:
+Measured so far, the round trip is dominated by the recognizer (about 1.0 s from
+the end of speech to a commit on AssemblyAI, 1.8–1.9 s on Scribe) and time to
+first token (about 0.5–0.9 s). Likely next, in order:
 
-1. **A voice detector in the page**, for barge-in in a few hundred milliseconds and an honest "stopped speaking" time.
-2. **Semantic turn detection**: end the turn when the words sound finished.
-3. **A golden conversation suite**, so later changes are measured rather than felt.
-4. **Cost accounting and small-model routing.**
-5. **Telephony transport.**
+1. **The inner voice**: a fast model thinks alongside the conversation in a sparring-partner role, shown on the page but not spoken.
+2. **Cutting in at a pause**, then **speaking over** the user, with an assertiveness dial per role.
+3. **Leading**: the role has an agenda and steers toward it.
+4. **Semantic turn detection**: end the turn when the words sound finished.
+5. **A golden conversation suite**, so later changes are measured rather than felt.
+6. **Cost accounting and small-model routing.**
+7. **Telephony transport.**
 
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version.
 

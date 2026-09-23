@@ -7,11 +7,15 @@ import logging
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
 
+from voice_agent import trace
 from voice_agent.channel import Channel
 from voice_agent.errors import VoiceAgentError
+from voice_agent.floor import Floor, Transition
 from voice_agent.stt import STT
 from voice_agent.stt.agreement import StablePrefix
 from voice_agent.timing import elapsed_ms
+from voice_agent.vad import SAMPLE_RATE as VAD_SAMPLE_RATE
+from voice_agent.vad import VAD, WINDOW_MS
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +94,17 @@ class Mic:
         self._heard_speech_at = 0.0
         self._drawn = False
         """Partial text is on the page that no commit has finished yet."""
+        self._hears = stt.sample_rate == VAD_SAMPLE_RATE
+        """The VAD handles 16 kHz only; other ears go without a floor."""
+        self._vad: VAD | None = None
+        self._floor = Floor(WINDOW_MS)
+        self._heard: asyncio.Queue[tuple[bytes, float] | None] | None = None
+        self._hearing: asyncio.Task[None] | None = None
+        self._began_at: float | None = None
+        """When the VAD heard the current utterance begin; cleared by its first partial."""
+        self._stopped_at: float | None = None
+        """When the VAD last heard the user stop speaking."""
+        self._first_words_ms: int | None = None
 
     @property
     def listening(self) -> bool:
@@ -104,9 +119,11 @@ class Mic:
     def quiet_for(self) -> float:
         """Seconds since the recognizer last produced anything.
 
-        Reads late: there is no VAD here, and the recognizer trails speech by
-        several hundred milliseconds. Negative while a reply is still playing
-        (`expect_silence` puts the clock in the future).
+        Reads the recognizer, not the VAD, so it runs late: the recognizer trails
+        speech by several hundred milliseconds. The clock is timed by it on
+        purpose until moving it to the floor is a chapter of its own. Negative
+        while a reply is still playing (`expect_silence` puts the clock in the
+        future).
         """
         return time.perf_counter() - self._heard_speech_at
 
@@ -120,6 +137,16 @@ class Mic:
         self._task = asyncio.create_task(self._run())
         self._watchdog = asyncio.create_task(self._watch())
         self._keepalive = asyncio.create_task(self._keep_alive())
+        if self._hears:
+            # A fresh detector, never a reset one: a worker thread from the last
+            # session may still be inside the old one, as `to_thread` cannot be
+            # cancelled.
+            self._vad = VAD()
+            self._floor = Floor(WINDOW_MS)
+            self._stopped_at = None
+            self._forget_onset()
+            self._heard = asyncio.Queue()
+            self._hearing = asyncio.create_task(self._hear(self._vad, self._heard))
         await self._channel.send_json({"type": "listening", "active": True})
 
     def feed(self, pcm: bytes) -> None:
@@ -127,6 +154,47 @@ class Mic:
             self._client_frames += 1
             self._last_frame_at = time.perf_counter()
             self._frames.put_nowait(pcm)
+            if self._heard is not None:
+                self._heard.put_nowait((pcm, self._last_frame_at))
+
+    async def _hear(self, vad: VAD, frames: "asyncio.Queue[tuple[bytes, float] | None]") -> None:
+        """Run the VAD over the page's audio, in arrival order, and report each
+        change of floor. Only the page's frames: keep-alive silence is ours."""
+        while (item := await frames.get()) is not None:
+            pcm, arrived = item
+            try:
+                probabilities = await asyncio.to_thread(vad.probabilities, pcm)
+            except Exception:
+                # Losing the floor must not cost the conversation its ears.
+                logger.exception("voice activity detection failed; the floor goes dark")
+                return
+            for probability in probabilities:
+                for change in self._floor.push(probability):
+                    await self._report(change, arrived)
+
+    async def _report(self, change: Transition, arrived: float) -> None:
+        # The frame's last sample arrived at `arrived`; the change began `lag_ms`
+        # of audio before the window that decided it. Good to one window only
+        # because the page sends one window per frame.
+        began = arrived - change.lag_ms / 1000
+        if change.state == "speaking":
+            # The utterance's first onset only: speech resumed after a pause is
+            # not when the recognizer's first words could have come from.
+            if self._began_at is None and self._first_words_ms is None:
+                self._began_at = began
+        elif change.state == "micro_pause":
+            self._stopped_at = began
+        elif change.state == "yielded" and self._first_words_ms is None:
+            # Speech that never became words (a cough, the agent's own echo):
+            # left standing, it would date the next real utterance.
+            self._began_at = None
+        agent = "playback" in self._holds
+        trace.event(
+            "floor", {"state": change.state, "lag_ms": change.lag_ms, "agent_speaking": agent}
+        )
+        await self._channel.send_json(
+            {"type": "floor", "state": change.state, "lag_ms": change.lag_ms, "agent": agent}
+        )
 
     async def _keep_alive(self) -> None:
         """Top up a gap in the microphone's audio with silence. Not counted as
@@ -209,7 +277,10 @@ class Mic:
             return
         self._listening = False
 
-        for name in ("_watchdog", "_keepalive"):
+        if self._heard is not None:
+            self._heard.put_nowait(None)
+            self._heard = None
+        for name in ("_watchdog", "_keepalive", "_hearing"):
             helper: asyncio.Task[None] | None = getattr(self, name)
             setattr(self, name, None)
             if helper is not None and helper is not asyncio.current_task():
@@ -272,6 +343,17 @@ class Mic:
                 {"type": "listening", "active": True, "reason": "reconnected to the recognizer"}
             )
 
+    def _forget_onset(self) -> None:
+        """The current utterance is over, or never was: start measuring afresh."""
+        self._began_at = self._first_words_ms = None
+
+    def _speech_end_ms(self) -> int | None:
+        """How long ago the user stopped, by the VAD. `None` while they are still
+        talking — a commit mid-speech has no end to measure from — or unheard."""
+        if self._stopped_at is None or self._floor.state == "speaking":
+            return None
+        return elapsed_ms(self._stopped_at)
+
     async def _drop(self) -> None:
         """Take back partial text nothing will finish. Left on the page, the
         next utterance would be written into that bubble, wherever it sits."""
@@ -288,6 +370,7 @@ class Mic:
         # Every recognizer session starts from nothing: settled words and drawn
         # partials from the last one are void.
         self._agreement.reset()
+        self._forget_onset()
         if self._on_session is not None:
             await self._on_session()
         await self._drop()
@@ -296,6 +379,9 @@ class Mic:
             self._heard_speech_at = time.perf_counter()
             self._client_frames = 0
             if not transcript.is_final:
+                if transcript.text.strip() and self._began_at is not None:
+                    self._first_words_ms = elapsed_ms(self._began_at)
+                    self._began_at = None
                 if transcript.text.strip() and self._on_speech is not None:
                     # First: the earliest sign the user is talking, maybe over the agent.
                     await self._on_speech()
@@ -318,6 +404,7 @@ class Mic:
                 # partials already drawn came to nothing.
                 heard_at = time.perf_counter()
                 self._agreement.reset()
+                self._forget_onset()
                 await self._drop()
                 continue
 
@@ -333,14 +420,18 @@ class Mic:
                     "type": "transcript",
                     "text": transcript.text,
                     "final": True,
-                    # From the last partial, not from when the user stopped
-                    # talking, which only a VAD could see: it understates.
+                    # From the last partial: understates, as a recognizer lags speech.
                     "endpoint_ms": elapsed_ms(heard_at),
+                    # From when the VAD heard the user stop: the real wait.
+                    "speech_end_ms": self._speech_end_ms(),
+                    # From when the VAD heard the user begin to their first words on screen.
+                    "first_words_ms": self._first_words_ms,
                     # Whether the text called stable really was how the turn began.
                     "prefix_held": self._agreement.holds_for(transcript.text),
                     "stable_words": len(self._agreement.text.split()),
                 }
             )
+            self._forget_onset()
             self._agreement.reset()
             self._drawn = False
             heard_at = time.perf_counter()

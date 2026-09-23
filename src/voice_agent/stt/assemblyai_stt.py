@@ -25,7 +25,7 @@ import websockets
 from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import Transcript, batched
 
 ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
 
@@ -154,7 +154,7 @@ class AssemblyAISTT:
         closing = asyncio.Event()
 
         async def pump(socket: websockets.ClientConnection) -> None:
-            async for data in audio:
+            async for data in batched(audio, self.sample_rate):
                 await socket.send(data)  # binary frame: no envelope, no base64
             # Audio over (listening stopped): terminate, which also stops billing.
             with contextlib.suppress(websockets.WebSocketException):

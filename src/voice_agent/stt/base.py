@@ -57,3 +57,24 @@ class STT(Protocol):
         ...
 
     def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]: ...
+
+
+CHUNK_MS = 100
+"""What a recognizer is sent at a time. The page posts 32 ms frames, sized for
+the VAD; AssemblyAI closes the socket on chunks under 50 ms, and a chunk per
+32 ms would triple the messages either way for no earlier word."""
+
+
+async def batched(audio: AsyncIterator[bytes], sample_rate: int) -> AsyncIterator[bytes]:
+    """Regroup PCM16 frames into `CHUNK_MS` chunks. A tail under half a chunk
+    when the audio ends is dropped: under 50 ms, it is the one chunk the
+    recognizer would refuse, and it cannot hold a word."""
+    size = sample_rate * 2 * CHUNK_MS // 1000
+    pending = bytearray()
+    async for frame in audio:
+        pending += frame
+        while len(pending) >= size:
+            yield bytes(pending[:size])
+            del pending[:size]
+    if len(pending) >= size // 2:
+        yield bytes(pending)

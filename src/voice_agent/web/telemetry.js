@@ -51,7 +51,12 @@ export function truncatedLine(msg) {
 }
 
 export function committedLine(msg) {
-  let line = `🎙 committed ${ms(msg.endpoint_ms)} after your last recognised word`;
+  // By the VAD when it heard you stop: the real wait. The recognizer's own
+  // clock starts at its last word, which trails your voice.
+  let line = msg.speech_end_ms != null
+    ? `🎙 committed ${ms(msg.speech_end_ms)} after you stopped speaking · ${ms(msg.endpoint_ms)} after your last recognised word`
+    : `🎙 committed ${ms(msg.endpoint_ms)} after your last recognised word`;
+  if (msg.first_words_ms != null) line += ` · first words shown ${ms(msg.first_words_ms)} after you began`;
   if (msg.stable_words) {
     // A prefix that did not hold means agreement acted on words never said.
     line += ` · ${msg.stable_words} words settled early${msg.prefix_held ? "" : " ⚠ prefix did not hold"}`;

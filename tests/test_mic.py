@@ -8,14 +8,19 @@ for.
 """
 
 import asyncio
+import time
+import wave
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 
 from tests.conftest import FakeSTT
 from voice_agent import mic as mic_module
+from voice_agent.floor import Transition
 from voice_agent.mic import Mic
 from voice_agent.stt.base import Transcript
+from voice_agent.vad import WINDOW_BYTES
 
 WAIT_TIMEOUT = 2.0
 
@@ -338,3 +343,100 @@ async def test_a_recognizer_defect_is_reported_not_silent() -> None:
 
     await channel.wait_for(type="listen_error")
     assert not mic.listening
+
+
+async def test_the_floor_reaches_the_page_as_the_user_speaks_and_pauses() -> None:
+    """The page's audio runs through the VAD as well as the recognizer, and each
+    change of floor is sent — marked when the agent's own voice is playing, so
+    echo can be told from the user."""
+    channel = RecordingChannel()
+    mic = Mic(SilentSTT(), channel, never_called)  # type: ignore[arg-type]
+    await mic.start()
+    mic.hold("playback", True)
+
+    with wave.open(str(Path(__file__).parent / "fixtures" / "pause.wav")) as clip:
+        audio = clip.readframes(clip.getnframes())
+    for i in range(0, len(audio), WINDOW_BYTES):
+        mic.feed(audio[i : i + WINDOW_BYTES])
+
+    await channel.wait_for(type="floor", state="pause")
+    floors = [f for f in channel.frames if f["type"] == "floor"]
+    assert [f["state"] for f in floors[:3]] == ["speaking", "micro_pause", "pause"]
+    assert all(f["agent"] is True for f in floors)
+    await mic.stop()
+
+
+async def test_a_stopped_mic_stops_hearing() -> None:
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
+    await mic.start()
+    hearing = mic._hearing
+    assert hearing is not None
+
+    await mic.stop()
+
+    assert hearing.done()
+    mic.feed(b"\x00" * WINDOW_BYTES)  # after stop: dropped, not queued for nobody
+
+
+async def test_a_new_session_gets_a_new_detector() -> None:
+    """Never a reset one: a worker thread from the last session may still be
+    inside the old detector, since a thread cannot be cancelled."""
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
+    await mic.start()
+    first = mic._vad
+    await mic.stop()
+    await mic.start()
+
+    assert mic._vad is not None and mic._vad is not first
+    await mic.stop()
+
+
+async def test_speech_that_never_became_words_does_not_date_the_next_utterance() -> None:
+    """A cough, or the agent's own echo, is heard as speech but never
+    transcribed. Its onset must not be where the next real utterance's
+    first-words time is measured from."""
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
+    await mic.start()
+    long_ago = time.perf_counter() - 30
+
+    await mic._report(Transition("speaking", 0, 64), long_ago)
+    await mic._report(Transition("yielded", 64, 1564), long_ago + 1.5)
+    assert mic._began_at is None
+
+    now = time.perf_counter()
+    await mic._report(Transition("speaking", 0, 64), now)
+    assert mic._began_at == pytest.approx(now - 0.064)
+    await mic.stop()
+
+
+def onset(mic: Mic) -> tuple[int | None, float | None]:
+    """Read through a call, so a type checker does not carry a narrowing across
+    the awaits that change it."""
+    return mic._first_words_ms, mic._began_at
+
+
+async def test_a_commit_of_nothing_starts_the_measures_afresh() -> None:
+    """An empty commit ends the utterance as surely as a real one. Left set, its
+    first-words time would block every later onset and be reported again."""
+    channel = RecordingChannel()
+    stt = FakeSTT(script=[Transcript("uh", is_final=False), Transcript("", is_final=True)])
+    began = asyncio.Event()
+
+    async def session_began() -> None:
+        began.set()
+
+    mic = Mic(stt, channel, never_called, on_session=session_began)  # type: ignore[arg-type]
+    await mic.start()
+    # A new recognizer session clears the onset itself, so set it after one.
+    async with asyncio.timeout(WAIT_TIMEOUT):
+        await began.wait()
+    mic._began_at = time.perf_counter()
+
+    mic.feed(b"\x00\x00")
+    await channel.wait_for(type="transcript", final=False)
+    assert onset(mic)[0] is not None
+    mic.feed(b"\x00\x00")
+    await channel.wait_for(type="transcript_dropped")
+
+    assert onset(mic) == (None, None)
+    await mic.stop()
