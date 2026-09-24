@@ -6,6 +6,7 @@ from itertools import pairwise
 from pathlib import Path
 
 from voice_agent.errors import ConfigError
+from voice_agent.roles import DEFAULT_ROLE
 
 DEFAULT_PROVIDER = "anthropic"
 """The reasoning engine a conversation runs on unless it picks another: the
@@ -15,7 +16,8 @@ DEFAULT_VOICE_PROVIDER = "elevenlabs"
 DEFAULT_EARS_PROVIDER = "assemblyai"
 
 DEFAULT_GREETING = "Hi, I'm a voice agent. What can I help you with?"
-"""What the agent says when a conversation opens; empty to open in silence.
+"""What the agent says when a conversation opens with no role; empty to open in
+silence. A role opens with its own line unless `VOICE_AGENT_GREETING` is set.
 Synthesised at startup, which also absorbs the synthesizer's cold start."""
 DEFAULT_INITIATIVE_DELAYS = "5,15,28"
 """Seconds of silence at which the agent considers speaking unprompted, as
@@ -34,6 +36,11 @@ personal data, and gitignored."""
 DEFAULT_TRACE = "traces"
 """Where the span-tree trace is written, or `off`. Holds whole prompts and
 replies (keys are redacted by `trace.scrub`)."""
+
+DEFAULT_LOGS = "off"
+"""Where the log is also written, as rotating files, or `off`. The public
+instance points it at the volume: Fly's own log buffer holds ~100 lines and is
+gone after a deploy."""
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8000
@@ -57,11 +64,14 @@ class Settings:
     voice: str | None
     ears_provider: str
     vad_silence: float | None
-    greeting: str
+    greeting: str | None
+    """`None` means the role's opening, or `DEFAULT_GREETING` with no role."""
+    role: str
     initiative: tuple[float, ...]
     voice_gender: str
     sessions: Path | None
     trace: Path | None
+    logs: Path | None
     host: str
     port: int
     max_live: int | None
@@ -78,9 +88,11 @@ def load_settings() -> Settings:
         voice=os.environ.get("VOICE_AGENT_VOICE") or None,
         ears_provider=os.environ.get("VOICE_AGENT_STT", DEFAULT_EARS_PROVIDER),
         vad_silence=_optional_float(os.environ.get("VOICE_AGENT_VAD_SILENCE")),
-        greeting=os.environ.get("VOICE_AGENT_GREETING", DEFAULT_GREETING),
+        greeting=os.environ.get("VOICE_AGENT_GREETING"),
+        role=os.environ.get("VOICE_AGENT_ROLE", DEFAULT_ROLE).strip() or DEFAULT_ROLE,
         sessions=_directory(os.environ.get("VOICE_AGENT_SESSIONS", DEFAULT_SESSIONS)),
         trace=_directory(os.environ.get("VOICE_AGENT_TRACE", DEFAULT_TRACE)),
+        logs=_directory(os.environ.get("VOICE_AGENT_LOGS", DEFAULT_LOGS)),
         voice_gender=_voice_gender(
             os.environ.get("VOICE_AGENT_VOICE_GENDER", DEFAULT_VOICE_GENDER)
         ),
@@ -141,13 +153,21 @@ SELF_REFERENCE = {
         "Voice rule, which also overrides everything above: your speaking voice is "
         "a woman's, so in a language that marks the speaker's gender, every form "
         "about yourself is feminine — «я поняла», «я не совсем поняла», «я рада», "
-        "«я уверена», never «понял», «рад» or «уверен». " + "{scope}"
+        "«я уверена», never «понял», «рад» or «уверен». That includes the one-word "
+        "reply that opens a sentence without «я»: «Поняла.», «Согласна.», «Готова.», "
+        "«Рада.» — never «Понял.», «Согласен.», «Готов.», «Рад.». The user's gender "
+        "is theirs, not yours: a man talking to you does not make you speak about "
+        "yourself as a man. " + "{scope}"
     ),
     "male": (
         "Voice rule, which also overrides everything above: your speaking voice is "
         "a man's, so in a language that marks the speaker's gender, every form "
         "about yourself is masculine — «я понял», «я не совсем понял», «я рад», "
-        "«я уверен», never «поняла», «рада» or «уверена». " + "{scope}"
+        "«я уверен», never «поняла», «рада» or «уверена». That includes the one-word "
+        "reply that opens a sentence without «я»: «Понял.», «Согласен.», «Готов.», "
+        "«Рад.» — never «Поняла.», «Согласна.», «Готова.», «Рада.». The user's gender "
+        "is theirs, not yours: a woman talking to you does not make you speak about "
+        "yourself as a woman. " + "{scope}"
     ),
     "neutral": (
         "Voice rule: your speaking voice does not clearly read as a man's or a woman's. "
@@ -156,18 +176,24 @@ SELF_REFERENCE = {
         "stay with it for the whole conversation. " + "{scope}"
     ),
 }
+"""The voice rule, last and nearest the conversation. Live, Haiku still said a
+bare «Понял.» from the female voice, talking to a man. Replaying two Russian
+sessions typed (20 replies): masculine self-forms 2 → 0, feminine 0 → 4, once
+the one-word acknowledgements and the user's own gender were named."""
 
 
 IDENTITY = {
     "female": (
         "You are a woman, and you speak with a woman's voice. In every language "
         "that marks it, you speak about yourself in the feminine, as a woman "
-        "naturally would: «я поняла», «я рада», «я сделала»."
+        "naturally would: «я поняла», «я рада», «я сделала» — and a bare «Поняла.» "
+        "or «Согласна.» when you acknowledge something."
     ),
     "male": (
         "You are a man, and you speak with a man's voice. In every language that "
         "marks it, you speak about yourself in the masculine, as a man naturally "
-        "would: «я понял», «я рад», «я сделал»."
+        "would: «я понял», «я рад», «я сделал» — and a bare «Понял.» or «Согласен.» "
+        "when you acknowledge something."
     ),
     "neutral": "",
 }
@@ -176,7 +202,8 @@ followed less reliably than an identity at the start."""
 
 SELF_ONLY = (
     "This is only about how you refer to yourself. Never change how you refer to "
-    "anyone else — an author, a person being discussed, the user. If someone "
+    "anyone else — an author, a person being discussed, the user — and never give "
+    "the user a gender they have not shown you. If someone "
     "corrects your grammar, fix only your own forms. If an earlier reply of yours "
     "used the other gender, that was a mistake, not a precedent: do not repeat it."
 )
@@ -219,8 +246,11 @@ HEARING = (
     "or a mixture of scripts in one line — that is usually not someone talking "
     "nonsense. It is most often someone speaking a language your hearing does "
     "not have. Do not answer it as though it were a question, and do not guess "
-    "at what it might have meant. Say briefly that you did not catch it and "
-    "name the languages you can understand."
+    "at what it might have meant. Say briefly that you did not catch it and ask "
+    "them to say it again, or which language they are speaking. Do not read out "
+    "your list of languages unless they ask for it; if they do and it is long, "
+    "say it is many and name at most five. A list read aloud takes longer than "
+    "anyone will listen to it."
 )
 """What the agent is told about the languages it can hear. A recognizer does not
 refuse a language it lacks, it returns confident nonsense; the agent must neither
@@ -289,15 +319,20 @@ def build_prompt(
     delays: tuple[float, ...],
     base: str | None = None,
     greeting: str = "",
+    role: str = "",
 ) -> str:
     """The whole system prompt for one conversation.
 
     The appended facts (voice, hearing, clock) are fixed for the conversation
     and sit below the persona, so the provider's cached prefix stays stable.
+    `role` is a role card's "When speaking" section: directly under the
+    persona, which it narrows, and above the facts.
     """
     prompt = load_system_prompt() if base is None else base
     if IDENTITY[gender]:
         prompt = f"{IDENTITY[gender]}\n\n{prompt}"
+    if role:
+        prompt = f"{prompt}\n\n# Your role in this conversation\n\n{role}"
     prompt = with_initiative(with_languages(prompt, languages), delays)
     if greeting:
         prompt = f"{prompt}\n\n{OPENED.format(greeting=greeting)}"

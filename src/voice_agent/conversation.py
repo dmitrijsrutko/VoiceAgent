@@ -25,7 +25,9 @@ class Conversation:
     ended: bool = False
     engine: str | None = None
     ears: str | None = None
-    """Which backends this conversation runs on, chosen when it was started.
+    role: str | None = None
+    """Which backends and which role this conversation runs on, chosen when it
+    was started.
 
     Pinned rather than re-read on every connection, because resuming a link has
     to resume the same agent: the history below was produced by that engine,

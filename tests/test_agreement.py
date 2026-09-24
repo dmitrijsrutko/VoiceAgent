@@ -128,3 +128,14 @@ def test_reset_forgets_the_previous_utterance() -> None:
 
     assert prefix.text == ""
     assert prefix.update("something else entirely") is None
+
+
+def test_contradictions_are_counted_per_turn() -> None:
+    """Kept across turns, the count climbed 15 → 21 in a live session and
+    every later turn reported the running total as its own."""
+    prefix = StablePrefix()
+    prefix.contradictions = 3
+
+    prefix.reset()
+
+    assert prefix.contradictions == 0

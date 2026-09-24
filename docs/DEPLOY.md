@@ -60,6 +60,7 @@ built is offering an error.
 ## Deploying
 
 ```bash
+scripts/pull-fly.sh   # first: keep the logs and records the deploy would lose
 fly deploy
 fly logs
 ```
@@ -88,7 +89,7 @@ still the agent of chapters 1-13:
 | Variable | Deployed | Bounds |
 | --- | --- | --- |
 | `VOICE_AGENT_MAX_LIVE` | 4 | conversations held open at once |
-| `VOICE_AGENT_SESSION_BUDGET` | 300 | seconds before a conversation ends itself |
+| `VOICE_AGENT_SESSION_BUDGET` | 360 | seconds before a conversation ends itself |
 | `VOICE_AGENT_MINTS_PER_IP` | 10 | new conversations per address per 10 minutes |
 | `VOICE_AGENT_MAX_STORED` | 500 | conversations kept before the oldest is dropped |
 
@@ -102,6 +103,11 @@ On the 1 GB volume at `/data`:
 
 - `/data/sessions/<date>-<id>.md` — the conversation: what was said and typed,
   the timings, the decisions, what each part cost.
+- `/data/logs/voice-agent.log*` — the server's log (`VOICE_AGENT_LOGS`), INFO
+  and above, UTC. Rotated at 5 MB, ten old files kept: ~55 MB at most, oldest
+  dropped first. Fly's own `fly logs --no-tail` holds only ~100 lines and loses
+  them on every deploy; this does not. Some warnings quote a few words of a
+  reply.
 
 The span-tree trace is **off** here (`VOICE_AGENT_TRACE = "off"`): it holds whole
 prompts and replies, which AGENTS.md §10 keeps out of logs by default. Traces
@@ -116,7 +122,13 @@ Nothing expires. The delete is the one the CLI has always had:
 fly ssh console            # then, on the machine:
 #   uv run --no-sync voice-agent --purge-sessions   (it asks first, so not via -C)
 #   rm -rf /data/traces                              (older traces, if any)
+#   rm -rf /data/logs                                (the log files)
 ```
+
+**Copies kept locally.** `scripts/pull-fly.sh` downloads Fly's log buffer, the
+log files and every session record into `fly-archive/` (gitignored). It runs
+before every deploy. A purge on the machine does not reach that copy: delete
+`fly-archive/` too.
 
 To run the public instance without recording anything, set
 `VOICE_AGENT_SESSIONS` to `off` in `fly.toml` as well. The

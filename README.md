@@ -53,6 +53,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers.
 - **15 — The vendors become a choice.** The start screen picks engine and ears per conversation; backends are shared and kept warm.
 - **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch, and comments cut to their constraints.
 - **16 — Ears that hear pauses.** A voice detector on the server shows who holds the floor, ~0.75 s before AssemblyAI commits (~1.6 s before Scribe).
+- **17 — The inner voice.** Pick a role on the start screen (none by default, a devil's advocate, or a thinking partner, each a card in `prompts/roles/`), and a fast model thinks alongside you, shown on the page but not spoken.
 
 ## Requirements
 
@@ -69,6 +70,8 @@ uv run voice-agent --provider deepseek      # or openai; --model overrides the m
 uv run voice-agent --stt elevenlabs         # Scribe, for languages AssemblyAI lacks
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first
+uv run voice-agent --role devils_advocate   # pre-select a role (visitors still choose; default none)
+uv run voice-agent --replay-thinker         # score the inner voice on tests/scenarios/ (billed)
 uv run voice-agent --help                   # everything else
 ```
 
@@ -89,6 +92,7 @@ uv run verify     # ruff + format check + mypy (strict) + pytest (+ node tests)
 ```
 AGENTS.md, CHANGELOG.md   the working contract; the chapter log
 prompts/system_prompt.md  the agent's runtime system prompt
+prompts/roles/, thinker.md  role cards, and the inner voice's instructions
 src/voice_agent/
   cli.py, config.py       `uv run voice-agent`; settings from the environment
   server.py               routes, and one conversation's socket (`serve`)
@@ -97,9 +101,12 @@ src/voice_agent/
   turn.py                 one exchange: the reply streamed to the page and the voice
   mic.py                  one listening session: transcripts, expiry, keepalive
   vad.py, floor.py        speech per 32 ms window (Silero, in models/); who holds the floor
+  roles.py, thinker.py    role cards; the inner voice that decides what is worth saying
+  replay.py               scripted scenarios through the inner voice, scored
   speculation.py          answering before the question finishes
   initiative.py, decline.py  speaking into a silence; keeping the decline word unspoken
-  heard.py                what the user actually heard of an interrupted reply
+  heard.py                what the user actually heard of an interrupted reply; where to resume
+  echo.py                 whether words heard over the agent are its own voice coming back
   greeting.py             the opening line, synthesized once and cached
   record.py, trace.py     the conversation as Markdown; the span tree as JSONL
   limits.py, sessions.py  the public caps; the in-memory conversation store
@@ -109,10 +116,12 @@ src/voice_agent/
     start.js              the start screen
     telemetry.js          the lines under each bubble (tested in node)
     floor.js              the floor strip (tested in node)
+    timer.js, client.js   the last-minute countdown; the browser family reported (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js
 docs/                     ROADMAP.md (research), DEPLOY.md (runbook), vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
-tests/                    pytest; tests/web/ holds node tests
+tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the replay's scripts
+scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records into fly-archive/ (gitignored)
 ```
 
 ## Deployment
@@ -130,13 +139,12 @@ Measured so far, the round trip is dominated by the recognizer (about 1.0 s from
 the end of speech to a commit on AssemblyAI, 1.8–1.9 s on Scribe) and time to
 first token (about 0.5–0.9 s). Likely next, in order:
 
-1. **The inner voice**: a fast model thinks alongside the conversation in a sparring-partner role, shown on the page but not spoken.
-2. **Cutting in at a pause**, then **speaking over** the user, with an assertiveness dial per role.
-3. **Leading**: the role has an agenda and steers toward it.
-4. **Semantic turn detection**: end the turn when the words sound finished.
-5. **A golden conversation suite**, so later changes are measured rather than felt.
-6. **Cost accounting and small-model routing.**
-7. **Telephony transport.**
+1. **Cutting in at a pause**, then **speaking over** the user, with an assertiveness dial per role.
+2. **Leading**: the role has an agenda and steers toward it.
+3. **Semantic turn detection**: end the turn when the words sound finished.
+4. **A golden conversation suite**, so later changes are measured rather than felt.
+5. **Cost accounting and small-model routing.**
+6. **Telephony transport.**
 
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version.
 

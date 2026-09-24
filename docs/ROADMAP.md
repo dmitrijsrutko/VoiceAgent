@@ -331,8 +331,18 @@ sharper question, and cuts in when it's worth it. Background thinking lives in
   scripted scenarios with labelled error windows. Fire inside the window, stay
   silent on clean scripts, and count thoughts computed but never spoken.
 
+- **Roles are data.** A role card (`prompts/roles/`) holds the job, what is
+  worth it, the moves and the assertiveness. The code holds timing, the move
+  vocabulary and the safety floor. Built-in roles come first (Ch 17), then a
+  start-screen picker, then roles written by users, which are untrusted text
+  and can never lift the floor.
+- **Learned in Ch 17:** asked to decide *when* as well as *what*, the thinker
+  fires almost everywhere (false fires 9/10 on scripted clean pauses). Timing
+  belongs to the actor, which knows the floor. The thinker should say how much
+  a thought matters and whether it can wait.
+
 Chapters: **16** ears that hear pauses (shipped) · **17** the inner voice,
-thoughts shown but not spoken · **18** cut in at a pause · **19** speak over,
+thoughts shown but not spoken (shipped) · **18** cut in at a pause · **19** speak over,
 with the dial · **20** lead: an agenda and a goal state for the whole session.
 
 ## 3. Candidate chapter order

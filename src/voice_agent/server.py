@@ -23,6 +23,7 @@ import json
 import logging
 import math
 import os
+import re
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
 from datetime import datetime
@@ -35,21 +36,23 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
-from voice_agent import trace, vad
+from voice_agent import roles, trace, vad
 from voice_agent.channel import Channel
-from voice_agent.config import Settings, build_prompt, load_settings
+from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_settings
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
 from voice_agent.greeting import Greeting
 from voice_agent.initiative import LADDER, Rung
 from voice_agent.limits import Live, MintLimit, budget_reason, client_address
-from voice_agent.llm import LLM
+from voice_agent.llm import LLM, create_llm
+from voice_agent.llm.traced import Traced
 from voice_agent.pool import Pool, Stack
 from voice_agent.record import Record
 from voice_agent.session import Session
 from voice_agent.sessions import SessionStore
 from voice_agent.stt import STT
 from voice_agent.stt.registry import NO_EARS
+from voice_agent.thinker import THINKER_MODEL, system_prompt
 from voice_agent.tts import TTS, create_tts
 from voice_agent.tts.base import SAMPLE_RATE
 
@@ -101,6 +104,29 @@ async def connect(engine: LLM) -> None:
         await engine.connect()
     except VoiceAgentError as exc:
         logger.warning("could not connect to %s before the first turn: %s", engine.provider, exc)
+
+
+def load_roles(preselected: str) -> dict[str, roles.Role]:
+    """Every role card, read and validated at startup: a broken card stops the
+    server with a reason, rather than failing the conversation that picks it.
+    So does pre-selecting a card that is not there."""
+    cards = {slug: roles.load(slug) for slug in roles.available()}
+    if preselected != roles.NO_ROLE and preselected not in cards:
+        roles.load(preselected)  # raises, naming the cards there are
+    return cards
+
+
+def thinker_engine(cards: dict[str, roles.Role]) -> LLM | None:
+    """The inner voice's own engine, apart from the reply engine, shared by
+    every conversation that picks a role. Without an Anthropic key a role
+    still plays, but thinks nothing, and the log says so."""
+    if not cards:
+        return None
+    try:
+        return Traced(create_llm("anthropic", THINKER_MODEL))
+    except ConfigError as exc:
+        logger.warning("roles will have no inner voice: %s", exc)
+        return None
 
 
 async def refuse(websocket: WebSocket, code: int, reason: str) -> None:
@@ -166,16 +192,24 @@ class Agent:
     speaker: TTS | None
     stack: Stack
     pool: Pool
-    opening: Greeting
+    openings: dict[str, Greeting]
+    """The first line, per role: the plain greeting under `roles.NO_ROLE`, and
+    each card's own opening. Every one synthesised at startup."""
     ladder: tuple[Rung, ...]
+    roles: dict[str, roles.Role]
+    thinker: LLM | None
+    thinker_prompts: dict[str, str]
+    """The inner voice's instructions per role: fixed for the process."""
     record_dir: Path | None
     ready: bool = False
     """The greeting is synthesised and the engines connected; `/healthz` waits on it."""
 
-    def facts(self, listener: STT | None, engine: str, ears: str) -> dict[str, object]:
+    def facts(self, listener: STT | None, engine: str, ears: str, role: str) -> dict[str, object]:
         """What this agent is, for the page before the socket and for `ready`
         after it — one function, so the two cannot disagree."""
+        card = self.roles.get(role)
         return {
+            "role": {"name": card.name, "summary": card.summary} if card else None,
             "voice": (
                 {
                     "provider": self.speaker.provider,
@@ -195,7 +229,7 @@ class Agent:
                 else None
             ),
             "recording": self.record_dir is not None,
-            "choices": self.stack.choices(engine, ears),
+            "choices": self.stack.choices(engine, ears, role),
         }
 
 
@@ -211,15 +245,33 @@ def create_app(
     sessions_dir: Path | None = None,
     record: bool = True,
     settings: Settings | None = None,
+    role: str | None = None,
+    thinker: LLM | None = None,
 ) -> FastAPI:
     """The app. The keyword arguments are test seams: `llm`/`stt`/`tts` inject
     fakes, `voice=False`/`ears=False` run silent or deaf (as `…_TTS=none` and
-    `…_STT=none` do), and the rest override one setting each."""
+    `…_STT=none` do), and the rest override one setting each. An injected
+    `llm` gets no inner voice unless a `thinker` is injected too: a fake's
+    canned replies are for turns."""
     settings = settings or load_settings()
+    preselected = settings.role if role is None else role
+    cards = load_roles(preselected)
+    if thinker is not None:
+        inner: LLM | None = Traced(thinker) if cards else None
+    else:
+        inner = thinker_engine(cards) if llm is None else None
+    plain = greeting if greeting is not None else settings.greeting
     speaker = (
         tts if tts is not None or not voice else create_tts(settings.voice_provider, settings.voice)
     )
-    stack = Stack(settings.provider, settings.model, settings.ears_provider, hears=ears)
+    stack = Stack(
+        settings.provider,
+        settings.model,
+        settings.ears_provider,
+        hears=ears,
+        roles=tuple(cards.values()),
+        default_role=preselected,
+    )
     agent = Agent(
         settings=settings,
         sessions=store if store is not None else SessionStore(settings.max_stored),
@@ -228,8 +280,14 @@ def create_app(
         speaker=speaker,
         stack=stack,
         pool=Pool(stack.model_for, settings.vad_silence, engine=llm, ears=stt),
-        opening=Greeting(settings.greeting if greeting is None else greeting, speaker),
+        openings={
+            roles.NO_ROLE: Greeting(DEFAULT_GREETING if plain is None else plain, speaker),
+            **{slug: Greeting(card.opening, speaker) for slug, card in cards.items()},
+        },
         ladder=ladder_for(settings.initiative if initiative is None else initiative),
+        roles=cards,
+        thinker=inner,
+        thinker_prompts={slug: system_prompt(card) for slug, card in cards.items()},
         record_dir=(sessions_dir or settings.sessions) if record else None,
     )
 
@@ -240,9 +298,10 @@ def create_app(
         # (`connect` only lists models, which nobody bills). The VAD model loads
         # here too, off the loop, rather than inside the first user's `listen`.
         await asyncio.gather(
-            agent.opening.prepare(),
+            *(opening.prepare() for opening in agent.openings.values()),
             asyncio.to_thread(vad.load),
             *(connect(agent.pool.engine(name)) for name in stack.engines),
+            *([connect(agent.thinker)] if agent.thinker is not None else []),
         )
         agent.ready = True
         yield
@@ -283,7 +342,7 @@ def create_app(
             return HTMLResponse("<h1>404 — no such conversation</h1>", status_code=404)
         ears_default = stack.default_ears
         listener = agent.pool.ears(ears_default) if ears_default != NO_EARS else None
-        known = agent.facts(listener, stack.default_engine, ears_default)
+        known = agent.facts(listener, stack.default_engine, ears_default, stack.default_role)
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
 
     @app.websocket("/ws/{key}")
@@ -319,21 +378,33 @@ async def serve(agent: Agent, websocket: WebSocket, key: str) -> None:
 
 
 async def converse(agent: Agent, websocket: WebSocket, conversation: Conversation) -> None:
-    engine_name, ears_name = agent.stack.choose(conversation, websocket.query_params)
+    engine_name, ears_name, role_name = agent.stack.choose(conversation, websocket.query_params)
     engine = agent.pool.engine(engine_name)
     listener = agent.pool.ears(ears_name)
+    role = agent.roles.get(role_name)
+    opening = agent.openings[role_name if role is not None else roles.NO_ROLE]
     # Per conversation, because it states what these ears can hear; stable for
     # the conversation's life, which is what a provider's prefix cache needs.
     system_prompt = build_prompt(
         listener.languages if listener else (),
         agent.settings.voice_gender,
         tuple(rung.after for rung in agent.ladder),
-        greeting=agent.opening.text,
+        greeting=opening.text,
+        role=role.when_speaking if role is not None else "",
     )
     recording = record_for(agent.record_dir, conversation.id, system_prompt)
     channel = Channel(websocket, recording)
     session = Session(
-        channel, conversation, engine, agent.speaker, system_prompt, listener, agent.ladder
+        channel,
+        conversation,
+        engine,
+        agent.speaker,
+        system_prompt,
+        listener,
+        agent.ladder,
+        role=role,
+        thinker=agent.thinker if role is not None else None,
+        thinker_prompt=agent.thinker_prompts.get(role_name),
     )
     await channel.send_json(
         {
@@ -341,12 +412,14 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             "session": conversation.id,
             "provider": engine.provider,
             "model": engine.model,
-            **agent.facts(listener, engine_name, ears_name),
+            **agent.facts(listener, engine_name, ears_name, role_name),
+            # From this connection: the page counts down the last minute.
+            "budget_seconds": agent.settings.session_budget,
             "history": serialize(conversation.messages),
             "ended": conversation.ended,
         }
     )
-    session.voiced(await agent.opening.deliver(channel, conversation))
+    session.voiced(await opening.deliver(channel, conversation))
     # After the greeting, so the clock measures the silence after the agent's voice.
     session.start()
     budget_seconds = agent.settings.session_budget
@@ -377,6 +450,27 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             recording.close()
 
 
+CLIENT_WORD = re.compile(r"[^\w .:/()-]")
+
+
+def client_note(kind: str, payload: dict[str, object]) -> str:
+    """The page's report as one line, each field cut short and stripped of
+    anything that could forge a line in the record."""
+
+    def field(key: str, limit: int = 40) -> str:
+        value = payload.get(key)
+        if isinstance(value, bool):
+            return "yes" if value else "no"
+        return CLIENT_WORD.sub("", str(value))[:limit] if value is not None else ""
+
+    if kind == "client":
+        in_app = field("in_app")
+        where = f" · inside {in_app}" if in_app and in_app != "None" else ""
+        mobile = " · mobile" if payload.get("mobile") is True else ""
+        return f"client: {field('browser')} on {field('os')}{mobile}{where}"
+    return f"client error: {field('what')} · {field('name')} · {field('message', 160)}"
+
+
 async def handle_text(
     channel: Channel, session: Session, raw: str, record: Record | None = None
 ) -> None:
@@ -404,6 +498,14 @@ async def handle_text(
             logger.info("playback stuttered: %d gaps, %d ms of silence", gaps, gap_ms)
             if record is not None:
                 record.note(f"playback: gaps {gaps} · gap_ms {gap_ms}")
+        return
+
+    if kind in ("client", "client_error"):
+        # What the page knows and the server cannot: which browser this is, and
+        # a microphone that was refused. Written down so a phone that fails is
+        # visible afterwards. Client-supplied: short words only, never logged raw.
+        if record is not None:
+            record.note(client_note(kind, payload))
         return
 
     if kind == "interrupted":

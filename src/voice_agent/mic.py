@@ -23,8 +23,10 @@ IDLE_TIMEOUT_SECONDS = 30.0
 """How long with no *speech* before listening stops. The microphone streams
 silence continuously, so the signal is the absence of partial transcripts."""
 
-SESSION_CAP_SECONDS = 300.0
-"""A backstop for a room that never stops producing partials (a television)."""
+SESSION_CAP_SECONDS = 360.0
+"""A backstop for a room that never stops producing partials (a television).
+Not shorter than the public demo's conversation budget (`fly.toml`), or
+listening would stop before the conversation does."""
 
 MAX_HOLD_SECONDS = 60.0
 """How long expiry may be suspended before the hold is assumed lost (a closed
@@ -68,7 +70,8 @@ class Mic:
         on_final: Callable[[str], Awaitable[None]],
         on_partial: Callable[[str, bool], Awaitable[None]] | None = None,
         on_session: Callable[[], Awaitable[None]] | None = None,
-        on_speech: Callable[[], Awaitable[None]] | None = None,
+        on_speech: Callable[[str], Awaitable[None]] | None = None,
+        on_floor: Callable[[str], Awaitable[None]] | None = None,
         idle_timeout: float | None = None,
         session_cap: float | None = None,
     ) -> None:
@@ -78,6 +81,10 @@ class Mic:
         self._on_partial = on_partial
         self._on_session = on_session
         self._on_speech = on_speech
+        self._on_floor = on_floor
+        self.partial = ""
+        """What the recognizer last heard of the utterance in progress, settled
+        or not; empty between utterances. For listening along, not for acting."""
         self._agreement = StablePrefix()
         self.idle_timeout = IDLE_TIMEOUT_SECONDS if idle_timeout is None else idle_timeout
         self.session_cap = SESSION_CAP_SECONDS if session_cap is None else session_cap
@@ -109,6 +116,13 @@ class Mic:
     @property
     def listening(self) -> bool:
         return self._listening
+
+    @property
+    def speaking(self) -> bool:
+        """The voice detector hears speech right now. False without one, and
+        once listening has stopped: the floor keeps its last state, which may
+        be a word cut off by the stop."""
+        return self._listening and self._floor.state == "speaking"
 
     @property
     def held(self) -> bool:
@@ -144,7 +158,7 @@ class Mic:
             self._vad = VAD()
             self._floor = Floor(WINDOW_MS)
             self._stopped_at = None
-            self._forget_onset()
+            self._utterance_over()
             self._heard = asyncio.Queue()
             self._hearing = asyncio.create_task(self._hear(self._vad, self._heard))
         await self._channel.send_json({"type": "listening", "active": True})
@@ -195,6 +209,8 @@ class Mic:
         await self._channel.send_json(
             {"type": "floor", "state": change.state, "lag_ms": change.lag_ms, "agent": agent}
         )
+        if self._on_floor is not None:
+            await self._on_floor(change.state)
 
     async def _keep_alive(self) -> None:
         """Top up a gap in the microphone's audio with silence. Not counted as
@@ -299,6 +315,11 @@ class Mic:
             if not task.done():
                 task.cancel()
         self._frames = None
+        self.partial = ""  # nothing is being heard any more
+        if self._on_floor is not None:
+            # Whatever the floor last said no longer holds: nobody is listening.
+            with contextlib.suppress(Exception):
+                await self._on_floor("stopped")
 
         if announce:
             payload: dict[str, object] = {"type": "listening", "active": False}
@@ -343,9 +364,10 @@ class Mic:
                 {"type": "listening", "active": True, "reason": "reconnected to the recognizer"}
             )
 
-    def _forget_onset(self) -> None:
+    def _utterance_over(self) -> None:
         """The current utterance is over, or never was: start measuring afresh."""
         self._began_at = self._first_words_ms = None
+        self.partial = ""
 
     def _speech_end_ms(self) -> int | None:
         """How long ago the user stopped, by the VAD. `None` while they are still
@@ -370,7 +392,7 @@ class Mic:
         # Every recognizer session starts from nothing: settled words and drawn
         # partials from the last one are void.
         self._agreement.reset()
-        self._forget_onset()
+        self._utterance_over()
         if self._on_session is not None:
             await self._on_session()
         await self._drop()
@@ -383,8 +405,9 @@ class Mic:
                     self._first_words_ms = elapsed_ms(self._began_at)
                     self._began_at = None
                 if transcript.text.strip() and self._on_speech is not None:
-                    # First: the earliest sign the user is talking, maybe over the agent.
-                    await self._on_speech()
+                    # First: the earliest sign the user is talking, maybe over the
+                    # agent. With the words, so its own voice can be told apart.
+                    await self._on_speech(transcript.text)
                 # `repeated` = nothing new this time, the closest available sign
                 # that the user has stopped.
                 self._agreement.update(transcript.text)
@@ -392,6 +415,7 @@ class Mic:
                     # From the last new *word*, not the last message.
                     heard_at = time.perf_counter()
                 self._drawn = self._drawn or bool(transcript.text.strip())
+                self.partial = transcript.text
                 await self._channel.send_json(
                     {"type": "transcript", "text": transcript.text, "final": False}
                 )
@@ -404,7 +428,7 @@ class Mic:
                 # partials already drawn came to nothing.
                 heard_at = time.perf_counter()
                 self._agreement.reset()
-                self._forget_onset()
+                self._utterance_over()
                 await self._drop()
                 continue
 
@@ -431,7 +455,7 @@ class Mic:
                     "stable_words": len(self._agreement.text.split()),
                 }
             )
-            self._forget_onset()
+            self._utterance_over()
             self._agreement.reset()
             self._drawn = False
             heard_at = time.perf_counter()

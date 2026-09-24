@@ -108,6 +108,8 @@ def test_a_blank_header_falls_through_rather_than_becoming_the_address() -> None
 
 def test_the_budget_reason_names_the_length_it_enforced() -> None:
     assert "5 minutes" in budget_reason(300)
+    # Reloading reopens the ended conversation; the page offers a new one instead.
+    assert "Reload" not in budget_reason(300)
     assert "30 seconds" in budget_reason(30)
 
 

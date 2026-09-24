@@ -9,11 +9,21 @@ from fastapi.testclient import TestClient
 
 from tests.conftest import FakeLLM, FakeTTS, pcm_for, receive
 from voice_agent import greeting as greeting_module
+from voice_agent import roles
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
 from voice_agent.tts.base import MEDIA_TYPE, AudioChunk
 
 HELLO = "Hi, I'm a voice agent."
+
+
+ROLE_OPENINGS = {roles.load(slug).opening for slug in roles.available()}
+
+
+def plain(spoken: list[str]) -> list[str]:
+    """What was synthesised, less the role cards' openings, which every process
+    prepares at startup whichever role a conversation picks."""
+    return [text for text in spoken if text not in ROLE_OPENINGS]
 
 
 class SilentChannel:
@@ -63,7 +73,7 @@ def test_a_new_conversation_is_greeted_in_text_and_speech(store: SessionStore) -
     assert end["chunks"] == 1
     assert pcm == pcm_for(HELLO)
     assert end["bytes"] == len(pcm)
-    assert tts.spoken == [HELLO]
+    assert plain(tts.spoken) == [HELLO]
 
 
 def test_the_greeting_is_synthesised_once_for_the_whole_process(store: SessionStore) -> None:
@@ -80,7 +90,7 @@ def test_the_greeting_is_synthesised_once_for_the_whole_process(store: SessionSt
                 while receive(socket)["type"] != "audio_end":
                     pass
 
-    assert tts.spoken == [HELLO], "the greeting was synthesised more than once"
+    assert plain(tts.spoken) == [HELLO], "the greeting was synthesised more than once"
 
 
 def test_the_greeting_becomes_part_of_the_conversation(store: SessionStore) -> None:
@@ -162,7 +172,7 @@ def test_an_empty_greeting_opens_in_silence(store: SessionStore) -> None:
             while receive(socket)["type"] != "audio_end":
                 pass
 
-    assert tts.spoken == ["Sure thing. "], "only the reply should have been spoken"
+    assert plain(tts.spoken) == ["Sure thing. "], "only the reply should have been spoken"
     assert store.get(key).messages[0].role == "user", "something greeted anyway"
 
 

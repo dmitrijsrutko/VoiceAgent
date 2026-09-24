@@ -16,3 +16,10 @@ export const interrupted = (id, playedMs) =>
 // `report` carries playback telemetry (gaps) when playback ends.
 export const playback = (active, report = {}) =>
   JSON.stringify({ type: "playback", active, ...report });
+
+// What kind of browser this is (coarse families, see client.js), and what went
+// wrong on the page that the server would otherwise never hear of.
+export const clientInfo = (facts) => JSON.stringify({ type: "client", ...facts });
+
+export const clientError = (what, err) =>
+  JSON.stringify({ type: "client_error", what, name: String(err?.name ?? ""), message: String(err?.message ?? err).slice(0, 200) });

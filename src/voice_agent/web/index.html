@@ -77,6 +77,10 @@
   #start p { color: var(--muted); font-size: 13.5px; margin: 0 0 10px; }
   #start .notice { font-size: 13px; color: var(--muted); margin: 10px 0; }
   #start .notice strong { color: var(--fg); }
+  #start .notice:empty { display: none; }
+  .timer { font-variant-numeric: tabular-nums; font-weight: 600; color: var(--fg); }
+  .timer.urgent { color: #c0392b; }
+  #again { margin: 8px auto 0; display: block; }
   #begin { margin-top: 14px; padding: 12px 26px; font-size: 15px; }
   /* The stack this conversation will run on. Radios rather than a dropdown:
      the whole point is that the alternatives are visible. */
@@ -99,6 +103,7 @@
     <strong>voice-agent</strong>
     <span id="meta">connecting…</span>
     <span id="status"></span>
+    <span id="timer" class="timer" hidden></span>
     <span style="margin-left:auto;"></span>
     <button type="button" id="listen" class="chip" disabled>🎤 listen</button>
     <label style="cursor:pointer;"><input type="checkbox" id="details"> details</label>

@@ -414,9 +414,10 @@ def test_the_microphone_is_asked_for_before_the_greeting_can_play() -> None:
 
     assert handler, "nothing handles the start button"
     body = handler.group(1)
-    assert "await buildMic(" in body, "the start button no longer asks for the microphone"
-    assert body.index("await buildMic(") < body.rindex("connect();"), (
-        "the socket opens before the microphone is asked for"
+    assert "buildMic(" in body, "the start button no longer asks for the microphone"
+    # Asked at once (see the next test), answered before the socket opens.
+    assert body.index("await opening") < body.rindex("connect();"), (
+        "the socket opens before the microphone has been answered"
     )
 
 
@@ -472,7 +473,7 @@ def test_the_chosen_stack_travels_with_the_socket() -> None:
 
     assert connect, "connect() is gone"
     assert "stackQuery()" in connect.group(0)
-    assert 'for (const group of ["llm", "stt"])' in start, "both halves of the stack must be sent"
+    assert 'for (const group of ["role", "llm", "stt"])' in start, "the stack and role must be sent"
 
 
 def test_the_languages_notice_follows_the_chosen_ears() -> None:
@@ -499,9 +500,11 @@ def test_the_voice_is_a_group_of_one_that_is_never_sent() -> None:
     start = without_comments(source("start.js"))
     choosing = re.findall(r'choose\("(\w+)"', start)
 
-    assert choosing == ["llm", "stt", "tts"], f"the pickers changed: {choosing}"
+    assert choosing == ["role", "llm", "stt", "tts"], f"the pickers changed: {choosing}"
     assert "{ single: true }" in start, "the voice is no longer drawn as a group of one"
-    assert 'for (const group of ["llm", "stt"])' in start, "the socket now carries something else"
+    assert 'for (const group of ["role", "llm", "stt"])' in start, (
+        "the socket now carries the voice"
+    )
 
 
 def test_each_picker_draws_its_default_first() -> None:
@@ -511,3 +514,38 @@ def test_each_picker_draws_its_default_first() -> None:
 
     assert "sort((a, b) => Number(!!b.default) - Number(!!a.default))" in start
     assert "ordered.map(" in start
+
+
+def test_what_a_role_card_says_is_escaped_on_the_start_screen() -> None:
+    """Cards will be written by users; the start screen builds HTML from their
+    title and summary."""
+    start = without_comments(source("start.js"))
+
+    assert "escape(o.title)" in start and "escape(o.summary)" in start
+    assert "escape(role.title)" in start and "escape(role.summary)" in start
+
+
+def test_the_microphone_is_asked_for_inside_the_tap() -> None:
+    """WebKit — every iPhone browser — ends the tap's permission at the first
+    `await`: a microphone asked for after awaiting the audio resume was refused
+    with NotAllowedError on one phone and granted on another."""
+    app = without_comments(source("app.js"))
+    handler = re.search(r"begin\.onclick = async \(\) => \{.*?\n\};", app, re.DOTALL)
+
+    assert handler, "the start handler is gone"
+    body = handler.group(0)
+    assert body.index("buildMic(") < body.index("await "), "the microphone is asked for too late"
+
+
+def test_an_ended_conversation_lets_go_of_the_microphone_and_offers_a_new_one() -> None:
+    """Live, an ended conversation left a red stop button nobody could press,
+    and the microphone still open."""
+    app = without_comments(source("app.js"))
+    end = re.search(r"function endConversation\(why\) \{.*?\n\}", app, re.DOTALL)
+
+    assert end, "nothing ends the conversation on the page"
+    body = end.group(0)
+    assert "getTracks().forEach((t) => t.stop())" in body, "the microphone is not released"
+    assert "listening = false" in body and "listen.disabled = true" in body
+    assert 'location.href = "/"' in body, "no way to start a new conversation"
+    assert 'endConversation("ended")' in app and 'endConversation("disconnected")' in app

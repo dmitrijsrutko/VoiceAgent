@@ -132,4 +132,5 @@ def budget_reason(seconds: float) -> str:
     """
     minutes = seconds / 60
     length = f"{minutes:g} minutes" if minutes >= 1 else f"{seconds:g} seconds"
-    return f"This public demo limits a conversation to {length}. Reload to start a new one."
+    # Not "reload": reloading reopens this conversation, which has ended.
+    return f"This public demo limits a conversation to {length}. Start a new one below."

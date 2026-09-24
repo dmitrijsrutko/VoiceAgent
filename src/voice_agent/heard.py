@@ -9,6 +9,7 @@ audio it played; only the server knows which characters that audio was. The
 browser reports a duration and this module turns it into words.
 """
 
+import re
 import time
 from dataclasses import dataclass, field
 
@@ -62,6 +63,12 @@ class Spoken:
             self.ends_ms.extend(added)
         self.sent_bytes += len(chunk.pcm)
         return added
+
+    @property
+    def text(self) -> str:
+        """What this voice says: the written reply once there is one, else the
+        characters voiced so far (the greeting)."""
+        return self.message.content if self.message is not None else "".join(self.chars)
 
     @property
     def audible(self) -> bool:
@@ -134,3 +141,21 @@ def truncated(content: str, said: str) -> str | None:
     if not said.strip():
         return None
     return said.rstrip()
+
+
+SENTENCE_END = re.compile(r"[.!?…](?=\s)")
+
+
+def resume_from(written: str, said: str) -> str:
+    """What to say after an interruption nobody finished: the reply from the
+    start of the sentence it was cut in. Empty when all of it was heard.
+
+    From the sentence, not the word: "Отлично." heard, then "Деревня — это
+    контент…" said whole reads as the agent carrying on; "…это контент" cut
+    in mid-phrase reads as a glitch."""
+    if len(said.strip()) >= len(written.strip()):
+        return ""
+    # Over the whole text, not just the heard part: a full stop exactly at the
+    # cut ("Отлично.") is only a sentence end once the space after it is seen.
+    ends = [m.end() for m in SENTENCE_END.finditer(written) if m.end() <= len(said)]
+    return written[ends[-1] if ends else 0 :].strip()

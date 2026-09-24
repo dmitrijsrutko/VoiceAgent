@@ -71,10 +71,13 @@ primary_region = "iad"
   VOICE_AGENT_SESSIONS = "/data/sessions"
   # No trace in public: it holds whole prompts and replies (AGENTS.md §10).
   VOICE_AGENT_TRACE = "off"
+  # The log, as rotating files on the volume (~55 MB at most): Fly's own buffer
+  # is ~100 lines and is lost on deploy. `scripts/pull-fly.sh` downloads it.
+  VOICE_AGENT_LOGS = "/data/logs"
 
   # The caps. Off everywhere else; see `limits.py` for what each one bounds.
   VOICE_AGENT_MAX_LIVE = "4"
-  VOICE_AGENT_SESSION_BUDGET = "300"
+  VOICE_AGENT_SESSION_BUDGET = "360"
   VOICE_AGENT_MINTS_PER_IP = "10"
   VOICE_AGENT_MAX_STORED = "500"
 

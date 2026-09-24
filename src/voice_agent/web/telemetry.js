@@ -82,3 +82,28 @@ export function initiativeLine(msg) {
   const cost = msg.prompt_tokens ? ` · ${msg.prompt_tokens} in${cached}, ${msg.output_tokens} out` : "";
   return `${verdict} · ${(msg.quiet_ms / 1000).toFixed(0)}s quiet · rung ${msg.rung}/${msg.rungs} · decided in ${ms(msg.consider_ms)}${cost}`;
 }
+
+const MOVES = { challenge: "challenge", clarify: "ask", redirect: "redirect", summarise: "sum up" };
+const WHEN = ["", "a “hm?”", "the next pause", "cutting in now"];
+
+// The inner voice: what it would say, and why. Declines are counted elsewhere,
+// since most considerations end in one; failures say what failed.
+export function thoughtLine(msg) {
+  const cost = msg.prompt_tokens
+    ? ` · ${msg.prompt_tokens} in${msg.cached_tokens ? `, ${msg.cached_tokens} cached` : ""}, ${msg.output_tokens} out`
+    : "";
+  const timing = ` · ${ms(msg.consider_ms)} after ${msg.reason.replace("_", " ")}${cost}`;
+  if (msg.decision === "thought") {
+    const move = MOVES[msg.move] || msg.move;
+    return `💭 would ${move} (${WHEN[msg.urgency] || `urgency ${msg.urgency}`}): “${msg.line}” — ${msg.why}${timing}`;
+  }
+  if (msg.decision === "capped") return "💭 thinking paused: this minute's budget of calls is spent";
+  if (msg.decision === "nothing") return `🤫 nothing worth saying${timing}`;
+  if (msg.decision === "unchanged") return `🤫 nothing new to think about · after ${msg.reason.replace("_", " ")}`;
+  return `⚠️ could not think (${msg.decision}) — ${msg.message}${timing}`;
+}
+
+// The running line for declines: how many in a row, and the latest one.
+export const quietLine = (count, msg) =>
+  `🤫 ${plural(count, "consideration")}, nothing worth saying · last ${thoughtLine(msg)
+    .replace("🤫 nothing worth saying · ", "").replace("🤫 nothing new to think about · ", "")}`;

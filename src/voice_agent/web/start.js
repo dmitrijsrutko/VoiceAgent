@@ -19,15 +19,20 @@ const LABELS = {
 };
 const label = (group, name) => LABELS[group][name] ?? name;
 
+// Role cards are text somebody wrote — soon, anybody — and this page builds
+// HTML from strings, so what a card says is escaped on the way in.
+const escape = (text) =>
+  String(text).replace(/[&<>"']/g, (c) => `&#${c.charCodeAt(0)};`);
+
 function picked(group) {
   return startStack.querySelector(`input[name="${group}"]:checked`)?.value ?? "";
 }
 
-// The chosen engine and ears as a query string. The voice is never sent: it
-// is one of a kind.
+// The chosen role, engine and ears as a query string. The voice is never
+// sent: it is one of a kind.
 export function stackQuery() {
   const stack = new URLSearchParams();
-  for (const group of ["llm", "stt"]) {
+  for (const group of ["role", "llm", "stt"]) {
     const value = picked(group);
     if (value) stack.set(group, value);
   }
@@ -70,7 +75,17 @@ function languagesLine(known) {
     : "";
 }
 
+// What the picked role will do, or nothing for the plain assistant.
+function roleLine(known) {
+  const role = (known.choices?.role ?? []).find((o) => o.name === picked("role"));
+  if (!role || role.name === "none") return "";
+  return `It will play <strong>${escape(role.title)}</strong>: ${escape(role.summary)} ` +
+    "What it would say next, and why, shows under <strong>details</strong>.";
+}
+
 export function showStart(known) {
+  choose("role", "Role", known.choices?.role ?? [],
+    (o) => `${escape(o.title)} <small>${escape(o.summary)}</small>`);
   choose("llm", "Reasoning engine", known.choices?.llm ?? [],
     (o) => `${label("llm", o.name)} <small>${o.model}</small>`);
   choose("stt", "Ears", known.choices?.stt ?? [],
@@ -80,10 +95,14 @@ export function showStart(known) {
       (o) => `${label("tts", o.name)} <small>${o.voice.slice(0, 10)}</small>`, { single: true });
   }
 
+  // Both lines follow the choice: the role changes what the agent will do,
+  // and the two recognizers differ most in what they hear.
+  const playing = notice(roleLine(known));
   const heard = notice(languagesLine(known));
-  if (!heard.innerHTML) heard.remove();
-  // The languages line follows the ears: the two recognizers differ most there.
-  startStack.addEventListener("change", () => { heard.innerHTML = languagesLine(known); });
+  startStack.addEventListener("change", () => {
+    playing.innerHTML = roleLine(known);
+    heard.innerHTML = languagesLine(known);
+  });
 
   if (!known.ears) notice("This agent has <strong>no microphone</strong> — typing only.");
   if (!known.voice) notice("This agent is <strong>silent</strong> — it will not speak.");

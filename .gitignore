@@ -24,6 +24,7 @@ htmlcov/
 recordings/
 sessions/
 traces/
+fly-archive/
 *.wav
 !tests/fixtures/*.wav
 

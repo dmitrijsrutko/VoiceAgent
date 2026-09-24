@@ -360,7 +360,7 @@ def test_the_agent_talking_does_not_count_against_the_user(
     monkeypatch.setattr(mic_module, "WATCHDOG_TICK_SECONDS", 0.01)
     stt = FakeSTT(
         script=[
-            Transcript("hello there", is_final=True),
+            Transcript("Hello there.", is_final=True),  # punctuated, as both recognizers commit
             Transcript("still here", is_final=False),
         ]
     )

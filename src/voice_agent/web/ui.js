@@ -7,6 +7,7 @@ export const input = document.getElementById("input");
 export const send = document.getElementById("send");
 export const meta = document.getElementById("meta");
 export const status = document.getElementById("status");
+export const timer = document.getElementById("timer");
 export const mute = document.getElementById("mute");
 export const details = document.getElementById("details");
 export const floor = document.getElementById("floor");

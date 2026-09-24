@@ -440,3 +440,32 @@ async def test_a_commit_of_nothing_starts_the_measures_afresh() -> None:
 
     assert onset(mic) == (None, None)
     await mic.stop()
+
+
+async def test_stopping_tells_the_floor_nobody_is_listening() -> None:
+    """The floor's last word would otherwise stand: a timer started on
+    `speaking` would never hear that the microphone went away."""
+    states: list[str] = []
+
+    async def on_floor(state: str) -> None:
+        states.append(state)
+
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called, on_floor=on_floor)  # type: ignore[arg-type]
+    await mic.start()
+    await mic.stop()
+
+    assert states == ["stopped"]
+
+
+async def test_a_stopped_mic_hears_nobody_speaking_and_nothing_in_progress() -> None:
+    """The floor keeps its last state: stopped mid-word, it would say
+    `speaking` forever, holding a fragment and blocking a resume."""
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
+    await mic.start()
+    mic._floor.state = "speaking"
+    mic.partial = "half a"
+
+    await mic.stop()
+
+    assert not mic.speaking
+    assert mic.partial == ""

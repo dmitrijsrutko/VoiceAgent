@@ -99,6 +99,9 @@ class StablePrefix:
     def reset(self) -> None:
         self._recent.clear()
         self._stable.clear()
+        # Per turn, as the warning says: kept, it climbed 15 → 21 across a live
+        # session and every turn after the first reported the running total.
+        self.contradictions = 0
 
     def _agreed(self) -> list[str]:
         agreed: list[str] = []

@@ -9,10 +9,12 @@ its own adapter would undo that silently, and nothing downstream would notice.
 import pytest
 
 from tests.conftest import FakeLLM, FakeSTT
+from voice_agent import roles as roles_module
+from voice_agent.conversation import Conversation
 from voice_agent.errors import ConfigError
 from voice_agent.llm.registry import DEFAULT_MODELS
 from voice_agent.llm.registry import available as llm_available
-from voice_agent.pool import Pool
+from voice_agent.pool import Pool, Stack
 from voice_agent.stt.registry import LANGUAGES, NO_EARS, describe
 from voice_agent.stt.registry import available as stt_available
 
@@ -135,3 +137,42 @@ def test_the_recognizers_differ_in_the_way_chapter_12_cared_about() -> None:
     rather than an error."""
     assert "ru" not in LANGUAGES["assemblyai"]
     assert "rus" in LANGUAGES["elevenlabs"]
+
+
+DEVIL = roles_module.load("devils_advocate")
+
+
+def test_a_conversation_picks_its_role_and_keeps_it() -> None:
+    stack = Stack("anthropic", None, "assemblyai", roles=(DEVIL,))
+    conversation = Conversation(id="t")
+
+    _, _, first = stack.choose(conversation, {"role": "devils_advocate"})
+    _, _, again = stack.choose(conversation, {"role": "none"})
+
+    assert first == again == "devils_advocate"
+
+
+def test_an_unknown_role_is_the_default_not_an_error() -> None:
+    stack = Stack("anthropic", None, "assemblyai", roles=(DEVIL,), default_role="devils_advocate")
+
+    _, _, role = stack.choose(Conversation(id="t"), {"role": "nobody"})
+
+    assert role == "devils_advocate"
+
+
+def test_a_preselected_role_that_is_not_a_card_is_no_role() -> None:
+    assert Stack("anthropic", None, "assemblyai", default_role="nobody").default_role == "none"
+
+
+def test_the_plain_assistant_is_offered_first_and_only_with_a_card_to_choose() -> None:
+    offered = Stack("anthropic", None, "assemblyai", roles=(DEVIL,)).choices(
+        "anthropic", "assemblyai"
+    )["role"]
+    alone = Stack("anthropic", None, "assemblyai").choices("anthropic", "assemblyai")["role"]
+
+    assert [(o["name"], o["default"]) for o in offered] == [
+        ("none", True),
+        ("devils_advocate", False),
+    ]
+    assert offered[1]["title"] == DEVIL.name
+    assert alone == []

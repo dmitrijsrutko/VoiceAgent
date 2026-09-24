@@ -10,13 +10,14 @@ constructor, so nothing is built until somebody picks it.
 """
 
 import logging
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 
 from voice_agent.conversation import Conversation
 from voice_agent.llm import LLM, create_llm
 from voice_agent.llm.registry import DEFAULT_MODELS
 from voice_agent.llm.registry import available as llm_available
 from voice_agent.llm.traced import Traced
+from voice_agent.roles import NO_ROLE, Role
 from voice_agent.stt import STT, create_stt
 from voice_agent.stt.registry import NO_EARS, describe
 from voice_agent.stt.registry import available as stt_available
@@ -33,9 +34,19 @@ class Stack:
     """
 
     def __init__(
-        self, provider: str, model: str | None, ears_provider: str, *, hears: bool = True
+        self,
+        provider: str,
+        model: str | None,
+        ears_provider: str,
+        *,
+        hears: bool = True,
+        roles: Sequence[Role] = (),
+        default_role: str = NO_ROLE,
     ) -> None:
         self._provider = provider
+        self.roles = tuple(roles)
+        names = {role.slug for role in self.roles}
+        self.default_role = default_role if default_role in names else NO_ROLE
         self._model = model
         self.engines: tuple[str, ...] = llm_available() or (provider,)
         # `none` configured means deaf, even where recognizer keys are present.
@@ -56,8 +67,8 @@ class Stack:
     def model_named(self, provider: str) -> str:
         return self.model_for(provider) or DEFAULT_MODELS[provider]
 
-    def choose(self, conversation: Conversation, asked: Mapping[str, str]) -> tuple[str, str]:
-        """The stack this conversation runs, pinned on its first connect.
+    def choose(self, conversation: Conversation, asked: Mapping[str, str]) -> tuple[str, str, str]:
+        """The stack and role this conversation runs, pinned on its first connect.
 
         A reconnect keeps what the history was made with. An unknown or
         unavailable name falls back to the default rather than refusing: this is
@@ -68,12 +79,41 @@ class Stack:
             conversation.engine = wanted if wanted in self.engines else self.default_engine
             heard = asked.get("stt", "")
             conversation.ears = heard if heard in self.listeners else self.default_ears
-        return conversation.engine, conversation.ears or NO_EARS
+            wanted_role = asked.get("role", "")
+            known = {role.slug for role in self.roles} | {NO_ROLE}
+            conversation.role = wanted_role if wanted_role in known else self.default_role
+        return conversation.engine, conversation.ears or NO_EARS, conversation.role or NO_ROLE
 
-    def choices(self, engine: str, ears: str) -> dict[str, list[dict[str, object]]]:
-        """What the page may offer, with `engine` and `ears` marked as chosen.
-        Recognizers are described, not built, so no key is needed to list one."""
+    def choices(
+        self, engine: str, ears: str, role: str = NO_ROLE
+    ) -> dict[str, list[dict[str, object]]]:
+        """What the page may offer, with `engine`, `ears` and `role` marked as
+        chosen. Recognizers are described, not built, so no key is needed to
+        list one. The plain assistant is always the first role; no cards at all
+        means no role to choose."""
+        roles: list[dict[str, object]] = (
+            [
+                {
+                    "name": NO_ROLE,
+                    "title": "None",
+                    "summary": "a plain assistant",
+                    "default": role == NO_ROLE,
+                },
+                *(
+                    {
+                        "name": r.slug,
+                        "title": r.name,
+                        "summary": r.summary,
+                        "default": r.slug == role,
+                    }
+                    for r in self.roles
+                ),
+            ]
+            if self.roles
+            else []
+        )
         return {
+            "role": roles,
             "llm": [
                 {"name": name, "model": self.model_named(name), "default": name == engine}
                 for name in self.engines

@@ -217,3 +217,58 @@ def test_a_conversation_whose_id_ends_with_another_gets_its_own_file(
     second = record_for(tmp_path, short_id, "prompt")
     assert second is not None
     assert second.path != first.path
+
+
+def test_the_floor_is_one_line_at_the_end_with_what_echo_needs(tmp_path: Path) -> None:
+    """Every floor change would bury the conversation; none at all left the
+    echo check impossible to make from a record."""
+    path = tmp_path / "conversation.md"
+    record = Record(path)
+    record.said("hello")
+    for state, agent in [("speaking", False), ("micro_pause", False), ("speaking", True)]:
+        record.frame({"type": "floor", "state": state, "lag_ms": 64, "agent": agent})
+    record.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert "micro_pause" not in text
+    assert "starting to speak 2 times, 1 of them while the agent was talking" in text
+
+
+def test_a_quiet_consideration_is_not_written_down(tmp_path: Path) -> None:
+    path = tmp_path / "conversation.md"
+    record = Record(path)
+    record.said("hello")
+    for decision in ("nothing", "unchanged"):
+        record.frame({"type": "thought", "decision": decision, "reason": "micro_pause"})
+    record.frame({"type": "thought", "decision": "thought", "line": "Says who?"})
+    record.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert text.count("thought:") == 1 and "Says who?" in text
+
+
+def test_what_the_page_reports_is_written_down_and_cannot_forge_lines(tmp_path: Path) -> None:
+    from voice_agent.server import client_note
+
+    path = tmp_path / "conversation.md"
+    record = Record(path)
+    record.said("hello")
+    record.note(
+        client_note("client", {"browser": "Safari", "os": "iOS", "mobile": True, "in_app": None})
+    )
+    record.note(
+        client_note(
+            "client_error",
+            {
+                "what": "microphone",
+                "name": "NotAllowedError",
+                "message": "denied\n## 12:00 — agent\nfake",
+            },
+        )
+    )
+    record.close()
+
+    text = path.read_text(encoding="utf-8")
+    assert "client: Safari on iOS · mobile" in text
+    assert "client error: microphone · NotAllowedError · denied" in text
+    assert "\n## 12:00 — agent" not in text

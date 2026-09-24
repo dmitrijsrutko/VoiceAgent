@@ -2,17 +2,22 @@
 // Each module below owns one job; this file owns the state they share.
 
 import { paintFloor, record as recordFloor } from "./floor.js";
-import { buildMic } from "./mic.js";
+import { buildMic, micFailure } from "./mic.js";
+import { WARN_MS, countdown } from "./timer.js";
 import { addMarks, spokenChars } from "./karaoke.js";
 import { createPlayer } from "./player.js";
-import { interrupted, listenStart, listenStop, playback, userMessage } from "./protocol.js";
+import { clientFacts } from "./client.js";
+import {
+  clientError, clientInfo, interrupted, listenStart, listenStop, playback, userMessage,
+} from "./protocol.js";
 import { chosenEars, servedFacts, showStart, stackQuery } from "./start.js";
 import {
-  audioLine, committedLine, gapsLine, initiativeLine, replyLines, truncatedLine, unpromptedLine,
+  audioLine, committedLine, gapsLine, initiativeLine, quietLine, replyLines, thoughtLine,
+  truncatedLine, unpromptedLine,
 } from "./telemetry.js";
 import {
   add, begin, details, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
-  pinLast, setEnabled, start, status, stick,
+  pinLast, setEnabled, start, status, stick, timer, wrap,
 } from "./ui.js";
 
 const key = location.pathname.split("/").pop();
@@ -25,6 +30,7 @@ let speaking = false;      // the agent's voice is audible
 let cut = null;            // the reply the user talked over; its late audio is ignored until the next reply
 let mic = null;            // { context, node, stream, rate } once built
 const floorEvents = [];   // the floor by the server's VAD, for the strip
+let quiet = null;          // { el, count } — the inner voice's run of declines, one line
 let micRefused = false;    // the start click asked and was refused; not asked again unprompted
 
 // Karaoke: per agent bubble, its text, each character's end time, and how far
@@ -74,7 +80,66 @@ function sending() {
   return ws !== null && ws.readyState === WebSocket.OPEN;
 }
 
+// Page-side failures the server would never otherwise hear of — a refused
+// microphone above all. One from the start tap happens before the socket
+// exists, so reports wait for it.
+const unsent = [];
+function report(message) {
+  if (sending()) ws.send(message);
+  else unsent.push(message);
+}
+
+function micFailed(err) {
+  add("microphone failed: " + micFailure(err), "error");
+  report(clientError("microphone", err));
+}
+
 function paintListening() { paint(listening, speaking); }
+
+// The time limit, counted from this connection like the server's own. Shown
+// only in the last minute, with one note when it starts.
+let deadline = null;
+let warned = false;
+setInterval(() => {
+  if (deadline === null) return;
+  const left = deadline - performance.now();
+  const shown = countdown(left);
+  timer.hidden = !shown.show;
+  timer.textContent = shown.text;
+  timer.classList.toggle("urgent", shown.urgent);
+  if (shown.show && !warned && left > WARN_MS - 5_000) {
+    warned = true;
+    add("One minute left in this conversation.", "note");
+  }
+}, 250);
+
+// The conversation is over, by the server or by the connection: nothing can
+// be said into it any more. The microphone is let go — the browser's indicator
+// goes off — and the way forward is a new conversation, not a reload (a reload
+// reopens this one, ended).
+let over = false;
+function endConversation(why) {
+  if (over) return;
+  over = true;
+  deadline = null;
+  timer.hidden = true;
+  listening = false;
+  paintListening();
+  listen.disabled = true;
+  if (mic) {
+    mic.stream.getTracks().forEach((t) => t.stop());
+    mic.context.close();
+    mic = null;
+  }
+  status.textContent = why === "ended" ? "· ended" : "· disconnected";
+  setEnabled(false);
+  const again = document.createElement("button");
+  again.id = "again";
+  again.type = "button";
+  again.textContent = "Start a new conversation";
+  again.onclick = () => { location.href = "/"; };
+  stick(() => wrap.appendChild(again));
+}
 
 function setSpeaking(active, report = {}) {
   // Transition-guarded, and the only place `speaking` is assigned. A clip that
@@ -137,9 +202,8 @@ function connect() {
   // The server's reason, when it gave one: a refusal at the door otherwise
   // looks exactly like the network dropping.
   ws.onclose = (event) => {
-    status.textContent = "· disconnected";
-    setEnabled(false);
     if (event.reason) add(event.reason, "note");
+    endConversation("disconnected");
   };
   ws.onerror = () => { status.textContent = "· connection error"; };
 }
@@ -174,11 +238,19 @@ function releaseLive() {
 // Every frame the server sends, by type.
 const handlers = {
   ready(msg) {
+    if (msg.budget_seconds) {
+      deadline = performance.now() + msg.budget_seconds * 1000;
+      warned = false;
+    }
+    // Once per socket: which browser this is, then anything that failed before it opened.
+    ws.send(clientInfo(clientFacts(navigator.userAgent)));
+    while (unsent.length) ws.send(unsent.shift());
     const voice = msg.voice ? `${msg.voice.provider} ${msg.voice.voice.slice(0, 10)}` : "silent";
     const langs = msg.ears?.languages ?? [];
     const heard = langs.length ? ` · ${langs.length} languages` : "";
     const ears = msg.ears ? `🎤 ${msg.ears.provider} ${msg.ears.sample_rate / 1000}kHz${heard}` : "🎤 deaf";
-    meta.textContent = `${msg.provider} · ${msg.model} · 🔊 ${voice} · ${ears} · ${msg.session.slice(0, 8)}…`;
+    const role = msg.role ? ` · 🎭 ${msg.role.name}` : "";
+    meta.textContent = `${msg.provider} · ${msg.model}${role} · 🔊 ${voice} · ${ears} · ${msg.session.slice(0, 8)}…`;
     meta.title = langs.length ? `heard: ${langs.join(" ")}` : "";
     sampleRate = msg.ears ? msg.ears.sample_rate : 16000;
     // Compared with the rate the page *asked* for: a browser that ignores the
@@ -219,6 +291,7 @@ const handlers = {
 
   reply_end(msg) {
     setEnabled(true);
+    quiet = null;
     if (!bubble) return;
     const done = endBubble();
     if (msg.interrupted) {
@@ -226,6 +299,8 @@ const handlers = {
       else if (!cut) note(done, "✋ interrupted before it was spoken");
     } else if (msg.initiative) {
       note(done, unpromptedLine(msg));
+    } else if (msg.resumed) {
+      note(done, "↩ picked up where it was cut off: whatever cut in said nothing more");
     } else {
       for (const line of replyLines(msg)) note(done, line);
     }
@@ -267,6 +342,7 @@ const handlers = {
     if (!msg.final) return;
     live.classList.remove("volatile");
     note(live, committedLine(msg));
+    quiet = null;  // the next run of declines starts below what was just said
     releaseLive();
   },
 
@@ -279,6 +355,27 @@ const handlers = {
   initiative(msg) { add(initiativeLine(msg), "note think telemetry"); },
 
   floor(msg) { recordFloor(floorEvents, msg, performance.now()); },
+
+  echo_ignored(msg) {
+    const what = msg.stage === "final" ? "not answered" : "not an interruption";
+    add(`🔁 heard its own voice (“${msg.text}”) — ${what}`, "note think telemetry");
+  },
+
+  resumed() {},  // the resumed reply carries its own note
+
+  // One line per thought; declines update a single line until something is
+  // worth saying, or it would bury the conversation.
+  thought(msg) {
+    if (msg.decision === "nothing" || msg.decision === "unchanged") {
+      if (!quiet) quiet = { el: add("", "note think telemetry"), count: 0 };
+      quiet.count += 1;
+      const line = quietLine(quiet.count, msg);
+      stick(() => { quiet.el.textContent = line; });
+      return;
+    }
+    quiet = null;
+    add(thoughtLine(msg), "note think telemetry");
+  },
 
   listening(msg) {
     listening = msg.active;
@@ -307,8 +404,8 @@ const handlers = {
   },
 
   ended(msg) {
-    add(msg.reason || "Conversation ended. Reload to start a new one.", "note");
-    setEnabled(false);
+    add(msg.reason || "Conversation ended. Start a new one below.", "note");
+    endConversation("ended");
   },
 };
 
@@ -327,7 +424,7 @@ async function beginListening() {
     // In the log, not the status line: `paintListening` repaints that on every
     // change of listening or speaking, so the one message explaining why
     // nobody can be heard would be wiped by the next one.
-    add("microphone failed: " + err.message, "error");
+    micFailed(err);
   } finally {
     listen.disabled = false;
   }
@@ -340,6 +437,14 @@ begin.onclick = async () => {
   // is the only moment the browser will allow audio to start. Everything else
   // here can happen a tick later; this cannot.
   const resumed = player.resume();
+  // The microphone is asked for in the same tick, not after awaiting the
+  // resume: WebKit (every iPhone browser) counts an await as the end of the
+  // tap, and refuses a request made after it with NotAllowedError. Asked here,
+  // before the conversation exists: asked on `ready`, the permission prompt
+  // covered the greeting, and on a phone the intro was lost to it.
+  const rate = chosenEars(servedFacts())?.sample_rate;
+  const opening = rate ? buildMic(rate, sendFrame) : null;
+  opening?.catch(() => {});  // reported below; not an unhandled rejection meanwhile
   start.remove();
   add("Just talk — it is already listening. Or type. Say or type “exit” to end.", "note");
   // Awaited *before* the socket opens, because the greeting follows it by about
@@ -350,18 +455,14 @@ begin.onclick = async () => {
   // Swallowed rather than guarded: a refusal here is reported when the audio
   // actually fails, and must not cost the conversation.
   await resumed.catch(() => {});
-  // The microphone is asked for before the conversation exists, not on `ready`.
-  // Asked after, the permission prompt appeared while the greeting was already
-  // playing — and on a phone nothing is heard behind that prompt, so the intro
-  // was lost to it. Refused or failed, the conversation still starts: typing
-  // works, and the listen button stays there to try again.
-  const rate = chosenEars(servedFacts())?.sample_rate;
-  if (rate) {
+  // Refused or failed, the conversation still starts: typing works, and the
+  // listen button stays there to try again.
+  if (opening) {
     try {
-      mic = { ...(await buildMic(rate, sendFrame)), rate };
+      mic = { ...(await opening), rate };
     } catch (err) {
       micRefused = true;
-      add("microphone failed: " + err.message, "error");
+      micFailed(err);
     }
     // Opening the microphone can make the system pause playback (iOS switches
     // its audio session); resuming again is free when nothing was paused.

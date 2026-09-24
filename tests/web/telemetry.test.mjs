@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  audioLine, committedLine, gapsLine, initiativeLine, ms, replyLines, truncatedLine,
+  audioLine, committedLine, gapsLine, initiativeLine, ms, quietLine, replyLines, thoughtLine,
+  truncatedLine,
 } from "../../src/voice_agent/web/telemetry.js";
 
 const reply = {
@@ -96,4 +97,31 @@ test("a commit is timed from when the VAD heard you stop, when it did", () => {
 test("without the VAD, a commit keeps the recognizer's own clock", () => {
   const line = committedLine({ endpoint_ms: 400, speech_end_ms: null, first_words_ms: null });
   assert.equal(line, "🎙 committed 400 ms after your last recognised word");
+});
+
+const thought = {
+  decision: "thought", move: "challenge", urgency: 2, line: "Says who?", why: "no evidence",
+  reason: "micro_pause", consider_ms: 640, prompt_tokens: 1200, cached_tokens: 0, output_tokens: 80,
+};
+
+test("a thought says what it would do, when, and why", () => {
+  const line = thoughtLine(thought);
+  assert.match(line, /^💭 would challenge \(the next pause\): “Says who\?” — no evidence/);
+  assert.match(line, /640 ms after micro pause · 1200 in, 80 out$/);
+});
+
+test("a failure says what failed, and a cap says the budget is spent", () => {
+  assert.match(thoughtLine({ ...thought, decision: "malformed", message: "not JSON" }), /could not think \(malformed\) — not JSON/);
+  assert.match(thoughtLine({ ...thought, decision: "capped" }), /budget of calls is spent/);
+});
+
+test("a run of declines is one counted line", () => {
+  const line = quietLine(3, { ...thought, decision: "nothing", prompt_tokens: 0 });
+  assert.equal(line, "🤫 3 considerations, nothing worth saying · last 640 ms after micro pause");
+});
+
+test("nothing new to think about joins the quiet line", () => {
+  const msg = { decision: "unchanged", reason: "micro_pause", consider_ms: 0, prompt_tokens: 0 };
+  assert.equal(thoughtLine(msg), "🤫 nothing new to think about · after micro pause");
+  assert.equal(quietLine(2, msg), "🤫 2 considerations, nothing worth saying · last after micro pause");
 });

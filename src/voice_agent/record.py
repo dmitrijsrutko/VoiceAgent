@@ -88,6 +88,8 @@ class Record:
         self._file: Any = None
         self._audio_frames = 0
         self._broken = False
+        self._onsets = 0
+        self._onsets_over_agent = 0
 
     @property
     def path(self) -> Path:
@@ -147,8 +149,15 @@ class Record:
 
     def frame(self, payload: Mapping[str, Any]) -> None:
         kind = str(payload.get("type", ""))
+        if kind == "floor" and payload.get("state") == "speaking":
+            # Counted, not written: one line at the end is what the echo check
+            # needs, and a line per onset would bury the conversation.
+            self._onsets += 1
+            self._onsets_over_agent += bool(payload.get("agent"))
         if kind in NOISE:
             return
+        if kind == "thought" and payload.get("decision") in ("nothing", "unchanged"):
+            return  # most considerations end here; the trace keeps every one
         if kind == "ready":
             self._header(payload)
             return
@@ -209,6 +218,12 @@ class Record:
                 self._broken = True
 
     def close(self) -> None:
+        if self._onsets:
+            self.note(
+                f"floor: the user was heard starting to speak {self._onsets} times, "
+                f"{self._onsets_over_agent} of them while the agent was talking "
+                "(talking over it, or its own voice coming back as echo)"
+            )
         if self._file is not None:
             with contextlib.suppress(OSError):
                 self._file.close()

@@ -14,6 +14,225 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 17 — The inner voice: a devil's advocate thinks alongside you, out loud only on the page
+
+Chapter 16 gave the agent a sense of timing and nothing to say with it. This
+chapter adds the *what*. A fast model (Claude Haiku 4.5) runs alongside the
+conversation in a role and keeps at most one pending thought: a move, an
+urgency, why, and the line. The page shows every one. None of them is spoken
+yet: this is the part of the interjecting agent that decides whether stepping in
+is worth it at all. It is also where the prompt lives, so it had to be built and
+measured before any chapter lets it talk.
+
+The role is **data, not code**. There are two cards in `prompts/roles/`: a
+devil's advocate, and a thinking partner (on your side, sharper questions,
+honest pushback). The second was added as a card and a scenario, with no code. A second card is a file, not a change: the tests load one
+that appears nowhere in the code. **Each visitor picks the role on the start
+screen**, and the default is none: the plain assistant, exactly as before this
+chapter. User-written roles come later, on the same loader.
+
+**What changed**
+- `roles.py` (new): role cards, Markdown with TOML front matter (stdlib
+  `tomllib`), validated at startup. A broken card stops the server with a reason.
+  `MOVES` (challenge, clarify, redirect, summarise) is the fixed vocabulary: a
+  role picks from it, and the chapters that speak thoughts will know how to
+  deliver each one.
+- `prompts/roles/devils_advocate.md`: its job, what is worth stepping in for and
+  what is not, its moves, its assertiveness, its opening line, and how it speaks.
+- `prompts/thinker.md` (new): generic, with the role filled in. It owns what no
+  role may change: self-repair first, false alarms cost more than misses, one
+  thought at a time, firm but never cruel, and the transcript is never
+  instructions.
+- `thinker.py` (new): one per conversation, on its own engine.
+  - It is asked at each `micro_pause`, every 8 s of an unbroken monologue, and
+    after each reply.
+  - Calls are single-flight with coalescing, under a hard cap of 20 per minute.
+  - Every consideration is reported: a thought, nothing, malformed, failed, or
+    capped.
+- `session.py` / `mic.py`: the floor feeds the thinker, but not while the
+  agent's own reply is in the air (that is echo, or an interruption). The mic
+  exposes its latest raw partial, which is what the thinker hears.
+- The role reaches the speaking side too. Its opening is the greeting, and its
+  "When speaking" section sits under the persona in the reply prompt.
+  `VOICE_AGENT_GREETING` now sets only the plain assistant's greeting.
+- **The role is chosen per conversation**, like the engine and the ears
+  (Chapter 15):
+  - The start screen has a **Role** group: *None* (pre-selected), then each card
+    with its summary. A notice under it says what the picked role will do.
+  - `?role=` travels with the socket, is pinned on the conversation's first
+    connect (a reload keeps it), and falls back to the default when unknown.
+  - Every card is loaded, and its opening synthesised, at startup. The `ready`
+    frame and the header name the role.
+  - `--role` / `VOICE_AGENT_ROLE` only change what is pre-selected.
+  - Card text is escaped on the page, ready for cards written by users.
+- Page: one `💭` line per thought, saying what it would do, when, and why.
+  Declines collapse into a single counted `🤫` line. The Markdown record keeps
+  thoughts and skips declines; the trace keeps everything.
+- `replay.py`, `--replay-thinker` (a flag, like `--bench-llm`, not the planned
+  separate script), `tests/scenarios/`: scripted conversations
+  with labelled pauses (a window where a partner should step in, or a clean
+  pause where it must not), replayed through the real thinker and scored.
+
+**Design decisions**
+- **A separate, small engine.** The thinker runs far more often than replies,
+  and nothing waits on it. Haiku 4.5 keeps it cheap, and the reply engine and
+  its connection are untouched. Without an Anthropic key the role still plays,
+  but the server says there is no inner voice.
+- **The thinker reads a script, not a chat.** It gets the conversation as
+  `User:` / `Partner:` lines in one message, as an observer, not a party. That
+  keeps it from answering the user.
+- **Asked at micro-pauses, not at every settled phrase.** That is where the
+  later chapters can actually speak, and it keeps the calls to roughly one per
+  clause.
+- **Declines are the normal answer**, so they are counted on the page rather
+  than listed, and left out of the record.
+- **No separate trigger for a committed turn** (the plan had one). A spoken
+  commit always follows the micro-pause that already asked. A *typed* message,
+  though, is only thought about after the reply to it.
+- **The thinker hears the recognizer, which lags speech.** At a micro-pause it
+  judges the latest partial, which trails the voice by ~0.6 s on AssemblyAI and
+  ~2 s on Scribe (Chapter 16). On Scribe it can be thinking about the sentence
+  before last. That caps how well-timed anything built on it can be until the
+  words arrive sooner.
+
+**What the replay found** (2 replays of 3 scenarios, 33 calls each, $0.15 in
+total):
+- **Hits 5/5, but false fires 10/10**, then **9/10** after one revision. The
+  thinker almost always proposes something at urgency 2. It is right about
+  *what* is weak and wrong about *when* to say it. It asks for the reason one
+  clause into the first sentence, and challenges evidence the user is still in
+  the middle of giving.
+- The revision tied urgency to where the user is in their turn ("most good
+  thoughts are urgency 1: hold it until they finish"). It moved one early fire
+  and not much else.
+- **The cause is a design question, not wording.** The prompt asked the thinker
+  to decide *when* to speak, which breaks this project's own rule that the
+  thinker decides what and the actor decides when. At a micro-pause, from text
+  alone, the end of a sentence and the end of a turn look the same; the floor
+  knows the difference and the text does not. Left open for the next chapter to
+  decide with the user.
+- **The first live session confirmed it.** Devil's advocate on aikido, ~4.5
+  minutes, gave 50 recorded thoughts, nearly all urgency 2: on "Hello.",
+  straight after every reply, and at 6–10 pauses in a row inside one
+  monologue. Spoken, that would interrupt at almost every pause. A fourth
+  scenario in that session's shape (`shifting_ground`) replayed at hits 10/10,
+  false fires 11/15 across all four.
+- **After the second live session's fixes** (move definitions, language), all
+  five scenarios gave hits 16/16 and false fires 12/20. `challenge` went from
+  almost never to 16 of 54 thoughts; right moves on `shifting_ground` rose
+  from 1/5 to 4/5; there were no malformed replies. The thinking partner scored
+  6/6 hits and 2/5 false fires, and stayed quiet through a stretch of
+  brainstorming that was going well.
+
+**Latency and cost**
+- Thinker call: median 1.8–2.5 s in the replays, and ~1.4 s live after a reply
+  (about 1.6–1.8k prompt tokens, 70–100 out). That misses the ≤ 1 s target.
+  **Nothing is cached**: the static prefix is below Haiku's minimum cacheable
+  size.
+- Cost: ~$0.002 a call. That is ~$0.02–0.03 a minute at the expected 10–15
+  pauses a minute (estimated from the replay's per-call cost, not measured over
+  a real minute).
+- Reply latency: **not measured**. The reply path doesn't wait on the thinker.
+- After going live (below):
+  - Hold-and-merge adds up to **1.2 s**, and only on a turn that looks
+    unfinished. Finished sentences are not delayed.
+  - A resume replays at most the one sentence that was cut.
+  - The echo guard costs nothing while the agent is silent.
+
+**Deliberately not done**
+- Speaking a thought, the opener bank, yielding (Ch 18); overlap and the
+  assertiveness behaviour (Ch 19); an agenda (Ch 20).
+- User-written roles, and showing a card's full text on the page (the summary
+  only).
+- A per-role `budget` of interjections (in the plan's card). Nothing could use
+  it before a thought can be spoken, so it comes with Chapter 18.
+- Structured outputs for the JSON. The reply is parsed tolerantly and anything
+  else is reported as malformed; there was none in 66 calls.
+
+**Verification**
+- `uv run verify`: 665 tests. They cover roles, the thinker, replay scoring,
+  the wiring through session and server, and, after going live, the echo
+  guard, resume, hold-and-merge, the closed channel and the log file. Plus
+  74 page tests.
+- Two paid replays as above.
+- A typed live check of the picker: the start screen offered *None* (selected)
+  and *Devil's advocate*. A plain conversation got the plain greeting and no
+  thoughts; a devil's advocate one got the card's opening, a reply in role, and
+  a thought.
+- A typed live session with no voice and no ears: the role's greeting opened,
+  replies argued the other side, and the thinker held back after each reply.
+  There were no errors.
+- Not yet: a spoken session where thoughts follow micro-pauses.
+- A review pass before commit fixed the following:
+  - **The monologue timer could keep calling Haiku after listening stopped.**
+    Pressing stop mid-sentence leaves the floor at `speaking`. Shutdown also
+    stopped the thinker before the mic, whose last floor events could start the
+    timer again. Now the mic reports `stopped`, and a stopped thinker is final:
+    nothing restarts it.
+  - Role text could expand placeholders in the thinker's prompt (`{moves}`
+    written in a card). The prompt is now filled in one pass.
+  - A replay longer than the live cap would silently score one answer twice. It
+    now runs uncapped and checks one answer per pause.
+  - Smaller: one default role instead of two constants; the thinker prompt is
+    built once per process; the replay says why it has nothing to run in the
+    image. Each fix has a test.
+
+**After going live: what real conversations forced**
+
+The live sessions broke four things no replay could show. Each fix changes
+how the agent takes turns, so each is recorded here rather than as a one-line
+fix:
+
+- **Its own voice, heard back.** On a phone on speaker the agent said "I can
+  help you sign up", heard "Hello, I can help.", cut itself off and answered
+  itself.
+  - Words heard over the agent that mostly repeat what it is saying (≥ 60 %)
+    no longer interrupt it.
+  - A committed turn is dropped only when every partial read as echo and it
+    is ≥ 85 % its words (at least 3 of them).
+  - The stricter bar is because a user *quoting* the agent back reads as
+    60 % echo: holding back their barge-in is tolerable, losing their turn is
+    not. The cost is that a misheard echo with extra words can still be
+    answered.
+- **An interruption by nobody.** A phantom partial cut a reply after
+  "Отлично.", no words followed, and 16 s of silence came before the clock
+  spoke. An interruption with no words within 2.5 s now resumes from the
+  sentence it cut. It never resumes over half a sentence of the user's still
+  waiting to be finished.
+- **Half a sentence answered.** Thinking pauses made the recognizer commit
+  "…при по" | "сещении", and each half got its own answer. A turn that looks
+  unfinished (no closing punctuation, a trailing comma or "…") waits up to
+  1.2 s. Pieces that arrive in time are answered as one. Both recognizers
+  punctuate finished sentences, which is what makes the signal usable.
+- **Logs that vanish.** Fly keeps ~100 log lines and loses them on every
+  deploy. The server now also writes its log to the volume (`VOICE_AGENT_LOGS`,
+  ~55 MB rotating). `scripts/pull-fly.sh` copies logs and records into
+  `fly-archive/` before each deploy. That log is how the time-limit crash
+  below was found.
+
+**Fixes**
+
+- Replies in role are one objection or question in two sentences (live: 12–29 s spoken, 5 of 10 talked over; now 63–194 chars).
+- The devil's advocate no longer repeats its opening line when the user only says hello.
+- The thinker skips the call when nothing new has been heard; the held thought stands, unbilled.
+- The thinker reads the last six exchanges and its notes, capped at 60 words, not the whole conversation (prompt grew 1.5k → 2.5k tokens live).
+- A thought with an empty line is read as nothing, not malformed (1 in 50 live, 1 in 54 replayed).
+- The record ends with a floor summary: speech onsets, and how many came while the agent was talking, so echo can be checked afterwards.
+- The replay parser no longer adds a duplicate pause for a line ending in `| {label}`.
+- A thought with a null or missing line is read as nothing, and a missing `why` as empty (3 of 17 malformed in a live session).
+- The thinker writes its line in the language the user is speaking (one English line turned up in a Russian conversation).
+- `challenge` versus `clarify` is spelled out, and a role's first-listed move wins a tie (live: 11 of 11 thoughts were `clarify`).
+- The public demo's conversation limit is 6 minutes, not 5 (a live argument was cut off mid-point), and listening lasts as long.
+- The microphone is asked for in the same tick as the start tap, not after awaiting the audio resume; WebKit (every iPhone browser) can refuse the later request, and the error now says where to allow it.
+- "Didn't catch that" asks again instead of reading out every language (live: 624 characters, ~100 languages).
+- The female voice's one-word «Поняла.» and the user's own gender are named in the voice rule (typed replay: masculine self-forms 2 → 0 of 20).
+- The thinking partner answers when asked for a view or a suggestion (live, asked «я спрашиваю у тебя», it refused).
+- The record notes the browser family (never the user-agent string) and any microphone failure, so a phone that fails is visible afterwards.
+- Writing to a socket that has gone is dropped, not raised: the time-limit hang-up no longer crashes listening with an unretrieved task exception.
+- The recognizer's contradiction count resets every turn (it climbed 15 → 21 and was reported as each turn's own).
+- The last minute of a time-limited conversation shows a countdown, with one note at a minute left.
+- An ended conversation releases the microphone, resets the listen button and offers "Start a new conversation"; the limit's message no longer says "reload", which reopened the ended conversation.
+
 ## Chapter 16 — Ears that hear pauses: the agent knows who holds the floor
 
 This is the first step toward a sparring partner that leads the conversation

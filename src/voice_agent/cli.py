@@ -2,11 +2,14 @@
 
 import argparse
 import logging
+import os
+import time
 from pathlib import Path
 
 import uvicorn
 from dotenv import load_dotenv
 
+from voice_agent import roles
 from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, load_settings
 from voice_agent.llm import registry as llm_registry
 from voice_agent.stt import registry as stt_registry
@@ -64,6 +67,13 @@ def main() -> None:
         f"for the purely reactive agent (default: {DEFAULT_INITIATIVE_DELAYS})",
     )
     parser.add_argument(
+        "--role",
+        default=settings.role,
+        choices=[*roles.available(), roles.NO_ROLE],
+        help="the role pre-selected on the start screen, from prompts/roles/, or 'none' for "
+        "the plain assistant; each conversation still picks its own (default: %(default)s)",
+    )
+    parser.add_argument(
         "--sessions",
         default=None,
         metavar="DIR",
@@ -92,6 +102,13 @@ def main() -> None:
         help="time to first token per provider, over a few short billed calls, then exit "
         "(default: deepseek, openai, anthropic:claude-haiku-4-5, anthropic)",
     )
+    parser.add_argument(
+        "--replay-thinker",
+        nargs="*",
+        metavar="SCENARIO",
+        help="replay scripted conversations from tests/scenarios/ through the inner voice "
+        "and score it, then exit; billed, one call per pause (default: all)",
+    )
     args = parser.parse_args()
 
     # create_app() reads these back out of the environment, so the flags and
@@ -110,6 +127,7 @@ def main() -> None:
         os.environ["VOICE_AGENT_VAD_SILENCE"] = str(args.vad_silence)
     if args.initiative is not None:
         os.environ["VOICE_AGENT_INITIATIVE"] = args.initiative
+    os.environ["VOICE_AGENT_ROLE"] = args.role
     if args.sessions is not None:
         os.environ["VOICE_AGENT_SESSIONS"] = args.sessions
     if args.trace is not None:
@@ -121,6 +139,12 @@ def main() -> None:
         from voice_agent.bench import main as bench
 
         bench(args.bench_llm)
+        return
+
+    if args.replay_thinker is not None:
+        from voice_agent.replay import main as replay
+
+        replay(args.replay_thinker)
         return
 
     if args.purge_sessions:
@@ -183,12 +207,51 @@ def start_logging() -> None:
     root.setLevel(logging.WARNING)  # third-party loggers unchanged
     root.addHandler(console)
 
-    tracing = open_trace(load_settings().trace)
+    settings = load_settings()
+    kept = open_log_file(settings.logs)
+    if kept is not None:
+        root.addHandler(kept)
+        # Our own INFO reaches the file; the console's handler still holds at WARNING.
+        logging.getLogger("voice_agent").setLevel(logging.INFO)
+        logging.getLogger("voice_agent").info(
+            "process started · image %s", os.environ.get("FLY_IMAGE_REF", "local")
+        )
+
+    tracing = open_trace(settings.trace)
     install(tracing)
     if tracing is not None:
         project = logging.getLogger("voice_agent")
         project.setLevel(logging.DEBUG)  # our own INFO reaches the trace
         project.addHandler(TraceHandler())  # and only the trace
+
+
+LOG_FILE_BYTES = 5_000_000
+LOG_FILES_KEPT = 10
+"""At most ~55 MB of log on the volume, oldest dropped first."""
+
+
+def open_log_file(directory: Path | None) -> logging.Handler | None:
+    """A rotating log file in `directory`, for a history that outlives the
+    process: the machine's own log buffer is ~100 lines and is gone after a
+    deploy. INFO and above, UTC timestamps. `None` when switched off."""
+    if directory is None:
+        return None
+    from logging.handlers import RotatingFileHandler
+
+    directory.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        directory / "voice-agent.log",
+        maxBytes=LOG_FILE_BYTES,
+        backupCount=LOG_FILES_KEPT,
+        encoding="utf-8",
+    )
+    handler.setLevel(logging.INFO)
+    formatter = logging.Formatter(
+        "%(asctime)s %(levelname)s %(name)s: %(message)s", "%Y-%m-%dT%H:%M:%SZ"
+    )
+    formatter.converter = time.gmtime
+    handler.setFormatter(formatter)
+    return handler
 
 
 def purge_sessions(directory: Path | None) -> None:
