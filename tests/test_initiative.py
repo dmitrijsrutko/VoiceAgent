@@ -281,14 +281,14 @@ def test_the_ladder_finishes_before_the_ears_close() -> None:
     listening at 32 s and the withdrawal at 45 s never arrived — the ears
     closed without the agent ever saying goodbye. The last rung has to land
     inside that window, with room for the line itself."""
-    from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, _delays
+    from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, parse_delays
     from voice_agent.initiative import LADDER as SHIPPED
     from voice_agent.mic import IDLE_TIMEOUT_SECONDS
 
     # Asserted against the shipped default, not `load_settings()`: reading the
     # ambient environment made this fail for anyone with the clock turned off.
     assert SHIPPED[-1].after < IDLE_TIMEOUT_SECONDS - 1.0
-    assert _delays(DEFAULT_INITIATIVE_DELAYS)[-1] < IDLE_TIMEOUT_SECONDS - 1.0
+    assert parse_delays(DEFAULT_INITIATIVE_DELAYS)[-1] < IDLE_TIMEOUT_SECONDS - 1.0
 
 
 async def test_speech_during_the_decision_stops_the_line_being_spoken() -> None:
@@ -401,10 +401,10 @@ def test_the_first_rung_follows_through_rather_than_inviting() -> None:
 
 def test_the_shipped_ladder_starts_where_the_default_says_it_does() -> None:
     """The delays and the rungs are separate places and have disagreed before."""
-    from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, _delays
+    from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, parse_delays
     from voice_agent.initiative import LADDER as SHIPPED
 
-    delays = _delays(DEFAULT_INITIATIVE_DELAYS)
+    delays = parse_delays(DEFAULT_INITIATIVE_DELAYS)
 
     assert len(delays) == len(SHIPPED) == 3
     assert delays[0] == 5.0

@@ -1,0 +1,26 @@
+  0.000  >   greeting text='Hi.'
+  0.000  >   audio_end seconds=0.18 cached=True
+  0.040  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.240  <   playback off
+  1.056  >   floor state='speaking'
+  1.600  >   transcript text='remote work is better'
+  3.000  >   transcript text='remote work is better because everyone is more productive'
+  3.808  >   floor state='micro_pause'
+  3.808  thk ask 'u are asked now The user has just paused, briefly.'
+  4.192  >   floor state='pause'
+  4.800  >   transcript final=True text='Remote work is better because everyone is more productive.'
+  4.800  llm ask 'Remote work is better because everyone is more pr…'
+  4.808  >   thought reason='micro_pause' decision='thought' move='challenge' urgency=2 line='Everyone?'
+  5.088  >   floor state='yielded'
+  5.450  >   reply_end ttft_ms=500 text='Why do you think so?'
+  5.450  >   audio_end seconds=1.2 first_audio_ms=650
+  5.450  thk ask 'asked now Your partner has just finished speaking.'
+  5.490  <   playback on
+  6.450  >   thought reason='reply' decision='thought' move='challenge' urgency=2 line='Everyone?'
+  6.710  <   playback off
+
+assistant: Hi.
+     user: Remote work is better because everyone is more productive.
+assistant: Why do you think so?

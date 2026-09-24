@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from itertools import pairwise
 from pathlib import Path
 
+from voice_agent import prompts
 from voice_agent.errors import ConfigError
 from voice_agent.roles import DEFAULT_ROLE
 
@@ -48,13 +49,6 @@ DEFAULT_PORT = 8000
 # The caps (`VOICE_AGENT_MAX_LIVE` etc.) are off unless set; `fly.toml` sets
 # them for the public instance. `limits.py` says what each bounds.
 
-SYSTEM_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "system_prompt.md"
-"""Resolved relative to the source checkout, which the server runs from."""
-
-PREAMBLE_SEPARATOR = "\n---\n"
-"""Only what follows the first rule in the prompt file is sent; above it is a
-note for developers."""
-
 
 @dataclass(frozen=True, slots=True)
 class Settings:
@@ -90,13 +84,15 @@ def load_settings() -> Settings:
         vad_silence=_optional_float(os.environ.get("VOICE_AGENT_VAD_SILENCE")),
         greeting=os.environ.get("VOICE_AGENT_GREETING"),
         role=os.environ.get("VOICE_AGENT_ROLE", DEFAULT_ROLE).strip() or DEFAULT_ROLE,
-        sessions=_directory(os.environ.get("VOICE_AGENT_SESSIONS", DEFAULT_SESSIONS)),
-        trace=_directory(os.environ.get("VOICE_AGENT_TRACE", DEFAULT_TRACE)),
-        logs=_directory(os.environ.get("VOICE_AGENT_LOGS", DEFAULT_LOGS)),
+        sessions=parse_directory(os.environ.get("VOICE_AGENT_SESSIONS", DEFAULT_SESSIONS)),
+        trace=parse_directory(os.environ.get("VOICE_AGENT_TRACE", DEFAULT_TRACE)),
+        logs=parse_directory(os.environ.get("VOICE_AGENT_LOGS", DEFAULT_LOGS)),
         voice_gender=_voice_gender(
             os.environ.get("VOICE_AGENT_VOICE_GENDER", DEFAULT_VOICE_GENDER)
         ),
-        initiative=_delays(os.environ.get("VOICE_AGENT_INITIATIVE", DEFAULT_INITIATIVE_DELAYS)),
+        initiative=parse_delays(
+            os.environ.get("VOICE_AGENT_INITIATIVE", DEFAULT_INITIATIVE_DELAYS)
+        ),
         host=os.environ.get("VOICE_AGENT_HOST", DEFAULT_HOST),
         port=int(os.environ.get("VOICE_AGENT_PORT", DEFAULT_PORT)),
         max_live=_positive_int("VOICE_AGENT_MAX_LIVE"),
@@ -134,7 +130,7 @@ def _positive_float(name: str) -> float | None:
     return value
 
 
-def _directory(raw: str) -> Path | None:
+def parse_directory(raw: str) -> Path | None:
     value = raw.strip()
     return None if value.casefold() in ("", "off", "none") else Path(value)
 
@@ -148,113 +144,14 @@ def _voice_gender(raw: str) -> str:
     return value
 
 
-SELF_REFERENCE = {
-    "female": (
-        "Voice rule, which also overrides everything above: your speaking voice is "
-        "a woman's, so in a language that marks the speaker's gender, every form "
-        "about yourself is feminine — «я поняла», «я не совсем поняла», «я рада», "
-        "«я уверена», never «понял», «рад» or «уверен». That includes the one-word "
-        "reply that opens a sentence without «я»: «Поняла.», «Согласна.», «Готова.», "
-        "«Рада.» — never «Понял.», «Согласен.», «Готов.», «Рад.». The user's gender "
-        "is theirs, not yours: a man talking to you does not make you speak about "
-        "yourself as a man. " + "{scope}"
-    ),
-    "male": (
-        "Voice rule, which also overrides everything above: your speaking voice is "
-        "a man's, so in a language that marks the speaker's gender, every form "
-        "about yourself is masculine — «я понял», «я не совсем понял», «я рад», "
-        "«я уверен», never «поняла», «рада» or «уверена». That includes the one-word "
-        "reply that opens a sentence without «я»: «Понял.», «Согласен.», «Готов.», "
-        "«Рад.» — never «Поняла.», «Согласна.», «Готова.», «Рада.». The user's gender "
-        "is theirs, not yours: a woman talking to you does not make you speak about "
-        "yourself as a woman. " + "{scope}"
-    ),
-    "neutral": (
-        "Voice rule: your speaking voice does not clearly read as a man's or a woman's. "
-        "When you speak a language that marks the speaker's gender, prefer "
-        "wordings that avoid the choice; where one is unavoidable, pick one and "
-        "stay with it for the whole conversation. " + "{scope}"
-    ),
-}
-"""The voice rule, last and nearest the conversation. Live, Haiku still said a
-bare «Понял.» from the female voice, talking to a man. Replaying two Russian
-sessions typed (20 replies): masculine self-forms 2 → 0, feminine 0 → 4, once
-the one-word acknowledgements and the user's own gender were named."""
-
-
-IDENTITY = {
-    "female": (
-        "You are a woman, and you speak with a woman's voice. In every language "
-        "that marks it, you speak about yourself in the feminine, as a woman "
-        "naturally would: «я поняла», «я рада», «я сделала» — and a bare «Поняла.» "
-        "or «Согласна.» when you acknowledge something."
-    ),
-    "male": (
-        "You are a man, and you speak with a man's voice. In every language that "
-        "marks it, you speak about yourself in the masculine, as a man naturally "
-        "would: «я понял», «я рад», «я сделал» — and a bare «Понял.» or «Согласен.» "
-        "when you acknowledge something."
-    ),
-    "neutral": "",
-}
-"""Who the agent is, first thing it reads. A rule at the end about grammar was
-followed less reliably than an identity at the start."""
-
-SELF_ONLY = (
-    "This is only about how you refer to yourself. Never change how you refer to "
-    "anyone else — an author, a person being discussed, the user — and never give "
-    "the user a gender they have not shown you. If someone "
-    "corrects your grammar, fix only your own forms. If an earlier reply of yours "
-    "used the other gender, that was a mistake, not a precedent: do not repeat it."
-)
-"""Scope for the gender line. Corrected on its own gender, a model once 'fixed'
-a third person instead («написала Достоевская»)."""
-
-
 def with_voice_gender(prompt: str, gender: str) -> str:
     """Append which gender the agent speaks about itself in."""
-    return f"{prompt}\n\n{SELF_REFERENCE[gender].format(scope=SELF_ONLY)}"
-
-
-LANGUAGE = (
-    "Language rule, which overrides everything above: reply in the same language "
-    "as the user's last message, even when your own previous reply was in another "
-    "language — including when you did not understand them, and including when you "
-    "say so. A question in Russian gets a Russian answer, one in Spanish a Spanish "
-    "answer, one in Japanese a Japanese answer — straight after an English reply "
-    "too. Answering in a different language from theirs is the worst mistake you "
-    "can make here."
-)
-"""The language rule, repeated last and nearest the conversation. Stated only in
-the persona, Haiku answered a Russian question in English 11 of 16 times in a
-replay of a live conversation; with this, 0 of 16. Concrete examples mattered:
-the same rule without them still failed 2 of 16."""
+    rules = prompts.rules()
+    return f"{prompt}\n\n{rules[f'Voice: {gender}'].format(scope=rules['Voice scope'])}"
 
 
 def with_reply_language(prompt: str) -> str:
-    return f"{prompt}\n\n{LANGUAGE}"
-
-
-HEARING = (
-    "Your hearing is a speech recognizer, and it transcribes these languages "
-    "and no others: {languages}.\n\n"
-    "You can read and write far more languages than that, but you cannot *hear* "
-    "them. So never offer, promise or agree to listen in a language outside "
-    "that list — if someone asks, say plainly which ones you can understand. "
-    "Claiming one you cannot hear is the same mistake as inventing a fact.\n\n"
-    "When a transcript reads as nonsense — words that do not make a sentence, "
-    "or a mixture of scripts in one line — that is usually not someone talking "
-    "nonsense. It is most often someone speaking a language your hearing does "
-    "not have. Do not answer it as though it were a question, and do not guess "
-    "at what it might have meant. Say briefly that you did not catch it and ask "
-    "them to say it again, or which language they are speaking. Do not read out "
-    "your list of languages unless they ask for it; if they do and it is long, "
-    "say it is many and name at most five. A list read aloud takes longer than "
-    "anyone will listen to it."
-)
-"""What the agent is told about the languages it can hear. A recognizer does not
-refuse a language it lacks, it returns confident nonsense; the agent must neither
-promise such a language nor answer the nonsense as a question."""
+    return f"{prompt}\n\n{prompts.rules()['Language']}"
 
 
 def with_languages(prompt: str, languages: tuple[str, ...]) -> str:
@@ -262,20 +159,8 @@ def with_languages(prompt: str, languages: tuple[str, ...]) -> str:
     that reports none."""
     if not languages:
         return prompt
-    return f"{prompt}\n\n{HEARING.format(languages=', '.join(languages))}"
-
-
-CLOCK = (
-    "When nobody has spoken for a while, you are asked whether to say something "
-    "unprompted. That happens at {delays} of silence, counted from the moment "
-    "your own voice stops — and you may decline at any of them, which is the "
-    "usual answer at the shortest. After the last one you stay quiet until they "
-    "speak.\n\n"
-    "These are the real numbers. If someone asks how long you wait before "
-    "speaking first, tell them plainly instead of guessing at it."
-)
-"""What the agent is told about its own clock, so that asked, it says the real
-numbers rather than inventing some."""
+    hearing = prompts.rules()["Hearing"]
+    return f"{prompt}\n\n{hearing.format(languages=', '.join(languages))}"
 
 
 def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:
@@ -289,10 +174,11 @@ def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:
         if len(seconds) < 3
         else f"{', '.join(seconds[:-1])} and {seconds[-1]}"
     )
-    return f"{prompt}\n\n{CLOCK.format(delays=f'{spoken} seconds')}"
+    clock = prompts.rules()["Clock"]
+    return f"{prompt}\n\n{clock.format(delays=f'{spoken} seconds')}"
 
 
-def _delays(raw: str) -> tuple[float, ...]:
+def parse_delays(raw: str) -> tuple[float, ...]:
     """Comma-separated seconds, or `off` for none. Malformed is an error."""
     if raw.strip().casefold() in ("", "off", "none", "0"):
         return ()
@@ -303,14 +189,6 @@ def _delays(raw: str) -> tuple[float, ...]:
     if any(a >= b for a, b in pairwise(delays)) or any(d <= 0 for d in delays):
         raise ConfigError(f"VOICE_AGENT_INITIATIVE must increase and be positive: {raw!r}")
     return delays
-
-
-OPENED = (
-    "You opened this call by saying: \u201c{greeting}\u201d. That was said before "
-    "anyone spoke, so do not greet again, and its language says nothing about theirs."
-)
-"""The greeting, as a fact rather than a turn: as a turn in the history, a fixed
-English line anchored replies to a Russian question in English."""
 
 
 def build_prompt(
@@ -328,23 +206,19 @@ def build_prompt(
     `role` is a role card's "When speaking" section: directly under the
     persona, which it narrows, and above the facts.
     """
-    prompt = load_system_prompt() if base is None else base
-    if IDENTITY[gender]:
-        prompt = f"{IDENTITY[gender]}\n\n{prompt}"
+    rules = prompts.rules()
+    prompt = prompts.load("system_prompt") if base is None else base
+    identity = rules.get(f"Identity: {gender}", "")
+    if identity:
+        prompt = f"{identity}\n\n{prompt}"
     if role:
         prompt = f"{prompt}\n\n# Your role in this conversation\n\n{role}"
     prompt = with_initiative(with_languages(prompt, languages), delays)
     if greeting:
-        prompt = f"{prompt}\n\n{OPENED.format(greeting=greeting)}"
+        prompt = f"{prompt}\n\n{rules['Opened'].format(greeting=greeting)}"
     # The two rules a fast model kept breaking go last, nearest the conversation:
     # buried under the hearing and clock notes, the gender line was ignored.
     return with_voice_gender(with_reply_language(prompt), gender)
-
-
-def load_system_prompt(path: Path = SYSTEM_PROMPT_PATH) -> str:
-    text = path.read_text(encoding="utf-8")
-    _, separator, body = text.partition(PREAMBLE_SEPARATOR)
-    return (body if separator else text).strip()
 
 
 def require_env(name: str) -> str:

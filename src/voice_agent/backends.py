@@ -7,14 +7,18 @@ session (`stream()` opens one per listening turn), so it is shared too.
 
 **Lazy, because a missing key raises.** Every adapter calls `require_env` in its
 constructor, so nothing is built until somebody picks it.
+
+**Only what holds a key is offered.** With no key for anything, the configured
+default is offered anyway, so a misconfigured deployment fails at the first
+call naming the missing variable rather than with an empty page.
 """
 
 import logging
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 
 from voice_agent.conversation import Conversation
 from voice_agent.llm import LLM, create_llm
-from voice_agent.llm.registry import DEFAULT_MODELS
+from voice_agent.llm.registry import ENGINES
 from voice_agent.llm.registry import available as llm_available
 from voice_agent.llm.traced import Traced
 from voice_agent.roles import NO_ROLE, Role
@@ -25,12 +29,12 @@ from voice_agent.stt.registry import available as stt_available
 logger = logging.getLogger(__name__)
 
 
-class Stack:
-    """The engines and ears this deployment offers, and each conversation's pick.
+class Backends:
+    """The engines, ears and roles this deployment offers, each conversation's
+    pick, and the one instance of each backend every conversation shares.
 
-    Only what holds a key is offered. With no key for anything, the configured
-    default is offered anyway, so a misconfigured deployment fails at the first
-    call naming the missing variable rather than with an empty page.
+    `engine` and `ears`, when given, serve every name: a test injects one fake
+    and the selection logic still runs unchanged.
     """
 
     def __init__(
@@ -39,15 +43,19 @@ class Stack:
         model: str | None,
         ears_provider: str,
         *,
+        silence: float | None = None,
         hears: bool = True,
         roles: Sequence[Role] = (),
         default_role: str = NO_ROLE,
+        engine: LLM | None = None,
+        ears: STT | None = None,
     ) -> None:
         self._provider = provider
+        self._model = model
+        self._silence = silence
         self.roles = tuple(roles)
         names = {role.slug for role in self.roles}
         self.default_role = default_role if default_role in names else NO_ROLE
-        self._model = model
         self.engines: tuple[str, ...] = llm_available() or (provider,)
         # `none` configured means deaf, even where recognizer keys are present.
         hears = hears and ears_provider != NO_EARS
@@ -58,6 +66,11 @@ class Stack:
             if ears_provider in self.listeners
             else next(iter(self.listeners), NO_EARS)
         )
+        # Wrapped here, so an injected fake is traced exactly like a real one.
+        self._fixed_engine = Traced(engine) if engine is not None else None
+        self._fixed_ears = ears
+        self._built_engines: dict[str, LLM] = {}
+        self._built_ears: dict[str, STT] = {}
 
     def model_for(self, provider: str) -> str | None:
         """The model override, for the provider it was configured alongside
@@ -65,7 +78,7 @@ class Stack:
         return self._model if provider == self._provider else None
 
     def model_named(self, provider: str) -> str:
-        return self.model_for(provider) or DEFAULT_MODELS[provider]
+        return self.model_for(provider) or ENGINES[provider].default_model
 
     def choose(self, conversation: Conversation, asked: Mapping[str, str]) -> tuple[str, str, str]:
         """The stack and role this conversation runs, pinned on its first connect.
@@ -121,44 +134,21 @@ class Stack:
             "stt": [{**describe(name), "default": name == ears} for name in self.listeners],
         }
 
-
-class Pool:
-    """The backends this process has been asked for so far.
-
-    `engine` and `ears`, when given, serve every name: a test injects one fake
-    and the selection logic still runs unchanged.
-    """
-
-    def __init__(
-        self,
-        model_for: Callable[[str], str | None],
-        silence: float | None = None,
-        engine: LLM | None = None,
-        ears: STT | None = None,
-    ) -> None:
-        self._model_for = model_for
-        self._silence = silence
-        # Wrapped here, so an injected fake is traced exactly like a real one.
-        self._fixed_engine = Traced(engine) if engine is not None else None
-        self._fixed_ears = ears
-        self._engines: dict[str, LLM] = {}
-        self._ears: dict[str, STT] = {}
-
     def engine(self, name: str) -> LLM:
         if self._fixed_engine is not None:
             return self._fixed_engine
-        if name not in self._engines:
+        if name not in self._built_engines:
             logger.info("building the %s engine", name)
-            self._engines[name] = Traced(create_llm(name, self._model_for(name)))
-        return self._engines[name]
+            self._built_engines[name] = Traced(create_llm(name, self.model_for(name)))
+        return self._built_engines[name]
 
     def ears(self, name: str) -> STT | None:
         if self._fixed_ears is not None:
             return self._fixed_ears
-        if name not in self._ears:
+        if name not in self._built_ears:
             listener = create_stt(name, self._silence)
             if listener is None:
                 return None  # `none`: deaf on purpose, and nothing to keep
             logger.info("building the %s recognizer", name)
-            self._ears[name] = listener
-        return self._ears[name]
+            self._built_ears[name] = listener
+        return self._built_ears[name]

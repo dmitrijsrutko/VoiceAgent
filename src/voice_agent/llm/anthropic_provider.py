@@ -24,7 +24,7 @@ from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage
 from voice_agent.llm.http import http_client, record_call
 
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
-"""Named once, so `registry.KEYS` can say what this backend needs without
+"""Named once, so `registry.ENGINES` can say what this backend needs without
 restating it. The OpenAI-compatible backends carry theirs on their spec."""
 
 DEFAULT_MODEL = "claude-opus-5"

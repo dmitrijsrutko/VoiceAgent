@@ -10,9 +10,9 @@ browser reports a duration and this module turns it into words.
 """
 
 import re
-import time
 from dataclasses import dataclass, field
 
+from voice_agent import timing
 from voice_agent.conversation import Message
 from voice_agent.tts.base import AudioChunk, pcm_seconds
 
@@ -49,7 +49,7 @@ class Spoken:
         the timeline, from the reply's first sample: what the page needs to
         light each word up as it is spoken."""
         if self.started_at is None:
-            self.started_at = time.perf_counter()
+            self.started_at = timing.now()
         added: list[float] = []
         if chunk.alignment is not None:
             # Timed from the start of the chunk it came with, which is however
@@ -80,7 +80,7 @@ class Spoken:
         """
         if self.started_at is None or self.finished or self.interrupted_at is not None:
             return False
-        return time.perf_counter() - self.started_at <= self.sounds_for()
+        return timing.now() - self.started_at <= self.sounds_for()
 
     def sounds_for(self) -> float:
         """An upper bound, in seconds from the first chunk, on when this voice
@@ -100,7 +100,7 @@ class Spoken:
         sent — for when the browser does not say."""
         if self.started_at is None:
             return 0.0
-        until = self.interrupted_at or time.perf_counter()
+        until = self.interrupted_at or timing.now()
         return min((until - self.started_at) * 1000, pcm_seconds(self.sent_bytes) * 1000)
 
     def heard(self, played_ms: float) -> str:

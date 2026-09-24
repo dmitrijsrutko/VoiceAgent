@@ -11,7 +11,7 @@ from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Usage
 from voice_agent.stt.base import Transcript
-from voice_agent.tts.base import Alignment, AudioChunk, Voice
+from voice_agent.tts.base import Alignment, AudioChunk
 
 
 class FakeLLM:
@@ -161,9 +161,6 @@ class FakeTTS:
                 yield timed(pending)
         finally:
             self.active -= 1
-
-    async def list_voices(self) -> list[Voice]:
-        return [Voice(id="fake-voice-1", name="Fake", usable=True)]
 
 
 def receive(socket: object) -> dict[str, Any]:

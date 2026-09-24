@@ -14,8 +14,9 @@ What it is built to stop is the accident: the crawler, the tab left open
 overnight, the demo that goes around a classroom.
 """
 
-import time
 from collections.abc import Mapping
+
+from voice_agent import timing
 
 MINT_WINDOW = 600.0
 """The span over which `MintLimit`'s allowance refills, in seconds.
@@ -71,7 +72,7 @@ class MintLimit:
     def allow(self, address: str, now: float | None = None) -> bool:
         if self._allowance is None:
             return True
-        moment = time.monotonic() if now is None else now
+        moment = timing.now() if now is None else now
         full = float(self._allowance)
         tokens, since = self._spent.get(address, (full, moment))
         tokens = min(full, tokens + (moment - since) * full / self._window)

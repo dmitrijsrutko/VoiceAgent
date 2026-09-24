@@ -22,13 +22,14 @@ import contextlib
 import json
 import logging
 import os
-import time
 from collections.abc import Iterator, Mapping
 from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from secrets import token_hex
 from typing import Any
+
+from voice_agent import timing
 
 logger = logging.getLogger(__name__)
 
@@ -139,7 +140,7 @@ class Trace:
         handle = self._open()
         if handle is None:
             return
-        now = time.perf_counter()
+        now = timing.now()
         current = _span.get()
         event: dict[str, Any] = {
             "kind": kind,
@@ -204,7 +205,7 @@ def span(
     _span.set(node)
     if writer is not None:
         writer.emit("span.start", {"name": name, "parent": node.parent, **(attrs or {})})
-    started = time.perf_counter()
+    started = timing.now()
     failure: BaseException | None = None
     try:
         yield node
@@ -215,7 +216,7 @@ def span(
         if writer is not None:
             ended: dict[str, Any] = {
                 "name": name,
-                "ms": round((time.perf_counter() - started) * 1000, 3),
+                "ms": round((timing.now() - started) * 1000, 3),
             }
             if failure is not None:
                 ended["error"] = f"{type(failure).__name__}: {failure}"

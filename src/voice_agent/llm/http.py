@@ -2,7 +2,6 @@
 what each call's requests did — connections opened, attempts, when the provider
 accepted — recorded against the call."""
 
-import time
 from collections.abc import Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -10,6 +9,7 @@ from typing import Any
 
 import httpx2
 
+from voice_agent import timing
 from voice_agent.llm.base import Usage
 
 KEEPALIVE_SECONDS = 300.0
@@ -32,7 +32,7 @@ LIMITS = httpx2.Limits(
 class Call:
     """What one call's HTTP requests did before the provider sent its first token."""
 
-    started: float = field(default_factory=time.perf_counter)
+    started: float = field(default_factory=timing.now)
     attempts: int = 0
     opened: int = 0
     connecting: float = 0.0
@@ -41,7 +41,7 @@ class Call:
 
     def restart(self) -> None:
         """Time and count from the next request, keeping connection cost so far."""
-        self.started = time.perf_counter()
+        self.started = timing.now()
         self.attempts = 0
         self.accepted_at = None
 
@@ -74,7 +74,7 @@ async def _trace(event: str, info: dict[str, Any]) -> None:
     record = _calling.get()
     if record is None:
         return
-    now = time.perf_counter()
+    now = timing.now()
     if event in ("connection.connect_tcp.started", "connection.start_tls.started"):
         record._since = now
     elif event in ("connection.connect_tcp.complete", "connection.start_tls.complete"):

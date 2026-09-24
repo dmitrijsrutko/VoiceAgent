@@ -24,9 +24,10 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
+from voice_agent import prompts
 from voice_agent.errors import ConfigError
 
-ROLES_DIR = Path(__file__).resolve().parents[2] / "prompts" / "roles"
+ROLES_DIR = prompts.DIR / "roles"
 """Resolved relative to the source checkout, like the system prompt."""
 
 NO_ROLE = "none"
@@ -76,9 +77,9 @@ def parse(text: str, slug: str) -> Role:
         front = tomllib.loads(match.group(1))
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"role {slug!r}: front matter is not TOML: {exc}") from exc
-    sections = _sections(match.group(2))
+    found = prompts.sections(match.group(2))
 
-    missing = [s for s in SECTIONS if not sections.get(s)]
+    missing = [s for s in SECTIONS if not found.get(s)]
     if missing:
         raise ConfigError(f"role {slug!r}: missing or empty sections: {', '.join(missing)}")
     for key in ("name", "summary", "opening", "assertiveness"):
@@ -104,10 +105,10 @@ def parse(text: str, slug: str) -> Role:
         opening=front["opening"].strip(),
         moves=tuple(dict.fromkeys(moves)),
         assertiveness=front["assertiveness"],
-        job=sections["Job"],
-        worth_it=sections["Worth it"],
-        not_worth_it=sections["Not worth it"],
-        when_speaking=sections["When speaking"],
+        job=found["Job"],
+        worth_it=found["Worth it"],
+        not_worth_it=found["Not worth it"],
+        when_speaking=found["When speaking"],
     )
 
 
@@ -126,21 +127,3 @@ def load(slug: str, directory: Path | None = None) -> Role:
 def available(directory: Path | None = None) -> tuple[str, ...]:
     root = ROLES_DIR if directory is None else directory
     return tuple(sorted(p.stem for p in root.glob("*.md") if SLUG.match(p.stem)))
-
-
-def _sections(body: str) -> dict[str, str]:
-    """`## Heading` → its text, trimmed. Anything before the first heading is
-    ignored, so a card can open with a note for whoever edits it."""
-    sections: dict[str, str] = {}
-    current: str | None = None
-    lines: list[str] = []
-    for line in body.splitlines():
-        if line.startswith("## "):
-            if current is not None:
-                sections[current] = "\n".join(lines).strip()
-            current, lines = line[3:].strip(), []
-        elif current is not None:
-            lines.append(line)
-    if current is not None:
-        sections[current] = "\n".join(lines).strip()
-    return sections

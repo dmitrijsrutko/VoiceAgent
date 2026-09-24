@@ -13,11 +13,10 @@ Two rules:
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 
-from voice_agent import trace
+from voice_agent import timing, trace
 from voice_agent.conversation import Conversation, Message
 from voice_agent.decline import DECLINE, is_decline
 from voice_agent.errors import VoiceAgentError
@@ -196,7 +195,7 @@ class Initiative:
         await self._consider(index, rung, quiet)
 
     async def _consider(self, index: int, rung: Rung, quiet: float) -> None:
-        started = time.perf_counter()
+        started = timing.now()
         # A call on a timer is a spend decision, so its cost is reported too.
         usage = Usage()
         nudge = nudge_prompt(rung, quiet)

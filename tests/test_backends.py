@@ -10,24 +10,24 @@ import pytest
 
 from tests.conftest import FakeLLM, FakeSTT
 from voice_agent import roles as roles_module
+from voice_agent.backends import Backends
 from voice_agent.conversation import Conversation
 from voice_agent.errors import ConfigError
-from voice_agent.llm.registry import DEFAULT_MODELS
+from voice_agent.llm.registry import ENGINES
 from voice_agent.llm.registry import available as llm_available
-from voice_agent.pool import Pool, Stack
-from voice_agent.stt.registry import LANGUAGES, NO_EARS, describe
+from voice_agent.stt.registry import EARS, NO_EARS, describe
 from voice_agent.stt.registry import available as stt_available
 
 
-def no_model(_: str) -> str | None:
-    return None
+def offered(engine: FakeLLM | None = None, ears: FakeSTT | None = None) -> Backends:
+    return Backends("anthropic", None, "assemblyai", engine=engine, ears=ears)
 
 
 def test_an_engine_is_built_once_and_reused(monkeypatch: pytest.MonkeyPatch) -> None:
     """The point of the whole module: the second conversation on a provider
     must get the first one's warm connection, not a cold adapter."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    pool = Pool(no_model)
+    pool = offered()
 
     assert pool.engine("deepseek") is pool.engine("deepseek")
 
@@ -35,7 +35,7 @@ def test_an_engine_is_built_once_and_reused(monkeypatch: pytest.MonkeyPatch) -> 
 def test_different_engines_are_different_instances(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-    pool = Pool(no_model)
+    pool = offered()
 
     assert pool.engine("deepseek") is not pool.engine("openai")
 
@@ -44,7 +44,7 @@ def test_recognizers_are_shared_too(monkeypatch: pytest.MonkeyPatch) -> None:
     """An `STT` holds no session — `stream()` opens one per listening turn — so
     there is nothing per-conversation to keep apart."""
     monkeypatch.setenv("ASSEMBLYAI_API_KEY", "sk-test")
-    pool = Pool(no_model)
+    pool = offered()
 
     assert pool.ears("assemblyai") is pool.ears("assemblyai")
 
@@ -55,7 +55,7 @@ def test_nothing_is_built_until_it_is_asked_for(monkeypatch: pytest.MonkeyPatch)
     which is most of them."""
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
-    pool = Pool(no_model)
+    pool = offered()
 
     assert pool.engine("deepseek") is not None  # the one with a key is fine
     with pytest.raises(ConfigError):
@@ -66,7 +66,7 @@ def test_an_injected_engine_serves_every_name() -> None:
     """How a test injects one fake and has it answer whichever stack the code
     under test chooses, so the selection is inert rather than special-cased."""
     fake = FakeLLM()
-    pool = Pool(no_model, engine=fake)
+    pool = offered(engine=fake)
 
     assert pool.engine("anthropic") is pool.engine("deepseek")
     assert pool.engine("whatever-name").provider == fake.provider
@@ -74,14 +74,14 @@ def test_an_injected_engine_serves_every_name() -> None:
 
 def test_an_injected_recognizer_serves_every_name() -> None:
     fake = FakeSTT()
-    pool = Pool(no_model, ears=fake)
+    pool = offered(ears=fake)
 
     assert pool.ears("assemblyai") is fake
     assert pool.ears("elevenlabs") is fake
 
 
 def test_the_deaf_name_builds_nothing() -> None:
-    assert Pool(no_model).ears(NO_EARS) is None
+    assert offered().ears(NO_EARS) is None
 
 
 def test_the_model_override_is_asked_per_provider(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -90,10 +90,10 @@ def test_the_model_override_is_asked_per_provider(monkeypatch: pytest.MonkeyPatc
     for a model it has never heard of."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-    pool = Pool(lambda name: "claude-haiku-4-5" if name == "anthropic" else None)
+    pool = Backends("anthropic", "claude-haiku-4-5", "assemblyai")
 
     assert pool.engine("anthropic").model == "claude-haiku-4-5"
-    assert pool.engine("deepseek").model == DEFAULT_MODELS["deepseek"]
+    assert pool.engine("deepseek").model == ENGINES["deepseek"].default_model
 
 
 # --- what the registries can answer without building anything ---------------
@@ -135,40 +135,42 @@ def test_the_recognizers_differ_in_the_way_chapter_12_cared_about() -> None:
     """The fact worth showing at the moment of choosing: Scribe hears Russian
     and AssemblyAI does not, and a language it lacks becomes confident nonsense
     rather than an error."""
-    assert "ru" not in LANGUAGES["assemblyai"]
-    assert "rus" in LANGUAGES["elevenlabs"]
+    assert "ru" not in EARS["assemblyai"].languages
+    assert "rus" in EARS["elevenlabs"].languages
 
 
 DEVIL = roles_module.load("devils_advocate")
 
 
 def test_a_conversation_picks_its_role_and_keeps_it() -> None:
-    stack = Stack("anthropic", None, "assemblyai", roles=(DEVIL,))
+    backends = Backends("anthropic", None, "assemblyai", roles=(DEVIL,))
     conversation = Conversation(id="t")
 
-    _, _, first = stack.choose(conversation, {"role": "devils_advocate"})
-    _, _, again = stack.choose(conversation, {"role": "none"})
+    _, _, first = backends.choose(conversation, {"role": "devils_advocate"})
+    _, _, again = backends.choose(conversation, {"role": "none"})
 
     assert first == again == "devils_advocate"
 
 
 def test_an_unknown_role_is_the_default_not_an_error() -> None:
-    stack = Stack("anthropic", None, "assemblyai", roles=(DEVIL,), default_role="devils_advocate")
+    backends = Backends(
+        "anthropic", None, "assemblyai", roles=(DEVIL,), default_role="devils_advocate"
+    )
 
-    _, _, role = stack.choose(Conversation(id="t"), {"role": "nobody"})
+    _, _, role = backends.choose(Conversation(id="t"), {"role": "nobody"})
 
     assert role == "devils_advocate"
 
 
 def test_a_preselected_role_that_is_not_a_card_is_no_role() -> None:
-    assert Stack("anthropic", None, "assemblyai", default_role="nobody").default_role == "none"
+    assert Backends("anthropic", None, "assemblyai", default_role="nobody").default_role == "none"
 
 
 def test_the_plain_assistant_is_offered_first_and_only_with_a_card_to_choose() -> None:
-    offered = Stack("anthropic", None, "assemblyai", roles=(DEVIL,)).choices(
+    offered = Backends("anthropic", None, "assemblyai", roles=(DEVIL,)).choices(
         "anthropic", "assemblyai"
     )["role"]
-    alone = Stack("anthropic", None, "assemblyai").choices("anthropic", "assemblyai")["role"]
+    alone = Backends("anthropic", None, "assemblyai").choices("anthropic", "assemblyai")["role"]
 
     assert [(o["name"], o["default"]) for o in offered] == [
         ("none", True),

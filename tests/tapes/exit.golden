@@ -1,0 +1,15 @@
+  0.000  >   greeting text='Hi.'
+  0.000  >   audio_end seconds=0.18 cached=True
+  0.040  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.240  <   playback off
+  1.056  >   floor state='speaking'
+  1.400  >   transcript text='bye'
+  2.016  >   floor state='micro_pause'
+  2.400  >   floor state='pause'
+  2.800  >   transcript final=True text='Bye.'
+  2.800  >   ended
+  2.800  >   listening
+
+assistant: Hi.

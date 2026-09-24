@@ -5,7 +5,6 @@ from collections.abc import Callable
 from voice_agent.errors import ConfigError
 from voice_agent.tts.base import TTS
 from voice_agent.tts.elevenlabs_tts import ElevenLabsTTS
-from voice_agent.tts.openai_tts import OpenAITTS
 
 NO_VOICE = "none"
 """Not a backend: the explicit way to run the agent silently, so the project
@@ -13,7 +12,6 @@ still works for anyone without a synthesis key."""
 
 BUILDERS: dict[str, Callable[[str | None], TTS]] = {
     "elevenlabs": lambda voice: ElevenLabsTTS(voice),
-    "openai": lambda voice: OpenAITTS(voice),
 }
 
 

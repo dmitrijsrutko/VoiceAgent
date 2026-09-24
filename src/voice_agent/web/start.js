@@ -15,7 +15,7 @@ export function servedFacts() {
 const LABELS = {
   llm: { anthropic: "Anthropic", openai: "OpenAI", deepseek: "DeepSeek" },
   stt: { assemblyai: "AssemblyAI", elevenlabs: "ElevenLabs Scribe" },
-  tts: { elevenlabs: "ElevenLabs", openai: "OpenAI" },
+  tts: { elevenlabs: "ElevenLabs" },
 };
 const label = (group, name) => LABELS[group][name] ?? name;
 

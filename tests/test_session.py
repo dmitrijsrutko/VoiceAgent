@@ -12,6 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS
 from voice_agent.conversation import Conversation, Message
+from voice_agent.events import Typed
 from voice_agent.session import Session
 from voice_agent.stt.base import Transcript
 
@@ -419,3 +420,19 @@ async def test_a_user_turn_hands_the_budget_back() -> None:
     await session._initiative.tick()
 
     await channel.wait_for("reply_end", count=spoken + 2)  # it may speak first again
+
+
+async def test_an_end_asked_for_as_the_socket_closes_is_not_left_waiting() -> None:
+    """The time limit asks the inbox to end the conversation; if the socket
+    closes first, the conductor is gone and the ask must still return."""
+    session, _, _ = session_for(FakeLLM())
+    session.post(Typed("hello"))
+    ending = asyncio.create_task(session.finish("time is up"))
+    await asyncio.sleep(0)
+    conductor = session._conductor
+    assert conductor is not None
+    conductor.cancel()  # busy elsewhere: the End is still queued when the socket goes
+    await session.close()
+
+    async with asyncio.timeout(WAIT_TIMEOUT):
+        await ending

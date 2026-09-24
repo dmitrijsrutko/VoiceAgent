@@ -33,7 +33,8 @@ interfaces. First transport: a WebSocket server with a minimal browser client.
 ## Where this stands today
 
 Built in **chapters**, each one deliberate piece on top of a working, tested
-previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers.
+previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
+(Chapters 0–15 in [docs/history.md](docs/history.md)).
 
 - **0 — The empty page.** The method, the working contract ([AGENTS.md](AGENTS.md)), and one quality gate: `uv run verify`.
 - **1 — A talking loop.** Browser ↔ WebSocket ↔ a streaming LLM behind one interface (Anthropic, OpenAI, DeepSeek); the link is the conversation.
@@ -54,6 +55,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers.
 - **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch, and comments cut to their constraints.
 - **16 — Ears that hear pauses.** A voice detector on the server shows who holds the floor, ~0.75 s before AssemblyAI commits (~1.6 s before Scribe).
 - **17 — The inner voice.** Pick a role on the start screen (none by default, a devil's advocate, or a thinking partner, each a card in `prompts/roles/`), and a fast model thinks alongside you, shown on the page but not spoken.
+- **Refactor.** Whole conversations replay on virtual time against golden transcripts (`tests/tapes/`); every turn-taking decision runs on one inbox (`Session`, `events.py`); one clock, one settings path, prompts as data; OpenAI's voice dropped.
 
 ## Requirements
 
@@ -91,13 +93,14 @@ uv run verify     # ruff + format check + mypy (strict) + pytest (+ node tests)
 
 ```
 AGENTS.md, CHANGELOG.md   the working contract; the chapter log
-prompts/system_prompt.md  the agent's runtime system prompt
+prompts/system_prompt.md  the agent's runtime system prompt; rules.md, the facts and rules put around it
 prompts/roles/, thinker.md  role cards, and the inner voice's instructions
 src/voice_agent/
-  cli.py, config.py       `uv run voice-agent`; settings from the environment
+  cli.py, config.py       `uv run voice-agent`; settings from the environment and flags
+  prompts.py              reads prompts/*.md past their preamble
   server.py               routes, and one conversation's socket (`serve`)
-  pool.py                 which engines/ears a conversation may pick; one shared instance of each
-  session.py              one connected conversation: turns, interruption, cancellation
+  backends.py             which engines/ears a conversation may pick; one shared instance of each
+  session.py, events.py   one connected conversation, conducted: every input an event on one inbox
   turn.py                 one exchange: the reply streamed to the page and the voice
   mic.py                  one listening session: transcripts, expiry, keepalive
   vad.py, floor.py        speech per 32 ms window (Silero, in models/); who holds the floor
@@ -119,8 +122,10 @@ src/voice_agent/
     timer.js, client.js   the last-minute countdown; the browser family reported (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js
-docs/                     ROADMAP.md (research), DEPLOY.md (runbook), vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
-tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the replay's scripts
+docs/                     ROADMAP.md (research), DEPLOY.md (runbook), history.md (Chapters 0–15),
+                          vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
+tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the thinker replay's scripts;
+                          tests/tapes/ whole conversations replayed on virtual time against golden transcripts
 scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records into fly-archive/ (gitignored)
 ```
 
@@ -139,10 +144,13 @@ Measured so far, the round trip is dominated by the recognizer (about 1.0 s from
 the end of speech to a commit on AssemblyAI, 1.8–1.9 s on Scribe) and time to
 first token (about 0.5–0.9 s). Likely next, in order:
 
-1. **Cutting in at a pause**, then **speaking over** the user, with an assertiveness dial per role.
-2. **Leading**: the role has an agenda and steers toward it.
-3. **Semantic turn detection**: end the turn when the words sound finished.
-4. **A golden conversation suite**, so later changes are measured rather than felt.
+1. **Our own endpointing**: the voice detector's pause plus a sentence that reads
+   finished ends the turn (AssemblyAI's `ForceEndpoint`), and speculation starts
+   on the same signal. Aimed at the recognizer's ~1 s.
+2. **Speaking a thought**: the inner voice cuts in at a pause, then speaks over
+   the user, with an assertiveness dial per role.
+3. **Leading**: the role has an agenda and steers toward it.
+4. **A golden conversation suite** from live sessions, on the tapes' format.
 5. **Cost accounting and small-model routing.**
 6. **Telephony transport.**
 

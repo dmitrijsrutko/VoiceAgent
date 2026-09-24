@@ -1,8 +1,15 @@
-"""One connected conversation: what arrives from the user, and the turns it starts.
+"""One connected conversation, conducted: what arrives, and the turns it starts.
 
-A turn runs in its own task, never on the coroutine that produced its text, so
-the microphone and the socket keep reading while a reply streams, and the turn
-can be cancelled.
+**One inbox, one task.** Everything a turn-taking decision depends on — the
+recognizer's partials and commits, the voice detector's floor, the browser's
+playback, typing, the clock's lines, the timers of a hold or a resume — is an
+`events` value posted here and handled in order by `_conduct`. Nothing else
+calls into a decision, so two decisions never interleave at an `await`, and a
+new rule is one more case in `_handle` rather than one more callback racing the
+others.
+
+A turn runs in its own task, never on the conductor, so the inbox keeps moving
+while a reply streams, and the turn can be cancelled.
 
 Interruption has one rule: a new turn from the user stops whatever the agent is
 still doing with the last one. The first words recognized while the agent is
@@ -19,12 +26,24 @@ would say. It never starts a turn.
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import Sequence
 
-from voice_agent import echo, trace
+from voice_agent import echo, timing, trace
 from voice_agent.channel import Channel
 from voice_agent.conversation import Conversation
+from voice_agent.events import (
+    End,
+    Event,
+    Final,
+    FloorChanged,
+    HoldOver,
+    NewSession,
+    Partial,
+    Playback,
+    ResumeDue,
+    Speak,
+    Typed,
+)
 from voice_agent.heard import Spoken, resume_from, truncated
 from voice_agent.initiative import LADDER, Initiative, Rung
 from voice_agent.llm import LLM
@@ -125,23 +144,24 @@ class Session:
         self._submits = 0
         self._cut: tuple[str, str] | None = None
         """The last interrupted reply, as written and as heard."""
-        self._resuming: asyncio.Task[None] | None = None
+        self._resume: tuple[int, asyncio.TimerHandle] | None = None
+        """The pending check of whether an interruption was anybody, by token."""
+        self._resumes = 0
         self._held: list[str] = []
         """Pieces of a spoken turn that looked unfinished, waiting for the rest."""
-        self._holding: asyncio.Task[None] | None = None
-        self.mic = (
-            Mic(
-                listener,
-                channel,
-                self._spoken,
-                on_partial=self._on_partial,
-                on_session=self.forget_utterance,
-                on_speech=self._on_speech,
-                on_floor=self._on_floor,
-            )
-            if listener is not None
-            else None
-        )
+        self._hold: tuple[int, asyncio.TimerHandle] | None = None
+        """The timer releasing the held pieces, by hold number."""
+        self._holds = 0
+        self._carried_on = False
+        """The user went on speaking during this hold: it now waits for the commit."""
+        self._inbox: asyncio.Queue[Event] = asyncio.Queue()
+        self._conductor: asyncio.Task[None] | None = None
+        """Started by the first event; a session nothing is posted to owns no task."""
+        self._closed = False
+        self.ended = asyncio.Event()
+        """Set once `end()` has finished — the microphone let go included — so
+        the socket can be hung up without cutting an ending short."""
+        self.mic = Mic(listener, channel, self.post) if listener is not None else None
         self._thinker = (
             Thinker(
                 thinker,
@@ -159,7 +179,7 @@ class Session:
             system_prompt,
             conversation,
             quiet=self.quiet_for,
-            speak=self.speak,
+            speak=self._decided,
             report=channel.send_json,
             ladder=LADDER if ladder is None else ladder,
         )
@@ -169,6 +189,78 @@ class Session:
         if self.mic is not None:
             self._initiative.start()
 
+    # --- the inbox --------------------------------------------------------
+
+    def post(self, event: Event) -> None:
+        if self._closed:
+            return  # a late commit or timer after the socket went: nobody to decide for
+        self._inbox.put_nowait(event)
+        if self._conductor is None:
+            self._conductor = asyncio.create_task(self._conduct())
+
+    async def finish(self, reason: str = "") -> None:
+        """End the conversation from outside the inbox (the time limit), in turn
+        with everything else, and return once it has ended."""
+        if self._closed:
+            return
+        done: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        self.post(End(reason, done))
+        await done
+
+    async def _conduct(self) -> None:
+        while True:
+            event = await self._inbox.get()
+            try:
+                await self._handle(event)
+            except Exception:
+                # A defect in one decision must not stop the next one.
+                logger.exception("handling %s failed", type(event).__name__)
+
+    async def _handle(self, event: Event) -> None:
+        match event:
+            case Partial(text, stable, repeated):
+                if text.strip():
+                    await self._on_speech(text)
+                    self._carry_on()
+                if stable:
+                    await self._on_partial(stable, repeated)
+            case Final(text):
+                await self._spoken(text)
+            case NewSession():
+                await self.forget_utterance()
+            case FloorChanged(state):
+                if state == "speaking":
+                    self._carry_on()
+                await self._on_floor(state)
+            case Playback(active):
+                self.playback(active)
+            case Typed(text):
+                await self.submit(text)
+            case Speak(line, rung):
+                await self.speak(line, rung)
+            case HoldOver(hold):
+                await self._release_held(hold)
+            case ResumeDue():
+                await self._resume_if_nobody(event)
+            case End(reason, done):
+                try:
+                    await self.end(reason)
+                finally:
+                    if not done.done():
+                        done.set_result(None)
+
+    def _after(self, delay: float, event: Event) -> asyncio.TimerHandle:
+        """A timer is an event that arrives later, through the same inbox."""
+        return asyncio.get_running_loop().call_later(delay, self.post, event)
+
+    async def _decided(self, line: str, rung: int) -> None:
+        self.post(Speak(line, rung))
+
+    def _agent_busy(self) -> bool:
+        """A reply is being written, is audible, or is being cut down to what
+        was heard: the agent has the conversation."""
+        return bool(self._turns) or self._unsettled()
+
     def quiet_for(self) -> float | None:
         """Seconds of silence it would be safe to speak into, or `None` for
         "not now" (which is not the same as a silence just begun).
@@ -176,7 +268,7 @@ class Session:
         It cannot say whether the user is talking right now — only a voice
         detector could; a shrinking number is the clock's signal for that.
         """
-        if self.conversation.ended or self._turns or self._unsettled():
+        if self.conversation.ended or self._agent_busy():
             return None
         if self.mic is None or not self.mic.listening or self.mic.held:
             return None
@@ -188,7 +280,7 @@ class Session:
             # More words: any guess answers a question still being asked.
             await self._speculator.abandon()
             return
-        if not self._turns and not self._unsettled():
+        if not self._agent_busy():
             # Not while a reply is running, audible or being cut: the history
             # the guess would answer is about to change.
             self._speculator.on_settled(stable, history)
@@ -199,7 +291,7 @@ class Session:
         either way the reply is not over."""
         if self._thinker is None:
             return
-        if self._turns or self._unsettled():
+        if self._agent_busy():
             self._thinker.hush()
         else:
             self._thinker.floor(state)
@@ -232,7 +324,7 @@ class Session:
         said = voice.text
         judged = echo.verdict(text, said)
         echo_so_far = self._over[2] if self._over is not None else True
-        self._over = (said, time.perf_counter(), echo_so_far and judged != "user")
+        self._over = (said, timing.now(), echo_so_far and judged != "user")
         if judged == "echo":
             await self._echo_ignored(text, "partial")
             return
@@ -242,8 +334,10 @@ class Session:
         await self._speculator.abandon()
         submits = self._submits
         await self.interrupt()
-        if self._resuming is None or self._resuming.done():
-            self._resuming = asyncio.create_task(self._resume_if_nobody(submits, text))
+        if self._resume is None:
+            self._resumes += 1
+            due = ResumeDue(submits, text, self._resumes)
+            self._resume = (self._resumes, self._after(RESUME_AFTER_SECONDS, due))
 
     async def _echo_ignored(self, text: str, stage: str) -> None:
         """Reported once per utterance while it is heard, and again if it was
@@ -254,22 +348,26 @@ class Session:
         self._echo_noted = stage == "partial"
         await self._channel.send_json({"type": "echo_ignored", "stage": stage, "text": text[:160]})
 
-    async def _resume_if_nobody(self, submits: int, heard: str) -> None:
+    async def _resume_if_nobody(self, due: ResumeDue) -> None:
         """Carry on with a reply cut by words nobody followed up.
 
         Nobody: no turn committed since, the voice detector not hearing speech,
         and the recognizer holding nothing new beyond the words that cut in."""
-        await asyncio.sleep(RESUME_AFTER_SECONDS)
-        if self._settling is not None:
-            await asyncio.wait({self._settling})
-        if self.conversation.ended or self._turns or self._submits != submits:
+        if self._resume is None or self._resume[0] != due.token:
+            return  # cancelled since
+        if self._settling is not None and not self._settling.done():
+            # Decided once the reply has been cut to what was heard.
+            self._settling.add_done_callback(lambda _: self.post(due))
             return
-        if self._held or self._holding is not None:
+        self._resume = None
+        if self.conversation.ended or self._turns or self._submits != due.submits:
+            return
+        if self._held:
             return  # half a sentence of theirs is waiting for its end: not a silence
         mic = self.mic
         if mic is not None:
             now = mic.partial.strip()
-            if mic.speaking or (now and now != heard.strip()):
+            if mic.speaking or (now and now != due.heard.strip()):
                 return
         cut, self._cut = self._cut, None
         if cut is None:
@@ -305,7 +403,7 @@ class Session:
         }
         if not live and not audible:
             return
-        triggered = time.perf_counter()
+        triggered = timing.now()
         answer: asyncio.Future[float | None] | None = None
         if audible:
             assert voice is not None
@@ -375,40 +473,43 @@ class Session:
     async def _spoken(self, text: str) -> None:
         """A committed spoken turn. One that looks unfinished waits briefly for
         the rest; pieces that arrive in time are answered as one turn."""
-        await self._stop_holding()
+        self._stop_holding()
         pieces = [*self._held, text]
         if looks_unfinished(text) and self.mic is not None:
             self._held = pieces
-            self._holding = asyncio.create_task(self._release_after_hold())
+            self._holds += 1
+            self._carried_on = False
+            self._hold = (self._holds, self._after(HOLD_SECONDS, HoldOver(self._holds)))
+            mic = self.mic
+            if mic.speaking or mic.partial.strip():
+                self._carry_on()
             return
         self._held = []
         await self.submit(" ".join(pieces), merged=len(pieces))
 
-    async def _release_after_hold(self) -> None:
-        """Answer the held pieces unless the user carries on within the hold;
-        once they have, wait for the recognizer to commit the rest (capped)."""
-        waited, step = 0.0, 0.1
-        while waited < HOLD_SECONDS:
-            await asyncio.sleep(step)
-            waited += step
-            if self._carrying_on():
-                await asyncio.sleep(CONTINUATION_CAP_SECONDS)
-                break
+    def _carry_on(self) -> None:
+        """The user went on speaking during a hold: wait for the recognizer to
+        commit the rest, capped, rather than answer half a sentence."""
+        if self._hold is None or self._carried_on:
+            return
+        self._carried_on = True
+        number, timer = self._hold
+        timer.cancel()
+        self._hold = (number, self._after(CONTINUATION_CAP_SECONDS, HoldOver(number)))
+
+    async def _release_held(self, hold: int) -> None:
+        """The hold ran out: answer what was held, as it stands."""
+        if self._hold is None or self._hold[0] != hold:
+            return  # released or replaced since
+        self._hold = None
         pieces, self._held = self._held, []
-        self._holding = None
         if pieces:
             await self.submit(" ".join(pieces), merged=len(pieces))
 
-    def _carrying_on(self) -> bool:
-        mic = self.mic
-        return mic is not None and (mic.speaking or bool(mic.partial.strip()))
-
-    async def _stop_holding(self) -> None:
-        holding, self._holding = self._holding, None
-        if holding is not None and holding is not asyncio.current_task():
-            holding.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await holding
+    def _stop_holding(self) -> None:
+        hold, self._hold = self._hold, None
+        if hold is not None:
+            hold[1].cancel()
 
     async def submit(self, text: str, merged: int = 1) -> None:
         """Start a turn, spoken or typed alike. Returns once it has *started*,
@@ -417,7 +518,7 @@ class Session:
             return  # a recognizer's last commit can land after the end
         over, self._over = self._over, None
         self._echo_noted = False
-        recent = over is not None and time.perf_counter() - over[1] <= ECHO_WINDOW_SECONDS
+        recent = over is not None and timing.now() - over[1] <= ECHO_WINDOW_SECONDS
         if recent and over is not None and over[2] and echo.is_echo_final(text, over[0]):
             # Its own voice, committed as a turn. Answered, it would be the
             # agent replying to itself.
@@ -431,7 +532,7 @@ class Session:
             return
         if self._held and merged == 1:
             # Typed while a spoken fragment waited: one turn, spoken part first.
-            await self._stop_holding()
+            self._stop_holding()
             text, merged = " ".join([*self._held, text]), len(self._held) + 1
             self._held = []
         # Whatever the agent is still doing answers a question the user has moved on from.
@@ -535,8 +636,8 @@ class Session:
         """End the conversation; `reason` says why when it was not `exit`."""
         self.conversation.end()
         # First, so no tick, hold or resume starts a turn during the teardown.
-        await self._stop_holding()
-        await self._cancel_resume()
+        self._stop_holding()
+        self._cancel_resume()
         await self._initiative.stop()
         if self._thinker is not None:
             # Before the announcement, so no thought follows it. Final: a floor
@@ -551,6 +652,7 @@ class Session:
         await self._channel.send_json(ended)
         if self.mic is not None:
             await self.mic.stop()
+        self.ended.set()
 
     async def forget_utterance(self) -> None:
         """Everything known about the utterance in progress is void."""
@@ -558,17 +660,26 @@ class Session:
         await self._speculator.abandon()
         self._speculator.reset()
 
-    async def _cancel_resume(self) -> None:
-        resuming, self._resuming = self._resuming, None
-        if resuming is not None and resuming is not asyncio.current_task():
-            resuming.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await resuming
+    def _cancel_resume(self) -> None:
+        resume, self._resume = self._resume, None
+        if resume is not None:
+            resume[1].cancel()
 
     async def close(self) -> None:
         """The socket is gone."""
-        await self._stop_holding()
-        await self._cancel_resume()
+        self._closed = True
+        conductor, self._conductor = self._conductor, None
+        if conductor is not None and conductor is not asyncio.current_task():
+            # First: nothing decides anything any more.
+            conductor.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await conductor
+        while not self._inbox.empty():
+            # Whoever asked for an end is told it happened: the socket ended it.
+            if isinstance(queued := self._inbox.get_nowait(), End) and not queued.done.done():
+                queued.done.set_result(None)
+        self._stop_holding()
+        self._cancel_resume()
         await self._initiative.stop()
         if self.mic is not None:
             await self.mic.stop(announce=False)

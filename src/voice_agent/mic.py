@@ -4,18 +4,18 @@ that stop a metered recognizer from running forever."""
 import asyncio
 import contextlib
 import logging
-import time
-from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+from collections.abc import AsyncIterator, Callable, Iterator
 
-from voice_agent import trace
+from voice_agent import timing, trace
 from voice_agent.channel import Channel
 from voice_agent.errors import VoiceAgentError
+from voice_agent.events import Final, FloorChanged, MicEvent, NewSession, Partial
 from voice_agent.floor import Floor, Transition
 from voice_agent.stt import STT
 from voice_agent.stt.agreement import StablePrefix
 from voice_agent.timing import elapsed_ms
 from voice_agent.vad import SAMPLE_RATE as VAD_SAMPLE_RATE
-from voice_agent.vad import VAD, WINDOW_MS
+from voice_agent.vad import VAD, WINDOW_MS, Detector
 
 logger = logging.getLogger(__name__)
 
@@ -67,21 +67,17 @@ class Mic:
         self,
         stt: STT,
         channel: Channel,
-        on_final: Callable[[str], Awaitable[None]],
-        on_partial: Callable[[str, bool], Awaitable[None]] | None = None,
-        on_session: Callable[[], Awaitable[None]] | None = None,
-        on_speech: Callable[[str], Awaitable[None]] | None = None,
-        on_floor: Callable[[str], Awaitable[None]] | None = None,
+        post: Callable[[MicEvent], None],
         idle_timeout: float | None = None,
         session_cap: float | None = None,
+        detector: Callable[[], Detector] = VAD,
     ) -> None:
         self._stt = stt
+        self.detector = detector
         self._channel = channel
-        self._on_final = on_final
-        self._on_partial = on_partial
-        self._on_session = on_session
-        self._on_speech = on_speech
-        self._on_floor = on_floor
+        self._post = post
+        """Where what was heard goes. Posted, never awaited: the microphone
+        never waits on a decision, and a decision never runs inside it."""
         self.partial = ""
         """What the recognizer last heard of the utterance in progress, settled
         or not; empty between utterances. For listening along, not for acting."""
@@ -103,7 +99,7 @@ class Mic:
         """Partial text is on the page that no commit has finished yet."""
         self._hears = stt.sample_rate == VAD_SAMPLE_RATE
         """The VAD handles 16 kHz only; other ears go without a floor."""
-        self._vad: VAD | None = None
+        self._vad: Detector | None = None
         self._floor = Floor(WINDOW_MS)
         self._heard: asyncio.Queue[tuple[bytes, float] | None] | None = None
         self._hearing: asyncio.Task[None] | None = None
@@ -139,23 +135,20 @@ class Mic:
         while a reply is still playing (`expect_silence` puts the clock in the
         future).
         """
-        return time.perf_counter() - self._heard_speech_at
+        return timing.now() - self._heard_speech_at
 
     async def start(self) -> None:
         if self._listening:
             return
         self._listening = True
-        self._started = self._heard_speech_at = time.perf_counter()
+        self._started = self._heard_speech_at = timing.now()
         self._last_frame_at = self._started
         self._frames = asyncio.Queue()
         self._task = asyncio.create_task(self._run())
         self._watchdog = asyncio.create_task(self._watch())
         self._keepalive = asyncio.create_task(self._keep_alive())
         if self._hears:
-            # A fresh detector, never a reset one: a worker thread from the last
-            # session may still be inside the old one, as `to_thread` cannot be
-            # cancelled.
-            self._vad = VAD()
+            self._vad = self.detector()
             self._floor = Floor(WINDOW_MS)
             self._stopped_at = None
             self._utterance_over()
@@ -166,18 +159,21 @@ class Mic:
     def feed(self, pcm: bytes) -> None:
         if self._frames is not None:
             self._client_frames += 1
-            self._last_frame_at = time.perf_counter()
+            self._last_frame_at = timing.now()
             self._frames.put_nowait(pcm)
             if self._heard is not None:
                 self._heard.put_nowait((pcm, self._last_frame_at))
 
-    async def _hear(self, vad: VAD, frames: "asyncio.Queue[tuple[bytes, float] | None]") -> None:
+    async def _hear(
+        self, vad: Detector, frames: "asyncio.Queue[tuple[bytes, float] | None]"
+    ) -> None:
         """Run the VAD over the page's audio, in arrival order, and report each
         change of floor. Only the page's frames: keep-alive silence is ours."""
         while (item := await frames.get()) is not None:
             pcm, arrived = item
             try:
-                probabilities = await asyncio.to_thread(vad.probabilities, pcm)
+                # Inline: ~0.1 ms a window, less than a hop to a worker thread costs.
+                probabilities = vad.probabilities(pcm)
             except Exception:
                 # Losing the floor must not cost the conversation its ears.
                 logger.exception("voice activity detection failed; the floor goes dark")
@@ -209,8 +205,7 @@ class Mic:
         await self._channel.send_json(
             {"type": "floor", "state": change.state, "lag_ms": change.lag_ms, "agent": agent}
         )
-        if self._on_floor is not None:
-            await self._on_floor(change.state)
+        self._post(FloorChanged(change.state))
 
     async def _keep_alive(self) -> None:
         """Top up a gap in the microphone's audio with silence. Not counted as
@@ -220,8 +215,8 @@ class Mic:
             await asyncio.sleep(KEEPALIVE_BURST_SECONDS)
             if self._frames is None:
                 continue
-            if time.perf_counter() - self._last_frame_at >= KEEPALIVE_GAP_SECONDS:
-                self._last_frame_at = time.perf_counter()
+            if timing.now() - self._last_frame_at >= KEEPALIVE_GAP_SECONDS:
+                self._last_frame_at = timing.now()
                 self._frames.put_nowait(silence)
 
     def expect_silence(self, seconds: float) -> None:
@@ -230,7 +225,7 @@ class Mic:
         Derived from the audio sent rather than from a browser message, so a
         lost message cannot stop the microphone mid-reply.
         """
-        self._heard_speech_at = max(self._heard_speech_at, time.perf_counter() + seconds)
+        self._heard_speech_at = max(self._heard_speech_at, timing.now() + seconds)
 
     def hold(self, name: str, held: bool) -> None:
         """Suspend or resume expiry, keyed by what is suspending it.
@@ -243,9 +238,9 @@ class Mic:
         was_free = not self._holds
         self._holds.add(name) if held else self._holds.discard(name)
         if was_free and self._holds:
-            self._held_since = time.perf_counter()
+            self._held_since = timing.now()
         if not self._holds:
-            self._heard_speech_at = time.perf_counter()
+            self._heard_speech_at = timing.now()
 
     @contextlib.contextmanager
     def busy(self) -> Iterator[None]:
@@ -258,7 +253,7 @@ class Mic:
     async def _watch(self) -> None:
         while True:
             await asyncio.sleep(WATCHDOG_TICK_SECONDS)
-            now = time.perf_counter()
+            now = timing.now()
 
             # Before the hold, and not pausable: a stuck hold is what the cap is for.
             if now - self._started >= self.session_cap:
@@ -296,9 +291,9 @@ class Mic:
         if self._heard is not None:
             self._heard.put_nowait(None)
             self._heard = None
-        for name in ("_watchdog", "_keepalive", "_hearing"):
-            helper: asyncio.Task[None] | None = getattr(self, name)
-            setattr(self, name, None)
+        helpers = (self._watchdog, self._keepalive, self._hearing)
+        self._watchdog = self._keepalive = self._hearing = None
+        for helper in helpers:
             if helper is not None and helper is not asyncio.current_task():
                 helper.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -316,10 +311,8 @@ class Mic:
                 task.cancel()
         self._frames = None
         self.partial = ""  # nothing is being heard any more
-        if self._on_floor is not None:
-            # Whatever the floor last said no longer holds: nobody is listening.
-            with contextlib.suppress(Exception):
-                await self._on_floor("stopped")
+        # Whatever the floor last said no longer holds: nobody is listening.
+        self._post(FloorChanged("stopped"))
 
         if announce:
             payload: dict[str, object] = {"type": "listening", "active": False}
@@ -393,40 +386,34 @@ class Mic:
         # partials from the last one are void.
         self._agreement.reset()
         self._utterance_over()
-        if self._on_session is not None:
-            await self._on_session()
+        self._post(NewSession())
         await self._drop()
-        heard_at = time.perf_counter()
+        heard_at = timing.now()
         async for transcript in self._stt.stream(self._audio()):
-            self._heard_speech_at = time.perf_counter()
+            self._heard_speech_at = timing.now()
             self._client_frames = 0
             if not transcript.is_final:
                 if transcript.text.strip() and self._began_at is not None:
                     self._first_words_ms = elapsed_ms(self._began_at)
                     self._began_at = None
-                if transcript.text.strip() and self._on_speech is not None:
-                    # First: the earliest sign the user is talking, maybe over the
-                    # agent. With the words, so its own voice can be told apart.
-                    await self._on_speech(transcript.text)
                 # `repeated` = nothing new this time, the closest available sign
                 # that the user has stopped.
                 self._agreement.update(transcript.text)
                 if not self._agreement.repeated:
                     # From the last new *word*, not the last message.
-                    heard_at = time.perf_counter()
+                    heard_at = timing.now()
                 self._drawn = self._drawn or bool(transcript.text.strip())
                 self.partial = transcript.text
                 await self._channel.send_json(
                     {"type": "transcript", "text": transcript.text, "final": False}
                 )
-                if self._agreement.text and self._on_partial is not None:
-                    await self._on_partial(self._agreement.text, self._agreement.repeated)
+                self._post(Partial(transcript.text, self._agreement.text, self._agreement.repeated))
                 continue
 
             if not transcript.text.strip():
                 # An empty commit (a flush, or noise): nothing to report, but the
                 # partials already drawn came to nothing.
-                heard_at = time.perf_counter()
+                heard_at = timing.now()
                 self._agreement.reset()
                 self._utterance_over()
                 await self._drop()
@@ -458,5 +445,5 @@ class Mic:
             self._utterance_over()
             self._agreement.reset()
             self._drawn = False
-            heard_at = time.perf_counter()
-            await self._on_final(transcript.text)
+            heard_at = timing.now()
+            self._post(Final(transcript.text))

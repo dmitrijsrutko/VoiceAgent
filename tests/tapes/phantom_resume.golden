@@ -1,0 +1,31 @@
+  0.000  >   greeting text='Hi.'
+  0.000  >   audio_end seconds=0.18 cached=True
+  0.040  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.240  <   playback off
+  1.056  >   floor state='speaking'
+  2.000  >   transcript text='what is the capital of Latvia'
+  2.592  >   floor state='micro_pause'
+  2.976  >   floor state='pause'
+  3.400  >   transcript final=True text='What is the capital of Latvia?'
+  3.400  llm ask 'What is the capital of Latvia?'
+  3.872  >   floor state='yielded'
+  4.090  <   playback on
+  4.710  >   reply_end ttft_ms=500 text='Riga is the capital of Latvia. It sits on the Baltic Sea, a…'
+  4.710  >   audio_end seconds=7.86 first_audio_ms=650
+  6.500  >   transcript text='Hm'
+  6.500  >   interrupt id=1
+  6.520  <   playback off (cut)
+  6.520  <   interrupted 1 played 2430ms
+  6.520  >   truncated played_ms=2430 heard_chars=38 chars=131
+  9.000  >   resumed chars=100
+  9.000  >   reply_end resumed=True text='It sits on the Baltic Sea, at the mouth of the Daugava rive…'
+  9.150  >   audio_end seconds=6.0 first_audio_ms=150
+  9.190  <   playback on
+ 15.210  <   playback off
+
+assistant: Hi.
+     user: What is the capital of Latvia?
+assistant: Riga is the capital of Latvia. It sits
+assistant: It sits on the Baltic Sea, at the mouth of the Daugava river. Its old town is a World Heritage site.

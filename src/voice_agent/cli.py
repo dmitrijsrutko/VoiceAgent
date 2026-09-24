@@ -1,6 +1,7 @@
 """`uv run voice-agent` — serve the chat page and the conversation socket."""
 
 import argparse
+import dataclasses
 import logging
 import os
 import time
@@ -10,7 +11,14 @@ import uvicorn
 from dotenv import load_dotenv
 
 from voice_agent import roles
-from voice_agent.config import DEFAULT_INITIATIVE_DELAYS, load_settings
+from voice_agent.config import (
+    DEFAULT_INITIATIVE_DELAYS,
+    Settings,
+    load_settings,
+    parse_delays,
+    parse_directory,
+)
+from voice_agent.errors import ConfigError
 from voice_agent.llm import registry as llm_registry
 from voice_agent.stt import registry as stt_registry
 from voice_agent.tts import registry as tts_registry
@@ -20,7 +28,12 @@ def main() -> None:
     # Loaded before settings are read, and only here: library code never
     # reaches for a .env file, so importing this package has no side effects.
     load_dotenv()
-    settings = load_settings()
+    # A misconfiguration is a message, not a traceback: a typo in a flag or a
+    # variable is the one error a user is expected to hit.
+    try:
+        settings = load_settings()
+    except ConfigError as exc:
+        raise SystemExit(f"voice-agent: {exc}") from exc
 
     parser = argparse.ArgumentParser(description="Run the voice-agent server.")
     parser.add_argument("--host", default=settings.host)
@@ -28,7 +41,7 @@ def main() -> None:
     parser.add_argument(
         "--provider",
         default=settings.provider,
-        choices=list(llm_registry.BUILDERS),
+        choices=list(llm_registry.ENGINES),
         help="reasoning engine backend (default: %(default)s)",
     )
     parser.add_argument("--model", default=settings.model, help="override the provider's default")
@@ -49,7 +62,7 @@ def main() -> None:
     parser.add_argument(
         "--stt",
         default=settings.ears_provider,
-        choices=[*stt_registry.BUILDERS, stt_registry.NO_EARS],
+        choices=[*stt_registry.EARS, stt_registry.NO_EARS],
         help="speech recognition backend, or 'none' to stay deaf (default: %(default)s)",
     )
     parser.add_argument(
@@ -110,30 +123,12 @@ def main() -> None:
         "and score it, then exit; billed, one call per pause (default: all)",
     )
     args = parser.parse_args()
+    try:
+        settings = with_flags(settings, args)
+    except ConfigError as exc:
+        raise SystemExit(f"voice-agent: {exc}") from exc
 
-    # create_app() reads these back out of the environment, so the flags and
-    # the env vars stay one mechanism rather than two.
-    import os
-
-    os.environ["VOICE_AGENT_PROVIDER"] = args.provider
-    os.environ["VOICE_AGENT_TTS"] = args.tts
-    os.environ["VOICE_AGENT_STT"] = args.stt
-    if args.model:
-        os.environ["VOICE_AGENT_MODEL"] = args.model
-    if args.voice:
-        os.environ["VOICE_AGENT_VOICE"] = args.voice
-    os.environ["VOICE_AGENT_VOICE_GENDER"] = args.voice_gender
-    if args.vad_silence is not None:
-        os.environ["VOICE_AGENT_VAD_SILENCE"] = str(args.vad_silence)
-    if args.initiative is not None:
-        os.environ["VOICE_AGENT_INITIATIVE"] = args.initiative
-    os.environ["VOICE_AGENT_ROLE"] = args.role
-    if args.sessions is not None:
-        os.environ["VOICE_AGENT_SESSIONS"] = args.sessions
-    if args.trace is not None:
-        os.environ["VOICE_AGENT_TRACE"] = args.trace
-
-    start_logging()
+    start_logging(settings)
 
     if args.bench_llm is not None:
         from voice_agent.bench import main as bench
@@ -148,25 +143,19 @@ def main() -> None:
         return
 
     if args.purge_sessions:
-        purge_sessions(load_settings().sessions)
+        purge_sessions(settings.sessions)
         return
 
     if args.list_voices:
         list_voices(args.tts)
         return
 
-    from voice_agent.errors import ConfigError
     from voice_agent.server import create_app
 
     sex = {"female": "♀", "male": "♂", "neutral": "·"}[args.voice_gender]
     voice = f"{args.tts} {sex}" if args.tts != "none" else "silent"
     ears = args.stt if args.stt != "none" else "deaf"
-    # A misconfiguration is a message, not a traceback. It is the one error a
-    # user is *expected* to hit — a typo in a flag — and burying the sentence
-    # that says which flag under twenty lines of stack helps nobody.
     try:
-        # Re-read after the flags above, so a bad --initiative is rejected here.
-        settings = load_settings()
         app = create_app(settings=settings)
     except ConfigError as exc:
         raise SystemExit(f"voice-agent: {exc}") from exc
@@ -190,7 +179,30 @@ def main() -> None:
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 
 
-def start_logging() -> None:
+def with_flags(settings: Settings, args: argparse.Namespace) -> Settings:
+    """The environment's settings, overridden by whatever was given on the
+    command line. Every flag defaults to its variable, so this is one mechanism."""
+    return dataclasses.replace(
+        settings,
+        host=args.host,
+        port=args.port,
+        provider=args.provider,
+        model=args.model,
+        voice_provider=args.tts,
+        voice=args.voice,
+        voice_gender=args.voice_gender,
+        ears_provider=args.stt,
+        vad_silence=args.vad_silence,
+        role=args.role,
+        initiative=settings.initiative
+        if args.initiative is None
+        else parse_delays(args.initiative),
+        sessions=settings.sessions if args.sessions is None else parse_directory(args.sessions),
+        trace=settings.trace if args.trace is None else parse_directory(args.trace),
+    )
+
+
+def start_logging(settings: Settings | None = None) -> None:
     """Configure logging: the console at INFO, the trace at DEBUG.
 
     The console's level is set on the **handler**, not inherited from the root
@@ -207,7 +219,7 @@ def start_logging() -> None:
     root.setLevel(logging.WARNING)  # third-party loggers unchanged
     root.addHandler(console)
 
-    settings = load_settings()
+    settings = settings or load_settings()
     kept = open_log_file(settings.logs)
     if kept is not None:
         root.addHandler(kept)
@@ -284,12 +296,12 @@ def list_voices(provider: str) -> None:
     import asyncio
 
     from voice_agent.errors import VoiceAgentError
-    from voice_agent.tts import create_tts
+    from voice_agent.tts.elevenlabs_tts import ElevenLabsTTS
 
-    backend = create_tts(provider)
-    if backend is None:
-        print("--tts none has no voices.")
+    if provider != "elevenlabs":
+        print(f"--tts {provider} has no voices to list.")
         return
+    backend = ElevenLabsTTS()
 
     try:
         voices = asyncio.run(backend.list_voices())

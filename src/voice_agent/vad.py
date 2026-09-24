@@ -8,6 +8,7 @@ within a window.
 
 from functools import cache
 from pathlib import Path
+from typing import Protocol
 
 import numpy as np
 import onnxruntime  # type: ignore[import-untyped]  # ships no stubs or py.typed
@@ -44,6 +45,10 @@ def load() -> onnxruntime.InferenceSession:
     )
 
 
+class Detector(Protocol):
+    def probabilities(self, pcm: bytes) -> list[float]: ...
+
+
 class VAD:
     """One conversation's detector. Audio arrives in frames of any size; it is
     cut into whole windows, and a partial window waits for the next frame."""
@@ -56,7 +61,7 @@ class VAD:
 
     def probabilities(self, pcm: bytes) -> list[float]:
         """Speech probability for each whole window completed by `pcm`, in order.
-        CPU-bound (~0.1-0.3 ms a window): call it off the event loop."""
+        ~0.1 ms a window: cheap enough to run on the event loop."""
         self._pending += pcm
         whole = len(self._pending) // WINDOW_BYTES * WINDOW_BYTES
         if not whole:

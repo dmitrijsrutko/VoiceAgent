@@ -5,6 +5,7 @@ A plain in-memory list: no trimming, no summarization, no persistence.
 """
 
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Literal
 
 Role = Literal["user", "assistant"]
@@ -39,6 +40,8 @@ class Conversation:
     """The greeting, kept in the history the page replays but out of what the
     model reads: a fixed line in one language anchored replies to it (the system
     prompt says it was said instead)."""
+    record: Path | None = None
+    """Where this conversation is written down, once it has been."""
 
     @property
     def context(self) -> list[Message]:

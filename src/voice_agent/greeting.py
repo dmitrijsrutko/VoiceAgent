@@ -1,10 +1,10 @@
 """The agent's opening line, synthesised once and cached on disk."""
 
 import logging
-import time
 from hashlib import sha256
 from pathlib import Path
 
+from voice_agent import timing
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation
 from voice_agent.errors import VoiceAgentError
@@ -85,7 +85,7 @@ class Greeting:
         self._pcm = self._load()
         if self._pcm is not None:
             return
-        started = time.perf_counter()
+        started = timing.now()
         try:
             # Joined, not streamed: nobody is waiting on it yet, and a partial
             # greeting cached to disk would be replayed truncated forever.

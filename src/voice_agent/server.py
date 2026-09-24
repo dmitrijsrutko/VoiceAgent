@@ -37,16 +37,17 @@ from starlette.responses import Response
 from starlette.types import Scope
 
 from voice_agent import roles, trace, vad
+from voice_agent.backends import Backends
 from voice_agent.channel import Channel
 from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_settings
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
+from voice_agent.events import Playback, Typed
 from voice_agent.greeting import Greeting
 from voice_agent.initiative import LADDER, Rung
 from voice_agent.limits import Live, MintLimit, budget_reason, client_address
 from voice_agent.llm import LLM, create_llm
 from voice_agent.llm.traced import Traced
-from voice_agent.pool import Pool, Stack
 from voice_agent.record import Record
 from voice_agent.session import Session
 from voice_agent.sessions import SessionStore
@@ -140,7 +141,7 @@ async def expire(after: float, session: Session, websocket: WebSocket) -> None:
     """End a conversation that ran out of budget, and hang up. The socket must
     be closed too: a silent browser sends nothing that would end the loop."""
     await asyncio.sleep(after)
-    await session.end(budget_reason(after))
+    await session.finish(budget_reason(after))
     with contextlib.suppress(RuntimeError):
         await websocket.close()  # possibly already closed by the other side
 
@@ -159,23 +160,17 @@ def ladder_for(delays: Sequence[float]) -> tuple[Rung, ...]:
     )
 
 
-def record_for(directory: Path | None, conversation_id: str, prompt: str) -> Record | None:
-    """One file per conversation, named to sort by time, and reopened on resume."""
+def record_for(directory: Path | None, conversation: Conversation, prompt: str) -> Record | None:
+    """One file per conversation, named to sort by time, and reopened on resume.
+    Kept on the conversation, which lives exactly as long as its link does."""
     if directory is None:
         return None
-    # The stem's tail, not a glob: `*-{id}` would also match an id ending in this one.
-    existing = sorted(
-        path
-        for path in directory.glob("*.md")
-        if path.stem.endswith(f"-{conversation_id}") and len(path.stem) == len(conversation_id) + 18
-    )
-    if existing:
-        path = existing[-1]
-    else:
-        path = directory / f"{datetime.now():%Y-%m-%d-%H%M%S}-{conversation_id}.md"
+    if conversation.record is None:
+        stamp = f"{datetime.now():%Y-%m-%d-%H%M%S}"
+        conversation.record = directory / f"{stamp}-{conversation.id}.md"
     running = trace.current()
     return Record(
-        path,
+        conversation.record,
         prompt_id=f"system_prompt.md@{sha256(prompt.encode()).hexdigest()[:7]}",
         trace=running.path.name if running is not None else "",
     )
@@ -190,8 +185,7 @@ class Agent:
     live: Live
     mints: MintLimit
     speaker: TTS | None
-    stack: Stack
-    pool: Pool
+    backends: Backends
     openings: dict[str, Greeting]
     """The first line, per role: the plain greeting under `roles.NO_ROLE`, and
     each card's own opening. Every one synthesised at startup."""
@@ -229,7 +223,7 @@ class Agent:
                 else None
             ),
             "recording": self.record_dir is not None,
-            "choices": self.stack.choices(engine, ears, role),
+            "choices": self.backends.choices(engine, ears, role),
         }
 
 
@@ -264,13 +258,16 @@ def create_app(
     speaker = (
         tts if tts is not None or not voice else create_tts(settings.voice_provider, settings.voice)
     )
-    stack = Stack(
+    backends = Backends(
         settings.provider,
         settings.model,
         settings.ears_provider,
+        silence=settings.vad_silence,
         hears=ears,
         roles=tuple(cards.values()),
         default_role=preselected,
+        engine=llm,
+        ears=stt,
     )
     agent = Agent(
         settings=settings,
@@ -278,8 +275,7 @@ def create_app(
         live=Live(settings.max_live),
         mints=MintLimit(settings.mints_per_ip),
         speaker=speaker,
-        stack=stack,
-        pool=Pool(stack.model_for, settings.vad_silence, engine=llm, ears=stt),
+        backends=backends,
         openings={
             roles.NO_ROLE: Greeting(DEFAULT_GREETING if plain is None else plain, speaker),
             **{slug: Greeting(card.opening, speaker) for slug, card in cards.items()},
@@ -300,7 +296,7 @@ def create_app(
         await asyncio.gather(
             *(opening.prepare() for opening in agent.openings.values()),
             asyncio.to_thread(vad.load),
-            *(connect(agent.pool.engine(name)) for name in stack.engines),
+            *(connect(backends.engine(name)) for name in backends.engines),
             *([connect(agent.thinker)] if agent.thinker is not None else []),
         )
         agent.ready = True
@@ -340,9 +336,9 @@ def create_app(
             agent.sessions.get(key)
         except SessionNotFoundError:
             return HTMLResponse("<h1>404 — no such conversation</h1>", status_code=404)
-        ears_default = stack.default_ears
-        listener = agent.pool.ears(ears_default) if ears_default != NO_EARS else None
-        known = agent.facts(listener, stack.default_engine, ears_default, stack.default_role)
+        ears_default = backends.default_ears
+        listener = backends.ears(ears_default) if ears_default != NO_EARS else None
+        known = agent.facts(listener, backends.default_engine, ears_default, backends.default_role)
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
 
     @app.websocket("/ws/{key}")
@@ -378,9 +374,9 @@ async def serve(agent: Agent, websocket: WebSocket, key: str) -> None:
 
 
 async def converse(agent: Agent, websocket: WebSocket, conversation: Conversation) -> None:
-    engine_name, ears_name, role_name = agent.stack.choose(conversation, websocket.query_params)
-    engine = agent.pool.engine(engine_name)
-    listener = agent.pool.ears(ears_name)
+    engine_name, ears_name, role_name = agent.backends.choose(conversation, websocket.query_params)
+    engine = agent.backends.engine(engine_name)
+    listener = agent.backends.ears(ears_name)
     role = agent.roles.get(role_name)
     opening = agent.openings[role_name if role is not None else roles.NO_ROLE]
     # Per conversation, because it states what these ears can hear; stable for
@@ -392,7 +388,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         greeting=opening.text,
         role=role.when_speaking if role is not None else "",
     )
-    recording = record_for(agent.record_dir, conversation.id, system_prompt)
+    recording = record_for(agent.record_dir, conversation, system_prompt)
     channel = Channel(websocket, recording)
     session = Session(
         channel,
@@ -428,9 +424,22 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         if budget_seconds is not None
         else None
     )
+    ending = asyncio.ensure_future(session.ended.wait())
     try:
-        while not conversation.ended:
-            message = await websocket.receive()
+        # A reconnect to an ended conversation gets its history and nothing more.
+        # Otherwise the loop runs until `end()` has finished, not merely begun.
+        already_over = conversation.ended
+        while not already_over:
+            # Raced with the ending: after `ended` the page sends nothing, and a
+            # loop waiting on it would hold a live slot until the tab closed.
+            receiving = asyncio.ensure_future(websocket.receive())
+            await asyncio.wait({receiving, ending}, return_when=asyncio.FIRST_COMPLETED)
+            if not receiving.done():
+                receiving.cancel()
+                with contextlib.suppress(RuntimeError):
+                    await websocket.close()  # possibly closed already, by the time limit
+                break
+            message = receiving.result()
             if message["type"] == "websocket.disconnect":
                 break
             if (frame := message.get("bytes")) is not None:
@@ -441,6 +450,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
     except WebSocketDisconnect:
         return
     finally:
+        ending.cancel()
         if budget is not None:
             budget.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -485,7 +495,7 @@ async def handle_text(
         # The user is not expected to speak for however long the audio lasts —
         # which for a long answer is far more than the idle window — and only
         # the browser knows when playback actually ends.
-        session.playback(bool(payload.get("active")))
+        session.post(Playback(bool(payload.get("active"))))
         # Chunks that arrived after the previous one had finished playing. Only
         # the browser can see them, and a stutter nobody logs is a stutter
         # nobody fixes. Coerced first: these are client-supplied, and a string
@@ -537,4 +547,4 @@ async def handle_text(
         # a committed `transcript` frame and is recorded there.
         if record is not None:
             record.said(text)
-        await session.submit(text)
+        session.post(Typed(text))

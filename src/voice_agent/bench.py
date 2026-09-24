@@ -9,7 +9,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 
-from voice_agent.config import load_system_prompt
+from voice_agent import prompts
 from voice_agent.conversation import Message
 from voice_agent.errors import VoiceAgentError
 from voice_agent.llm import LLM, create_llm
@@ -72,7 +72,7 @@ async def run(
 ) -> list[Result]:
     """Round-robin, so a provider's slow minute is spread across the others
     rather than landing on whichever one happened to run then."""
-    system = load_system_prompt()
+    system = prompts.load("system_prompt")
     messages = [Message("user", QUESTION)]
     results = [Result(target) for target in targets]
     engines: dict[str, LLM] = {}

@@ -1,0 +1,27 @@
+  0.000  >   greeting text='Hi.'
+  0.000  >   audio_end seconds=0.18 cached=True
+  0.040  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.240  <   playback off
+  1.056  >   floor state='speaking'
+  1.500  >   transcript text='I was thinking about'
+  2.208  >   floor state='micro_pause'
+  2.592  >   floor state='pause'
+  3.000  >   transcript final=True text='I was thinking about,'
+  3.488  >   floor state='yielded'
+  3.552  >   floor state='speaking'
+  3.800  >   transcript text='the trip to Riga'
+  4.512  >   floor state='micro_pause'
+  4.896  >   floor state='pause'
+  5.300  >   transcript final=True text='the trip to Riga.'
+  5.300  llm ask 'I was thinking about, the trip to Riga.'
+  5.792  >   floor state='yielded'
+  5.890  >   reply_end merged=2 ttft_ms=500 text='That sounds lovely.'
+  5.950  >   audio_end seconds=1.14 first_audio_ms=650
+  5.990  <   playback on
+  7.150  <   playback off
+
+assistant: Hi.
+     user: I was thinking about, the trip to Riga.
+assistant: That sounds lovely.

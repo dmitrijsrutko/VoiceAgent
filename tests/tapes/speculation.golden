@@ -1,0 +1,42 @@
+  0.000  >   greeting text='Hi.'
+  0.000  >   audio_end seconds=0.18 cached=True
+  0.040  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.240  <   playback off
+  1.056  >   floor state='speaking'
+  1.500  >   transcript text='what is the capital'
+  2.000  >   transcript text='what is the capital of Latvia'
+  2.496  >   floor state='micro_pause'
+  2.600  >   transcript text='what is the capital of Latvia'
+  2.600  llm ask 'what is the capital of Latvia'
+  2.880  >   floor state='pause'
+  3.600  >   transcript final=True text='What is the capital of Latvia?'
+  3.600  >   reply_end speculated=True text='Riga.'
+  3.750  >   audio_end seconds=0.3 first_audio_ms=150
+  3.776  >   floor state='yielded'
+  3.790  <   playback on
+  4.110  <   playback off
+  7.040  >   floor state='speaking'
+  7.500  >   transcript text='what about'
+  8.000  >   transcript text='what about'
+  8.000  llm ask 'what about'
+  8.300  >   transcript text='what about Estonia'
+  8.300  llm stopped early
+  8.800  >   floor state='micro_pause'
+  9.000  >   transcript text='what about and Estonia'
+  9.184  >   floor state='pause'
+  9.400  >   transcript text='what about and Estonia'
+  9.400  llm ask 'what about and Estonia'
+ 10.080  >   floor state='yielded'
+ 10.400  >   transcript final=True text='What about, and Estonia?'
+ 10.400  >   reply_end speculated=True text='Tallinn.'
+ 10.550  >   audio_end seconds=0.48 first_audio_ms=150
+ 10.590  <   playback on
+ 11.090  <   playback off
+
+assistant: Hi.
+     user: What is the capital of Latvia?
+assistant: Riga.
+     user: What about, and Estonia?
+assistant: Tallinn.

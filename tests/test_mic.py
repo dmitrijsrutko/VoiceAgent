@@ -8,7 +8,6 @@ for.
 """
 
 import asyncio
-import time
 import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -17,6 +16,8 @@ import pytest
 
 from tests.conftest import FakeSTT
 from voice_agent import mic as mic_module
+from voice_agent import timing
+from voice_agent.events import Final, FloorChanged, MicEvent, NewSession
 from voice_agent.floor import Transition
 from voice_agent.mic import Mic
 from voice_agent.stt.base import Transcript
@@ -69,8 +70,10 @@ class SilentSTT:
             yield transcript
 
 
-async def never_called(text: str) -> None:  # pragma: no cover - asserted unused
-    raise AssertionError(f"a turn started unexpectedly: {text!r}")
+def never_called(event: MicEvent) -> None:
+    """A sink for what the microphone hears, where no commit is expected."""
+    if isinstance(event, Final):  # pragma: no cover - asserted unused
+        raise AssertionError(f"a turn started unexpectedly: {event.text!r}")
 
 
 @pytest.fixture(autouse=True)
@@ -304,14 +307,16 @@ async def test_silence_is_sent_when_the_browser_goes_quiet(
     assert Counting.frames >= 2, "the recognizer was left with no audio at all"
 
 
-async def test_stopping_from_a_transcript_drains_cleanly() -> None:
-    """A spoken "bye" stops the microphone from inside its own task, with
-    frames still queued behind the one that carried the word."""
+async def test_stopping_on_a_transcript_drains_cleanly() -> None:
+    """A spoken "bye" stops the microphone as soon as it is heard, with frames
+    still queued behind the one that carried the word."""
     channel = RecordingChannel()
     stt = FakeSTT(script=[Transcript("bye", is_final=True)])
+    stopping: list[asyncio.Task[None]] = []
 
-    async def stop_on_final(text: str) -> None:
-        await mic.stop()
+    def stop_on_final(event: MicEvent) -> None:
+        if isinstance(event, Final):
+            stopping.append(asyncio.create_task(mic.stop()))
 
     mic = Mic(stt, channel, stop_on_final)  # type: ignore[arg-type]
     await mic.start()
@@ -397,13 +402,13 @@ async def test_speech_that_never_became_words_does_not_date_the_next_utterance()
     first-words time is measured from."""
     mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
     await mic.start()
-    long_ago = time.perf_counter() - 30
+    long_ago = timing.now() - 30
 
     await mic._report(Transition("speaking", 0, 64), long_ago)
     await mic._report(Transition("yielded", 64, 1564), long_ago + 1.5)
     assert mic._began_at is None
 
-    now = time.perf_counter()
+    now = timing.now()
     await mic._report(Transition("speaking", 0, 64), now)
     assert mic._began_at == pytest.approx(now - 0.064)
     await mic.stop()
@@ -422,15 +427,16 @@ async def test_a_commit_of_nothing_starts_the_measures_afresh() -> None:
     stt = FakeSTT(script=[Transcript("uh", is_final=False), Transcript("", is_final=True)])
     began = asyncio.Event()
 
-    async def session_began() -> None:
-        began.set()
+    def session_began(event: MicEvent) -> None:
+        if isinstance(event, NewSession):
+            began.set()
 
-    mic = Mic(stt, channel, never_called, on_session=session_began)  # type: ignore[arg-type]
+    mic = Mic(stt, channel, session_began)  # type: ignore[arg-type]
     await mic.start()
     # A new recognizer session clears the onset itself, so set it after one.
     async with asyncio.timeout(WAIT_TIMEOUT):
         await began.wait()
-    mic._began_at = time.perf_counter()
+    mic._began_at = timing.now()
 
     mic.feed(b"\x00\x00")
     await channel.wait_for(type="transcript", final=False)
@@ -447,10 +453,11 @@ async def test_stopping_tells_the_floor_nobody_is_listening() -> None:
     `speaking` would never hear that the microphone went away."""
     states: list[str] = []
 
-    async def on_floor(state: str) -> None:
-        states.append(state)
+    def on_floor(event: MicEvent) -> None:
+        if isinstance(event, FloorChanged):
+            states.append(event.state)
 
-    mic = Mic(SilentSTT(), RecordingChannel(), never_called, on_floor=on_floor)  # type: ignore[arg-type]
+    mic = Mic(SilentSTT(), RecordingChannel(), on_floor)  # type: ignore[arg-type]
     await mic.start()
     await mic.stop()
 

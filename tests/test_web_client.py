@@ -493,10 +493,8 @@ def test_the_start_screen_warns_about_no_particular_language() -> None:
 
 
 def test_the_voice_is_a_group_of_one_that_is_never_sent() -> None:
-    """`openai_tts.py` exists, but it waits for the whole reply before
-    synthesising — offering it as a peer would be offering a worse agent. The
-    voice is drawn like the other two parts of the stack, with one option, and
-    the socket never carries a choice of it."""
+    """There is one voice. It is drawn like the other parts of the stack, with
+    one option, and the socket never carries a choice of it."""
     start = without_comments(source("start.js"))
     choosing = re.findall(r'choose\("(\w+)"', start)
 

@@ -1,8 +1,12 @@
 """Prompt rules written in response to live sessions: each pins the wording
 that fixed something, so a later edit cannot quietly undo it."""
 
-from voice_agent.config import HEARING, IDENTITY, SELF_ONLY, SELF_REFERENCE
+from voice_agent import prompts
 from voice_agent.roles import load
+
+RULES = prompts.rules()
+HEARING = RULES["Hearing"]
+SELF_ONLY = RULES["Voice scope"]
 
 
 def test_not_catching_something_asks_again_instead_of_reading_out_every_language() -> None:
@@ -14,11 +18,11 @@ def test_not_catching_something_asks_again_instead_of_reading_out_every_language
 
 def test_the_female_voice_names_its_one_word_acknowledgements() -> None:
     """Live, a bare «Понял.» from the female voice, talking to a man."""
-    rule = SELF_REFERENCE["female"]
+    rule = RULES["Voice: female"]
     assert "«Поняла.»" in rule and "never «Понял.»" in rule
     assert "a man talking to you does not make you" in rule
-    assert "«Поняла.»" in IDENTITY["female"]
-    assert "never «Поняла.»" in SELF_REFERENCE["male"]
+    assert "«Поняла.»" in RULES["Identity: female"]
+    assert "never «Поняла.»" in RULES["Voice: male"]
 
 
 def test_the_user_is_never_given_a_gender_they_have_not_shown() -> None:

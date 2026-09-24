@@ -1,0 +1,32 @@
+  0.000  >   greeting text="Hi, I'm a test agent. What shall we talk about?"
+  0.000  >   audio_end seconds=2.82 cached=True
+  0.040  <   playback on
+  0.520  <   listen_start
+  0.520  >   listening active=True
+  2.880  <   playback off
+  4.020  <   typed 'What is the capital of Latvia?'
+  4.020  llm ask 'What is the capital of Latvia?'
+  4.700  >   reply_end ttft_ms=500 text='Riga. It sits on the Baltic.'
+  4.700  >   audio_end seconds=1.68 first_audio_ms=650
+  4.710  <   playback on
+  6.410  <   playback off
+ 12.000  llm ask '[This is not the other person speaking. It is you…'
+ 12.530  >   initiative rung=1 decision='declined'
+ 21.530  llm ask '[This is not the other person speaking. It is you…'
+ 22.240  >   initiative rung=2 decision='spoke' line='Shall I say more about Riga itself?'
+ 22.240  >   reply_end initiative=2 text='Shall I say more about Riga itself?'
+ 22.390  >   audio_end seconds=2.1 first_audio_ms=150
+ 22.430  <   playback on
+ 24.550  <   playback off
+ 53.240  llm ask '[This is not the other person speaking. It is you…'
+ 54.010  >   initiative rung=3 decision='spoke' line="I'll stay quiet now; start again whenever you like."
+ 54.010  >   reply_end initiative=3 text="I'll stay quiet now; start again whenever you like."
+ 54.160  >   audio_end seconds=3.06 first_audio_ms=150
+ 54.200  <   playback on
+ 57.280  <   playback off
+
+assistant: Hi, I'm a test agent. What shall we talk about?
+     user: What is the capital of Latvia?
+assistant: Riga. It sits on the Baltic.
+assistant: Shall I say more about Riga itself?
+assistant: I'll stay quiet now; start again whenever you like.

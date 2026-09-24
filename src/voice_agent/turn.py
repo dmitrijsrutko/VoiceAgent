@@ -9,10 +9,10 @@ engine has finished the last one.
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 
+from voice_agent import timing
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation, Message
 from voice_agent.decline import guard
@@ -84,11 +84,10 @@ async def run_turn(
     """
     channel, conversation, speaker = ctx.channel, ctx.conversation, ctx.speaker
     text, voice = turn.text, turn.voice
-    if text is not None:
-        conversation.add_user(text)
+    question = conversation.add_user(text) if text is not None else None
     await channel.send_json({"type": "reply_start"})
 
-    started = time.perf_counter()
+    started = timing.now()
     # Started before the first token, so that connecting to the synthesizer
     # happens while the reasoning engine is still thinking rather than after.
     speech = Speech(channel, speaker, started, voice) if speaker is not None else None
@@ -108,7 +107,7 @@ async def run_turn(
             async with closing(source) as fragments:
                 async for fragment in fragments:
                     if first_token_at is None:
-                        first_token_at = time.perf_counter()
+                        first_token_at = timing.now()
                     produced.append(fragment)
                     if speech is not None:
                         speech.say(fragment)
@@ -116,8 +115,8 @@ async def run_turn(
         except VoiceAgentError as exc:
             # Fail closed: drop the question too, so no call resends a dangling
             # one; close any audio already begun so the page stops waiting.
-            if text is not None:
-                conversation.messages.pop()
+            if question is not None:
+                conversation.replace(question, None)
             if speech is not None:
                 await speech.interrupt()
             logger.warning("turn failed for session %s: %s", conversation.id, exc)
@@ -129,7 +128,7 @@ async def run_turn(
         written = "".join(produced)
         # Falls back to "now" when nothing streamed, so an empty reply reports its
         # whole duration as time-to-first-token rather than as zero of everything.
-        generation_started = first_token_at if first_token_at is not None else time.perf_counter()
+        generation_started = first_token_at if first_token_at is not None else timing.now()
         reply = conversation.add_assistant(written)
         if speech is not None:
             speech.voice.message = reply
@@ -156,8 +155,8 @@ async def run_turn(
             # before a reply existed, the same rule as a failure: no question
             # without an answer. Nothing more is sent, so whatever ended the
             # turn is the last word.
-            if reply is None and text is not None:
-                conversation.messages.pop()
+            if reply is None and question is not None:
+                conversation.replace(question, None)
             raise
         # Talked over. This cancellation was the interruption asking the turn to
         # stop, not to disappear, so it is absorbed here rather than propagated.
@@ -250,12 +249,12 @@ class Speech:
 
     def say(self, fragment: str) -> None:
         if self._first_text_at is None:
-            self._first_text_at = time.perf_counter()
+            self._first_text_at = timing.now()
         self._text.put_nowait(fragment)
 
     def finish(self) -> None:
         """All of the text has been said."""
-        self._text_ended_at = time.perf_counter()
+        self._text_ended_at = timing.now()
         self._text.put_nowait(None)
 
     async def done(self) -> float | None:
@@ -269,7 +268,7 @@ class Speech:
             # only trace of where it stopped.
             logger.warning(
                 "synthesis unfinished when its turn ended: %.1f s since the last chunk, after %r",
-                time.perf_counter() - self._last_chunk_at,
+                timing.now() - self._last_chunk_at,
                 self._voiced_tail(),
             )
         self._task.cancel()
@@ -296,7 +295,7 @@ class Speech:
                         # so a synthesis that fails outright opens no stream,
                         # and a blank reply announces nothing at all.
                         await self._channel.send_json(audio_start())
-                        self._first_sent_at = time.perf_counter()
+                        self._first_sent_at = timing.now()
                     # Recorded before the write: a chunk being written when the
                     # user interrupts may already be playing.
                     if ends_ms := self.voice.add(chunk):
@@ -366,7 +365,7 @@ class Speech:
         """How late this chunk is against playback, assuming playback began
         when the first chunk was sent (the browser starts a little after, so
         this errs towards zero)."""
-        now = time.perf_counter()
+        now = timing.now()
         self._last_chunk_at = now
         if self._first_sent_at is None:
             return
@@ -388,4 +387,4 @@ class Speech:
         difference."""
         if self._first_sent_at is None:
             return None
-        return max(0.0, pcm_seconds(self._sent) - (time.perf_counter() - self._first_sent_at))
+        return max(0.0, pcm_seconds(self._sent) - (timing.now() - self._first_sent_at))

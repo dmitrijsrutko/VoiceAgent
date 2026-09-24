@@ -5,7 +5,6 @@ import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
 
-import httpx2
 import pytest
 from elevenlabs.core import ApiError
 from websockets.asyncio.server import ServerConnection, serve
@@ -30,7 +29,6 @@ from voice_agent.tts.elevenlabs_tts import (
     ElevenLabsTTS,
     explain,
 )
-from voice_agent.tts.openai_tts import RESPONSE_FORMAT, OpenAITTS
 
 
 async def chunks_of(*parts: bytes | AudioChunk) -> AsyncIterator[AudioChunk]:
@@ -69,22 +67,18 @@ def test_pcm_duration_follows_from_its_size() -> None:
     assert pcm_seconds(SAMPLE_RATE * 2) == 1.0
 
 
-def test_both_backends_ask_for_the_rate_the_browser_is_told() -> None:
+def test_the_voice_asks_for_the_rate_the_browser_is_told() -> None:
     """A mismatch here does not fail — it plays, at the wrong pitch."""
     assert SAMPLE_RATE == 24_000
     assert f"pcm_{SAMPLE_RATE}" == OUTPUT_FORMAT
-    assert RESPONSE_FORMAT == "pcm"  # OpenAI's pcm is fixed at 24 kHz s16le
 
 
 def test_registry_builds_each_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
 
     elevenlabs = create_tts("elevenlabs")
-    openai = create_tts("openai")
 
     assert elevenlabs is not None and elevenlabs.provider == "elevenlabs"
-    assert openai is not None and openai.provider == "openai"
 
 
 def test_none_is_silence_not_a_backend() -> None:
@@ -93,23 +87,19 @@ def test_none_is_silence_not_a_backend() -> None:
 
 def test_defaults_are_the_low_latency_ones(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
 
     # Flash rather than the highest-quality model: this is a voice agent.
     assert ElevenLabsTTS().model == "eleven_flash_v2_5"
-    assert OpenAITTS().model == "gpt-4o-mini-tts"
 
 
 def test_voice_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
 
     assert ElevenLabsTTS("my-cloned-voice").voice == "my-cloned-voice"
-    assert OpenAITTS("nova").voice == "nova"
 
 
 def test_unknown_backend_names_the_ones_that_exist() -> None:
-    with pytest.raises(ConfigError, match="elevenlabs, openai, none"):
+    with pytest.raises(ConfigError, match="elevenlabs, none"):
         create_tts("robot-voice")
 
 
@@ -205,16 +195,6 @@ async def test_library_voices_are_listed_as_visible_but_not_usable() -> None:
 async def test_a_voice_with_no_name_still_lists() -> None:
     client = FakeVoicesClient([SimpleNamespace(voice_id="v1", name=None, category="premade")])
     assert (await ElevenLabsTTS(client=client, api_key="test").list_voices())[0].name == "v1"  # type: ignore[arg-type]
-
-
-async def test_openai_voices_need_no_api_call(monkeypatch: pytest.MonkeyPatch) -> None:
-    """The asymmetry with ElevenLabs — a fixed set with no plan tiers behind
-    it — is why list_voices belongs on the backend, not in a shared helper."""
-    monkeypatch.setenv("OPENAI_API_KEY", "test")
-    voices = await OpenAITTS().list_voices()
-
-    assert all(v.usable for v in voices)
-    assert "alloy" in {v.id for v in voices}
 
 
 async def tokens(*parts: str, pace: float = 0.0) -> AsyncIterator[str]:
@@ -407,67 +387,6 @@ async def test_a_reader_that_stops_closes_the_socket(endpoint: Serve) -> None:
     assert time.perf_counter() - stopped < 0.5, "closing waited on text that never came"
     async with asyncio.timeout(1):
         await service.closed.wait()
-
-
-class FakeStreamingResponse:
-    def __init__(self, parts: list[bytes], drop_after: int | None = None) -> None:
-        self._parts = parts
-        self._drop_after = drop_after
-
-    async def __aenter__(self) -> "FakeStreamingResponse":
-        return self
-
-    async def __aexit__(self, *_: object) -> None: ...
-
-    async def iter_bytes(self) -> AsyncIterator[bytes]:
-        for index, part in enumerate(self._parts):
-            if index == self._drop_after:
-                raise httpx2.RemoteProtocolError("peer closed connection")
-            yield part
-
-
-def openai_client(create: object) -> SimpleNamespace:
-    streaming = SimpleNamespace(create=create)
-    return SimpleNamespace(
-        audio=SimpleNamespace(speech=SimpleNamespace(with_streaming_response=streaming))
-    )
-
-
-async def test_openai_streams_pcm_in_whole_samples() -> None:
-    calls: list[dict[str, object]] = []
-
-    def create(**kwargs: object) -> FakeStreamingResponse:
-        calls.append(kwargs)
-        return FakeStreamingResponse([b"\x01", b"\x02\x03\x04\x05", b"\x06"])
-
-    client = openai_client(create)
-    out = await collect(OpenAITTS(client=client).stream(tokens("hel", "lo")))  # type: ignore[arg-type]
-
-    assert b"".join(out) == b"\x01\x02\x03\x04\x05\x06"
-    assert all(len(chunk) % 2 == 0 for chunk in out)
-    assert calls[0]["response_format"] == "pcm"
-    # It has no streaming input: the text is gathered and sent once, whole.
-    assert [c["input"] for c in calls] == ["hello"]
-
-
-async def test_openai_is_not_asked_to_speak_a_blank_text() -> None:
-    calls: list[dict[str, object]] = []
-
-    def create(**kwargs: object) -> FakeStreamingResponse:
-        calls.append(kwargs)
-        return FakeStreamingResponse([b"\x00\x00"])
-
-    out = await collect(OpenAITTS(client=openai_client(create)).stream(tokens(" ", "")))  # type: ignore[arg-type]
-
-    assert out == [] and calls == []
-
-
-async def test_an_openai_connection_lost_mid_stream_is_a_provider_error() -> None:
-    def create(**_: object) -> FakeStreamingResponse:
-        return FakeStreamingResponse([b"\x01\x02", b"\x03\x04"], drop_after=1)
-
-    with pytest.raises(ProviderError, match="interrupted"):
-        await collect(OpenAITTS(client=openai_client(create)).stream(once("hello")))  # type: ignore[arg-type]
 
 
 async def test_the_service_s_character_timing_comes_with_the_audio(endpoint: Serve) -> None:

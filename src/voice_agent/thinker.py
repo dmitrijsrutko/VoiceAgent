@@ -17,14 +17,11 @@ import contextlib
 import json
 import logging
 import re
-import time
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from pathlib import Path
 
-from voice_agent import trace
-from voice_agent.config import PREAMBLE_SEPARATOR
+from voice_agent import prompts, timing, trace
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import VoiceAgentError
 from voice_agent.llm import LLM
@@ -38,7 +35,6 @@ logger = logging.getLogger(__name__)
 THINKER_MODEL = "claude-haiku-4-5"
 """Fast and cheap enough to run on every pause; the reply engine is untouched."""
 
-THINKER_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "thinker.md"
 
 MONOLOGUE_SECONDS = 8.0
 """How often to think while the user talks without pausing: a monologue is
@@ -74,9 +70,7 @@ def system_prompt(role: Role, template: str | None = None) -> str:
     """The thinker's instructions with the role filled in. Stable for the
     conversation, so the provider caches it. Placeholders are replaced by name
     rather than `str.format`, so braces in a role's text are just text."""
-    raw = THINKER_PROMPT_PATH.read_text(encoding="utf-8") if template is None else template
-    _, separator, body = raw.partition(PREAMBLE_SEPARATOR)
-    text = body if separator else raw
+    text = prompts.load("thinker") if template is None else prompts.body(template)
     values = {
         "name": role.name,
         "summary": role.summary,
@@ -266,7 +260,7 @@ class Thinker:
             next_reason, self._again = self._again, None
 
     def _allowed(self) -> bool:
-        now = time.monotonic()
+        now = timing.now()
         while self._calls and now - self._calls[0] >= 60:
             self._calls.popleft()
         if len(self._calls) >= self._per_minute:
@@ -290,7 +284,7 @@ class Thinker:
                 self._capped_reported = True
                 await self._note(reason, "capped", 0, Usage())
             return
-        started = time.perf_counter()
+        started = timing.now()
         usage = Usage()
         ask = request(self._conversation, hearing, self.notes, self.pending, reason)
         try:

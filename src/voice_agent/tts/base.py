@@ -5,8 +5,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 SAMPLE_RATE = 24_000
-"""Hz. Chosen because both backends produce it natively — ElevenLabs as
-`pcm_24000`, OpenAI as its only `pcm` rate — so neither needs resampling."""
+"""Hz. ElevenLabs produces it natively as `pcm_24000`, so nothing resamples."""
 
 BYTES_PER_SAMPLE = 2
 """16-bit signed little-endian, mono."""
@@ -101,14 +100,4 @@ class TTS(Protocol):
     def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         """Raises `ProviderError` — possibly after some chunks have already
         been yielded, which a consumer that has started playing must handle."""
-        ...
-
-    async def list_voices(self) -> list[Voice]:
-        """The voices this account may actually use.
-
-        Not a convenience: which voices a plan can use turned out to be neither
-        stable nor inferable from documentation, and getting it wrong fails at
-        synthesis time with a payment error rather than at startup. A backend
-        has to be able to answer this about itself.
-        """
         ...

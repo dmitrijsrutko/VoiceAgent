@@ -200,23 +200,21 @@ def test_the_audio_frame_count_belongs_to_one_reply(tmp_path: Path) -> None:
     assert "frames 1" in (tmp_path / "c.md").read_text()
 
 
-def test_a_conversation_whose_id_ends_with_another_gets_its_own_file(
+def test_a_reconnect_reopens_its_own_file_and_another_conversation_gets_one(
     tmp_path: Path,
 ) -> None:
-    """`*-{id}.md` also matched a conversation whose id merely ends with this
-    one. Random base64 makes it a curiosity, but an exact stem costs nothing."""
+    from voice_agent.conversation import Conversation
     from voice_agent.server import record_for
 
-    tmp_path.mkdir(exist_ok=True)
-    long_id, short_id = "xyz-abc", "abc"
-    first = record_for(tmp_path, long_id, "prompt")
+    one, other = Conversation(id="xyz-abc"), Conversation(id="abc")
+    first = record_for(tmp_path, one, "prompt")
     assert first is not None
-    first.frame({"type": "ready", "session": long_id})
     first.close()
 
-    second = record_for(tmp_path, short_id, "prompt")
-    assert second is not None
-    assert second.path != first.path
+    again = record_for(tmp_path, one, "prompt")
+    second = record_for(tmp_path, other, "prompt")
+    assert again is not None and again.path == first.path
+    assert second is not None and second.path != first.path
 
 
 def test_the_floor_is_one_line_at_the_end_with_what_echo_needs(tmp_path: Path) -> None:

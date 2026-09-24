@@ -11,8 +11,8 @@ from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
+from voice_agent import prompts
 from voice_agent import turn as turn_module
-from voice_agent.config import load_system_prompt
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Usage
@@ -434,6 +434,20 @@ def test_exit_is_never_synthesized(client: TestClient, tts: FakeTTS) -> None:
     assert tts.spoken == []
 
 
+def test_ending_hangs_up_rather_than_waiting_for_the_page(client: TestClient) -> None:
+    """After `ended` the page sends nothing. A server still waiting to hear
+    from it held the conversation's live slot until the tab was closed."""
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "exit"})
+        kind, _ = drain(socket)
+        assert kind == "ended"
+        with pytest.raises(WebSocketDisconnect):
+            receive(socket)
+
+
 def test_the_reasoning_stage_reports_its_own_timings(client: TestClient) -> None:
     key = start(client)
 
@@ -550,7 +564,7 @@ def test_the_system_prompt_tells_the_agent_to_match_the_users_language() -> None
     German — and the agent answered in German and stayed there for eleven
     turns, anchored by its own replies. The prompt had no language rule at all.
     """
-    prompt = load_system_prompt()
+    prompt = prompts.load("system_prompt")
 
     assert "language the user is speaking" in prompt
     assert "greeting is not evidence" in prompt.lower()
@@ -561,7 +575,9 @@ def test_the_language_and_voice_rules_are_the_last_things_the_agent_reads() -> N
     after one English reply, in 11 of 16 replays of a live conversation; repeated
     last, with examples, 0 of 16. The gender line, left under the hearing and
     clock notes, was ignored the same way («понял» in a woman's voice)."""
-    from voice_agent.config import LANGUAGE, build_prompt
+    from voice_agent.config import build_prompt
+
+    LANGUAGE = prompts.rules()["Language"]
 
     prompt = build_prompt(("en", "ru"), "female", (5.0,), base="persona")
     closing = prompt.split("\n\n")[-2:]
@@ -572,7 +588,9 @@ def test_the_language_and_voice_rules_are_the_last_things_the_agent_reads() -> N
 
 
 def test_the_greeting_is_stated_but_the_language_rule_stays_last() -> None:
-    from voice_agent.config import LANGUAGE, build_prompt
+    from voice_agent.config import build_prompt
+
+    LANGUAGE = prompts.rules()["Language"]
 
     prompt = build_prompt(("en",), "female", (), base="persona", greeting="Hi there.")
 
@@ -593,7 +611,9 @@ def test_the_agent_is_a_woman_or_a_man_before_it_is_anything_else() -> None:
 @pytest.mark.parametrize("gender", ["female", "male", "neutral"])
 def test_the_gender_rule_is_about_the_agent_alone(gender: str) -> None:
     """Corrected on its own gender, a model made Dostoevsky feminine instead."""
-    from voice_agent.config import SELF_ONLY, with_voice_gender
+    from voice_agent.config import with_voice_gender
+
+    SELF_ONLY = prompts.rules()["Voice scope"]
 
     line = with_voice_gender("rules", gender)
 
@@ -604,7 +624,7 @@ def test_the_gender_rule_is_about_the_agent_alone(gender: str) -> None:
 def test_the_system_prompt_says_what_a_cut_off_reply_means() -> None:
     """The history marks an interrupted reply only by where it stops, so the
     model has to be told what that means."""
-    assert "stops mid-sentence is where you were interrupted" in load_system_prompt()
+    assert "stops mid-sentence is where you were interrupted" in prompts.load("system_prompt")
 
 
 async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
@@ -613,12 +633,10 @@ async def test_the_mute_window_is_what_is_left_to_play_not_the_whole_reply(
     """The browser starts playing the first chunk while the rest is still being
     made. Counting the full length from when synthesis *ends* would keep the
     user's silence uncounted for the time already spent playing."""
-    import time
-
-    from voice_agent import turn
+    from voice_agent import timing, turn
 
     clock = [100.0]
-    monkeypatch.setattr(time, "perf_counter", lambda: clock[0])
+    monkeypatch.setattr(timing, "now", lambda: clock[0])
 
     class OneSecondTTS(FakeTTS):
         async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:

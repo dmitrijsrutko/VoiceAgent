@@ -16,9 +16,9 @@ has no tools.
 import asyncio
 import contextlib
 import logging
-import time
 from collections.abc import AsyncIterator, Sequence
 
+from voice_agent import timing
 from voice_agent.conversation import Message
 from voice_agent.errors import VoiceAgentError
 from voice_agent.llm.base import LLM, Usage
@@ -26,18 +26,6 @@ from voice_agent.stt.agreement import same_words
 from voice_agent.timing import elapsed_ms
 
 logger = logging.getLogger(__name__)
-
-SPECULATE = True
-"""Whether to start the real reply on a prefix the user has not finished saying.
-
-The bet: when a partial adds no new words the speaker has probably stopped, and
-the ~0.8 s the reasoning engine needs can be spent now rather than after the
-recognizer gets round to committing. Worth min(head start, time-to-first-token)
-— measured at 0.27 s and 0.80 s on two real utterances.
-
-Losing the bet costs only what the generation produced before it was cancelled.
-That is only true while the agent has no tools: a speculation that could send a
-message or move money is not a bet, it is an action."""
 
 
 class Speculation:
@@ -48,7 +36,7 @@ class Speculation:
         self.chars = 0
         self.usage = Usage()
         """Filled in as the guess finishes; a turn that adopts it reports this."""
-        self.started_at = time.perf_counter()
+        self.started_at = timing.now()
         self._fragments: asyncio.Queue[str | None] = asyncio.Queue()
         self._failure: VoiceAgentError | None = None
         self._task = asyncio.create_task(
@@ -120,7 +108,7 @@ class Speculator:
 
     def on_settled(self, stable: str, history: Sequence[Message]) -> None:
         """The recognizer found nothing new: bet that the speaker has stopped."""
-        if SPECULATE and self._guess is None:
+        if self._guess is None:
             self._guess = Speculation(self._engine, self._system, history, stable)
 
     async def abandon(self) -> None:
