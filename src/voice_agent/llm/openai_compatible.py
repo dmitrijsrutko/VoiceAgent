@@ -12,13 +12,14 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx2
-from openai import AsyncOpenAI, DefaultAsyncHttpxClient, OpenAIError
+from openai import AsyncOpenAI, DefaultAsyncHttpxClient, Omit, OpenAIError, omit
 from openai.types.chat import ChatCompletionMessageParam
+from openai.types.shared_params.reasoning_effort import ReasoningEffort
 
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
 from voice_agent.llm.http import http_client, record_call
 
 
@@ -27,20 +28,37 @@ class OpenAICompatibleSpec:
     provider: str
     api_key_env: str
     default_model: str
+    models: tuple[str, ...]
+    """Every model this provider serves, the default among them.
+    `registry.check_model` holds a configured model to this list."""
     base_url: str | None = None
+    default_effort: Effort | None = None
+    """What this engine asks for when a caller names no effort, or `None` when it
+    has no such parameter to set — which is not the same as `low`."""
 
 
 OPENAI = OpenAICompatibleSpec(
     provider="openai",
     api_key_env="OPENAI_API_KEY",
     default_model="gpt-4o-mini",
+    models=("gpt-4o-mini",),
 )
 
 DEEPSEEK = OpenAICompatibleSpec(
     provider="deepseek",
     api_key_env="DEEPSEEK_API_KEY",
-    default_model="deepseek-chat",
+    default_model="deepseek-flash",
+    # The two names DeepSeek's API reports it accepts. `deepseek-chat`, which
+    # this adapter ran until now, still answers but is an undocumented legacy
+    # alias: asked for anything else, the API names only these two.
+    models=("deepseek-flash", "deepseek-v4-pro"),
     base_url="https://api.deepseek.com",
+    # Thinking is on by default and its effort defaults to `high`, which is
+    # exactly the wait a spoken reply cannot afford. `low` is the shortest
+    # setting that still thinks, and the level the three DeepSeek menu options
+    # step up from. The chain of thought arrives as `reasoning_content`, which
+    # `stream` never yields: it is not something to say out loud.
+    default_effort="low",
 )
 
 
@@ -66,10 +84,16 @@ class OpenAICompatibleLLM:
         self,
         spec: OpenAICompatibleSpec,
         model: str | None = None,
+        effort: Effort | None = None,
         client: AsyncOpenAI | None = None,
     ) -> None:
         self.provider = spec.provider
         self.model = model or spec.default_model
+        self.effort = effort
+        """What this adapter was told to ask for. `None` is an instruction and
+        not a default: it means send nothing, which is what an engine with no
+        effort to set resolves to."""
+        self._reasoning_effort: ReasoningEffort | Omit = omit if effort is None else effort
         self._client = client or AsyncOpenAI(
             api_key=require_env(spec.api_key_env),
             base_url=spec.base_url,
@@ -86,6 +110,7 @@ class OpenAICompatibleLLM:
         self, system: str, messages: Sequence[Message], usage: Usage | None = None
     ) -> AsyncIterator[str]:
         call = record_call()
+        wrote = False
         try:
             chunks = await self._client.chat.completions.create(
                 model=self.model,
@@ -95,6 +120,7 @@ class OpenAICompatibleLLM:
                 # Without this a streamed reply reports no usage at all. With it,
                 # one extra final chunk carries the counts and has no choices.
                 stream_options={"include_usage": True},
+                reasoning_effort=self._reasoning_effort,
             )
             if usage is not None:
                 call.fill(usage)
@@ -105,8 +131,13 @@ class OpenAICompatibleLLM:
                     usage.cached_tokens = cached_tokens(reported)
                     usage.output_tokens = reported["completion_tokens"]
                 choices = event.get("choices") or []
+                # Only `content` is the reply. In thinking mode DeepSeek streams
+                # its reasoning as `reasoning_content` beside it, and that is not
+                # something to say out loud — so a turn whose whole budget went
+                # on reasoning leaves this loop having yielded nothing at all.
                 delta = (choices[0].get("delta") or {}).get("content") if choices else None
                 if delta:
+                    wrote = True
                     yield delta
         except OpenAIError as exc:
             raise ProviderError(f"{self.provider} request failed: {exc}") from exc
@@ -114,6 +145,7 @@ class OpenAICompatibleLLM:
             # The SDK wraps failures to connect, but the body is read here
             # straight from httpx2: a connection lost mid-reply arrives raw.
             raise ProviderError(f"{self.provider} reply interrupted: {exc!r}") from exc
+        refuse_silent_reply(self.provider, self.model, self.effort, wrote, usage)
 
 
 async def read_to_the_end(response: httpx2.Response) -> AsyncIterator[dict[str, Any]]:

@@ -476,6 +476,21 @@ def test_the_chosen_stack_travels_with_the_socket() -> None:
     assert 'for (const group of ["role", "llm", "stt"])' in start, "the stack and role must be sent"
 
 
+def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
+    """The page used to hold a map of provider names, so it could label a
+    backend the server had not offered — the bug Chapter 17's test was written
+    for. A model's name is a fact about the model: `choices.llm` carries a
+    `title`, and the page prints what it is given and nothing of its own."""
+    start = without_comments(source("start.js"))
+
+    assert 'choose("llm", "Model"' in start, "the model group is gone"
+    assert "escape(o.title)" in start, "the option label no longer comes from the server"
+
+    labels = re.search(r"const LABELS = \{(.*?)\n\};", start, re.DOTALL)
+    assert labels, "the label map is gone"
+    assert "llm" not in labels.group(1), "the page is naming models itself again"
+
+
 def test_the_languages_notice_follows_the_chosen_ears() -> None:
     """Scribe hears 100 languages and AssemblyAI 18, and which is running is
     the visitor's choice now — so a notice fixed at page load would describe a

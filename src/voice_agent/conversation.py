@@ -27,8 +27,9 @@ class Conversation:
     engine: str | None = None
     ears: str | None = None
     role: str | None = None
-    """Which backends and which role this conversation runs on, chosen when it
-    was started.
+    """Which menu option, which recognizer and which role this conversation runs
+    on, chosen when it was started. `engine` is a `registry.Choice` name — a
+    model and an effort together — and not a provider.
 
     Pinned rather than re-read on every connection, because resuming a link has
     to resume the same agent: the history below was produced by that engine,

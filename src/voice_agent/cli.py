@@ -19,7 +19,7 @@ from voice_agent.config import (
     parse_directory,
 )
 from voice_agent.errors import ConfigError
-from voice_agent.llm import registry as llm_registry
+from voice_agent.llm.registry import BY_NAME, default_choice, offered
 from voice_agent.stt import registry as stt_registry
 from voice_agent.tts import registry as tts_registry
 
@@ -38,13 +38,6 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run the voice-agent server.")
     parser.add_argument("--host", default=settings.host)
     parser.add_argument("--port", type=int, default=settings.port)
-    parser.add_argument(
-        "--provider",
-        default=settings.provider,
-        choices=list(llm_registry.ENGINES),
-        help="reasoning engine backend (default: %(default)s)",
-    )
-    parser.add_argument("--model", default=settings.model, help="override the provider's default")
     parser.add_argument(
         "--tts",
         default=settings.voice_provider,
@@ -161,9 +154,11 @@ def main() -> None:
         raise SystemExit(f"voice-agent: {exc}") from exc
     delays = settings.initiative
     clock = "+".join(f"{d:g}s" for d in delays) if delays else "reactive"
+    menu = offered()
     print(
         f"voice-agent → http://{args.host}:{args.port}  "
-        f"({args.provider} · 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
+        f"({BY_NAME[default_choice(menu)].title} by default · {len(menu)} models "
+        f"· 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
         f"· 📝 {settings.sessions or 'off'} · 🔬 {settings.trace or 'off'})"
     )
     # Said at every start: a language this recognizer lacks is not refused but
@@ -186,8 +181,6 @@ def with_flags(settings: Settings, args: argparse.Namespace) -> Settings:
         settings,
         host=args.host,
         port=args.port,
-        provider=args.provider,
-        model=args.model,
         voice_provider=args.tts,
         voice=args.voice,
         voice_gender=args.voice_gender,

@@ -3,6 +3,7 @@ kept open between turns — through the real SDK clients, against a local HTTP
 server that counts the connections it accepts. No provider is called."""
 
 import asyncio
+import dataclasses
 import json
 from collections.abc import Callable
 from typing import Any
@@ -11,8 +12,9 @@ import pytest
 
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
+from voice_agent.llm import create_llm
 from voice_agent.llm.anthropic_provider import AnthropicLLM
-from voice_agent.llm.base import LLM, Usage
+from voice_agent.llm.base import LLM, Effort, Usage
 from voice_agent.llm.http import KEEPALIVE_SECONDS
 from voice_agent.llm.openai_compatible import (
     DEEPSEEK,
@@ -129,9 +131,14 @@ class Provider:
             writer.close()
 
 
-def openai_compatible(port: int, like: OpenAICompatibleSpec = DEEPSEEK) -> LLM:
+def openai_compatible(
+    port: int, like: OpenAICompatibleSpec = DEEPSEEK, effort: Effort | None = None
+) -> LLM:
+    """The same spec, pointed at the local server. `replace`, not a new spec
+    written out: a field added to the spec must not silently drop out here."""
     return OpenAICompatibleLLM(
-        OpenAICompatibleSpec(like.provider, "LOCAL_API_KEY", "m", f"http://127.0.0.1:{port}")
+        dataclasses.replace(like, api_key_env="LOCAL_API_KEY", base_url=f"http://127.0.0.1:{port}"),
+        effort=effort,
     )
 
 
@@ -257,6 +264,82 @@ async def test_openai_nests_its_cache_hits_differently_and_is_read_too() -> None
         _, usage = await reply(openai_compatible(provider.port, OPENAI))
 
     assert (usage.prompt_tokens, usage.cached_tokens, usage.output_tokens) == (900, 768, 12)
+
+
+async def test_the_resolved_default_effort_is_what_reaches_the_wire(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`create_llm` is where "no preference" becomes a level, so going through
+    it is the only way to see that the resolution survives to the request.
+    DeepSeek thinks at `high` unless asked otherwise, and that wait is exactly
+    what a spoken reply cannot afford."""
+    async with Provider() as provider:
+        monkeypatch.setattr(
+            "voice_agent.llm.registry.DEEPSEEK",
+            dataclasses.replace(
+                DEEPSEEK, api_key_env="LOCAL_API_KEY", base_url=f"http://127.0.0.1:{provider.port}"
+            ),
+        )
+        await reply(create_llm("deepseek"))
+
+    assert provider.requests[0]["reasoning_effort"] == "low"
+
+
+async def test_an_effort_the_caller_names_is_the_one_sent() -> None:
+    """The menu's three DeepSeek tiers differ in nothing else, so a named
+    effort has to be the one that goes out."""
+    async with Provider() as provider:
+        await reply(openai_compatible(provider.port, effort="max"))
+
+    assert provider.requests[0]["reasoning_effort"] == "max"
+
+
+async def test_a_provider_that_has_no_such_parameter_is_not_sent_it() -> None:
+    """`gpt-4o-mini` rejects `reasoning_effort`; only a provider that has the
+    parameter is asked for it."""
+    async with Provider() as provider:
+        await reply(openai_compatible(provider.port, OPENAI))
+
+    assert "reasoning_effort" not in provider.requests[0]
+
+
+async def test_a_billed_reply_with_no_text_fails_the_turn() -> None:
+    """The deployed failure, on the wire: DeepSeek reported 444 output tokens
+    and streamed nothing but reasoning. Without the guard the turn succeeds and
+    the user hears silence — a 3.2 s wait for no words at all."""
+    body = sse(
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": None,
+                             "delta": {"reasoning_content": "Let me think about this."}}]}),
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [], "usage": {"prompt_tokens": 2967, "completion_tokens": 444,
+                                         "total_tokens": 3411}}),
+        (None, "[DONE]"),
+    )  # fmt: skip
+    async with Provider(openai_reply=body) as provider:
+        with pytest.raises(ProviderError) as raised:
+            await reply(openai_compatible(provider.port, effort="max"))
+
+    assert "444 output tokens" in str(raised.value)
+    assert "at effort max" in str(raised.value)
+
+
+async def test_a_chain_of_thought_is_never_spoken() -> None:
+    """Thinking mode streams its reasoning as `reasoning_content`, beside the
+    `content` that is the reply. Only `content` may reach the voice."""
+    body = sse(
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": None,
+                             "delta": {"reasoning_content": "The meeting moved, so..."}}]}),
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": "stop",
+                             "delta": {"content": "Thursday afternoon."}}]}),
+        (None, "[DONE]"),
+    )  # fmt: skip
+    async with Provider(openai_reply=body) as provider:
+        text, _ = await reply(openai_compatible(provider.port))
+
+    assert text == "Thursday afternoon."
 
 
 async def test_an_error_sent_inside_the_stream_fails_the_reply() -> None:

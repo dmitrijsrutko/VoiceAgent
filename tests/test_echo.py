@@ -14,7 +14,7 @@ from tests.test_barge_in import answer, speak_over, talking_agent
 from tests.test_session import RecordingChannel
 from voice_agent import session as session_module
 from voice_agent.conversation import Message
-from voice_agent.echo import is_echo_final, verdict
+from voice_agent.echo import is_echo_final, recent, verdict
 from voice_agent.heard import resume_from
 
 pytestmark = pytest.mark.anyio
@@ -36,6 +36,36 @@ SAID = "I can help you sign up. What would you like to create an account for?"
 )
 def test_what_was_heard_is_judged_against_what_was_said(heard: str, expected: str) -> None:
     assert verdict(heard, SAID) == expected
+
+
+LONG = (
+    "The short version: plants pull in water, carbon dioxide and sunlight, and turn them into "
+    "sugar for themselves — oxygen is basically the leftover they throw away. That waste is "
+    "what filled our atmosphere and everything that breathes now depends on it. Which piece do "
+    "you want to dig into first — how the light actually gets converted, or the bigger picture "
+    "of how plants and the atmosphere keep each other in balance?"
+)
+"""The 71-word reply that played for 26 seconds on the deployed instance."""
+
+
+def test_a_question_is_not_mistaken_for_the_agents_own_long_reply() -> None:
+    """Live: the user asked "What is the best or biggest—" over that reply and had
+    to say "wait" seven times before anything interrupted.
+
+    Against the whole reply their question shares `what`, `is`, `the` and `or`
+    with it and reads as the agent's own voice, so the agent talked on. Only a
+    word it had never said could break through — and "wait" is not in a reply
+    about photosynthesis. The window is what lets their own question interrupt.
+    """
+    asked = "What is the best or biggest"
+
+    assert verdict(asked, LONG) == "echo", "the trap the window exists for"
+    assert verdict(asked, recent(LONG)) == "user", "their question must reach the agent"
+
+
+def test_the_window_is_only_the_tail() -> None:
+    assert recent("one two three", keep=2) == "two three"
+    assert recent("one two three", keep=9) == "one two three", "a short reply is judged whole"
 
 
 def test_a_resume_starts_at_the_sentence_it_was_cut_in() -> None:

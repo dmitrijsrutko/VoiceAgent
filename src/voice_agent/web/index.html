@@ -92,6 +92,12 @@
   }
   .pick label:has(:checked) { border-color: var(--fg); }
   .pick label small { color: var(--muted); font-size: 11.5px; }
+  /* One provider per line, and a provider's models never split across two: the
+     groups sit side by side while they fit, and stack only when they cannot. */
+  .pick .rows { display: flex; align-items: baseline; flex-wrap: wrap; gap: 6px 20px; }
+  .pick .row { display: flex; align-items: baseline; flex-wrap: nowrap; white-space: nowrap; }
+  .pick .row > b { margin-right: 7px; font-size: 12px; font-weight: 600; color: var(--muted); }
+  .pick .row label { margin-right: 4px; padding: 5px 9px; }
 </style>
 <!-- What this agent is, written in by the server (`server.with_facts`). The
      start screen has to say what beginning entails before there is a socket

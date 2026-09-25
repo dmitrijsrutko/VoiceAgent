@@ -48,11 +48,12 @@ fly secrets set \
   DEEPSEEK_API_KEY=...     `# reasoning (chapter 1)`
 ```
 
-**Which keys are set decides what visitors can pick.** Since chapter 15 the
-start screen offers every backend this deployment holds a key for — so adding
-`OPENAI_API_KEY` puts OpenAI on the start screen, and removing a key takes its
-backend off it. `VOICE_AGENT_PROVIDER` and `VOICE_AGENT_STT` name the
-*defaults*, not the only options.
+**Which keys are set decides what visitors can pick.** The start screen offers
+the models named in `llm/registry.py`, and only those whose provider holds a key
+here — so adding `DEEPSEEK_API_KEY` puts the three DeepSeek tiers on the start
+screen, and removing a key takes its models off it. Since chapter 19 the model
+is chosen per conversation on that screen, so no environment variable names a
+default: it is Haiku 4.5. `VOICE_AGENT_STT` still names the default ears.
 
 A backend with no key is never offered, because offering one that cannot be
 built is offering an error.
@@ -89,7 +90,7 @@ still the agent of chapters 1-13:
 | Variable | Deployed | Bounds |
 | --- | --- | --- |
 | `VOICE_AGENT_MAX_LIVE` | 4 | conversations held open at once |
-| `VOICE_AGENT_SESSION_BUDGET` | 360 | seconds before a conversation ends itself |
+| `VOICE_AGENT_SESSION_BUDGET` | 1800 | seconds before a conversation ends itself (30 min) |
 | `VOICE_AGENT_MINTS_PER_IP` | 10 | new conversations per address per 10 minutes |
 | `VOICE_AGENT_MAX_STORED` | 500 | conversations kept before the oldest is dropped |
 

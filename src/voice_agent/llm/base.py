@@ -2,14 +2,41 @@
 
 from collections.abc import AsyncIterator, Sequence
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol
 
 from voice_agent.conversation import Message
+from voice_agent.errors import ProviderError
 
-MAX_OUTPUT_TOKENS = 1024
-"""Deliberately small. This agent's replies are meant to be spoken — one to
-three sentences — so a large ceiling would only buy the chance to generate a
-long answer nobody wants to listen to."""
+Effort = Literal["low", "high", "max"]
+"""How hard a provider is asked to think before it answers, where it can be.
+
+Narrower than either vendor's own vocabulary on purpose. DeepSeek maps
+`minimal` and `low` onto `low`, and `medium`, `high` and `xhigh` onto `high`,
+so of the seven values it accepts only three mean anything different — and
+Anthropic takes all three of these among its five. They are therefore the levels
+a menu can honestly offer, and an adapter translates this into whatever its own
+SDK wants. A vendor's type never crosses this boundary.
+
+`None` is not a level. At the registry's `create_llm` it means "this engine's own
+default", which may itself be nothing; an adapter is handed a resolved value, so
+`None` reaching one is the instruction to send nothing at all.
+"""
+
+MAX_OUTPUT_TOKENS = 8192
+"""The reply ceiling — raised from 1024, because it is not only the reply's.
+
+A provider that thinks before it answers spends this budget on the reasoning
+too. Measured against `deepseek-flash`: one hard turn at effort `max` used **4389
+output tokens**, and at 1024 the chain of thought (444, then 1024) filled the
+whole allowance and the turn produced no answer at all — live, twice. 8192 leaves
+room for the deepest footprint measured so far and for an answer after it.
+
+The answers themselves stay short: the prompt asks for one to three sentences,
+and the measured replies ran 587-737 characters at both `high` and `max`. This is
+not a licence to ramble — it is so that thinking cannot starve the answer. What
+it costs is latency, which the ceiling does not set: that same turn took 23.7 s
+to its first token, and `turn.SLOW_FIRST_TOKEN_MS` is what reports that.
+"""
 
 
 @dataclass(slots=True)
@@ -34,13 +61,40 @@ class Usage:
     """From the call to the response's headers: the provider has accepted the
     request. What follows, up to the first token, is the provider queueing and
     prefilling — a long wait after a quick accept is on the provider's side.
-    Only where the provider answers before generating: measured, DeepSeek
-    accepts in ~320-390 ms, while Anthropic holds its headers until the first
-    token is ready, so there the two numbers are the same."""
+
+    How much of the wait an accept splits off is a property of the *model*, not
+    the vendor. Measured over 259 archived turns on Claude Haiku 4.5, the two
+    numbers differ by -38 ms on average (min -590, max +419): it holds its
+    headers until the first token is ready, so there is nothing to split. Claude
+    Opus 5.5 does not — one live session accepted at 1405 ms and produced its
+    first token at 3852 ms, every turn, a 2.4 s gap that reading this field as
+    "the two are the same" would have hidden."""
     attempts: int = 0
     """HTTP requests the call took. More than one means the SDK retried after a
     refusal (429, 5xx) or a dropped connection, with a backoff in between. Zero
     when the adapter cannot tell."""
+
+
+def refuse_silent_reply(
+    provider: str, model: str, effort: Effort | None, wrote: bool, usage: Usage | None
+) -> None:
+    """Refuse a reply the provider billed for and never sent.
+
+    A thinking model can spend its whole output budget reasoning and emit no
+    answer at all. The stream then ends normally, `usage` reports the tokens, and
+    without this the pipeline records a successful turn that said nothing — seen
+    live as a 3.2 s silence and 444 billed tokens against an empty record.
+
+    The effort is named because a session record keeps only provider and model,
+    so this message is the one place the level that caused it survives.
+    """
+    if wrote or usage is None or not usage.output_tokens:
+        return
+    at = f" at effort {effort}" if effort is not None else ""
+    raise ProviderError(
+        f"{provider} sent no text for {model}{at} "
+        f"after reporting {usage.output_tokens} output tokens"
+    )
 
 
 class LLM(Protocol):

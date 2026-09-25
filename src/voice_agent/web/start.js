@@ -13,10 +13,12 @@ export function servedFacts() {
 }
 
 const LABELS = {
-  llm: { anthropic: "Anthropic", openai: "OpenAI", deepseek: "DeepSeek" },
   stt: { assemblyai: "AssemblyAI", elevenlabs: "ElevenLabs Scribe" },
   tts: { elevenlabs: "ElevenLabs" },
 };
+// Display names for the provider a model belongs to. Not a claim about what
+// runs: the options themselves, and their titles, come from the server.
+const PROVIDERS = { anthropic: "Claude", deepseek: "DeepSeek", openai: "OpenAI" };
 const label = (group, name) => LABELS[group][name] ?? name;
 
 // Role cards are text somebody wrote — soon, anybody — and this page builds
@@ -55,16 +57,23 @@ function notice(html) {
 
 // One radio group of what the server offered, default first. A single option
 // is only drawn when asked (the voice); otherwise there is nothing to choose.
-function choose(group, title, options, describe, { single = false } = {}) {
+function choose(group, title, options, describe, { single = false, byProvider = false } = {}) {
   if (options.length < (single ? 1 : 2)) return;
   const ordered = [...options].sort((a, b) => Number(!!b.default) - Number(!!a.default));
-  const el = document.createElement("div");
-  el.className = "pick";
-  el.innerHTML =
-    `<span>${title}</span>` +
-    ordered.map((o) =>
+  const radios = (list) =>
+    list.map((o) =>
       `<label><input type="radio" name="${group}" value="${o.name}"` +
       `${o.default ? " checked" : ""}>${describe(o)}</label>`).join("");
+  let body = radios(ordered);
+  if (byProvider) {
+    const names = [...new Set(ordered.map((o) => o.provider))];
+    body = `<div class="rows">` + names.map((p) =>
+      `<div class="row"><b>${escape(PROVIDERS[p] ?? p)}</b>` +
+      `${radios(ordered.filter((o) => o.provider === p))}</div>`).join("") + `</div>`;
+  }
+  const el = document.createElement("div");
+  el.className = "pick";
+  el.innerHTML = `<span>${title}</span>${body}`;
   startStack.appendChild(el);
 }
 
@@ -86,8 +95,9 @@ function roleLine(known) {
 export function showStart(known) {
   choose("role", "Role", known.choices?.role ?? [],
     (o) => `${escape(o.title)} <small>${escape(o.summary)}</small>`);
-  choose("llm", "Reasoning engine", known.choices?.llm ?? [],
-    (o) => `${label("llm", o.name)} <small>${o.model}</small>`);
+  // The model options carry their own titles: what a choice is called is the
+  // server's to say, so the page cannot advertise a model it will not run.
+  choose("llm", "Model", known.choices?.llm ?? [], (o) => escape(o.title), { byProvider: true });
   choose("stt", "Ears", known.choices?.stt ?? [],
     (o) => `${label("stt", o.name)} <small>${o.languages.length} languages</small>`);
   if (known.voice) {

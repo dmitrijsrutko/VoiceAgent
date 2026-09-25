@@ -193,6 +193,13 @@ class Record:
         voice, ears = payload.get("voice") or {}, payload.get("ears") or {}
         started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"started {started} · {payload.get('provider')}/{payload.get('model')}"
+        # The option, in brackets: provider and model cannot say which of the
+        # six ran, because the three DeepSeek tiers are one provider and one
+        # model differing only in the effort sent with the request. Live, that
+        # made a session's tier unrecoverable — the startup log builds all six,
+        # so nothing else in the record or the logs names the one chosen.
+        if payload.get("choice"):
+            line += f" ({payload['choice']})"
         if voice:
             line += f" · voice {voice.get('provider')} {voice.get('voice')}"
         if ears:

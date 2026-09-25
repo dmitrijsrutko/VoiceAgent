@@ -322,7 +322,9 @@ class Session:
         if voice is None or not voice.audible:
             return
         said = voice.text
-        judged = echo.verdict(text, said)
+        # Judged against the tail of the reply, not all of it: the text is
+        # complete long before its audio has finished playing (see `echo.recent`).
+        judged = echo.verdict(text, echo.recent(said))
         echo_so_far = self._over[2] if self._over is not None else True
         self._over = (said, timing.now(), echo_so_far and judged != "user")
         if judged == "echo":

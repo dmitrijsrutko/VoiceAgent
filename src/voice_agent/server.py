@@ -259,8 +259,6 @@ def create_app(
         tts if tts is not None or not voice else create_tts(settings.voice_provider, settings.voice)
     )
     backends = Backends(
-        settings.provider,
-        settings.model,
         settings.ears_provider,
         silence=settings.vad_silence,
         hears=ears,
@@ -296,7 +294,7 @@ def create_app(
         await asyncio.gather(
             *(opening.prepare() for opening in agent.openings.values()),
             asyncio.to_thread(vad.load),
-            *(connect(backends.engine(name)) for name in backends.engines),
+            *(connect(backends.engine(choice.name)) for choice in backends.menu),
             *([connect(agent.thinker)] if agent.thinker is not None else []),
         )
         agent.ready = True
@@ -408,6 +406,9 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             "session": conversation.id,
             "provider": engine.provider,
             "model": engine.model,
+            # The menu option, so the record says which of the six ran: three
+            # DeepSeek tiers share a provider and a model.
+            "choice": engine_name,
             **agent.facts(listener, engine_name, ears_name, role_name),
             # From this connection: the page counts down the last minute.
             "budget_seconds": agent.settings.session_budget,

@@ -8,9 +8,9 @@ session (`stream()` opens one per listening turn), so it is shared too.
 **Lazy, because a missing key raises.** Every adapter calls `require_env` in its
 constructor, so nothing is built until somebody picks it.
 
-**Only what holds a key is offered.** With no key for anything, the configured
-default is offered anyway, so a misconfigured deployment fails at the first
-call naming the missing variable rather than with an empty page.
+**Only what holds a key is offered.** With no key for anything, the default
+model is offered anyway, so a misconfigured deployment fails at the first call
+naming the missing variable rather than with an empty page.
 """
 
 import logging
@@ -18,8 +18,7 @@ from collections.abc import Mapping, Sequence
 
 from voice_agent.conversation import Conversation
 from voice_agent.llm import LLM, create_llm
-from voice_agent.llm.registry import ENGINES
-from voice_agent.llm.registry import available as llm_available
+from voice_agent.llm.registry import BY_NAME, Choice, default_choice, offered
 from voice_agent.llm.traced import Traced
 from voice_agent.roles import NO_ROLE, Role
 from voice_agent.stt import STT, create_stt
@@ -39,8 +38,6 @@ class Backends:
 
     def __init__(
         self,
-        provider: str,
-        model: str | None,
         ears_provider: str,
         *,
         silence: float | None = None,
@@ -50,17 +47,18 @@ class Backends:
         engine: LLM | None = None,
         ears: STT | None = None,
     ) -> None:
-        self._provider = provider
-        self._model = model
         self._silence = silence
         self.roles = tuple(roles)
         names = {role.slug for role in self.roles}
         self.default_role = default_role if default_role in names else NO_ROLE
-        self.engines: tuple[str, ...] = llm_available() or (provider,)
+        self.menu: tuple[Choice, ...] = offered()
+        """The models this deployment can run, fastest first: what the page
+        offers and what a conversation may be pinned to."""
+        self._names = {choice.name for choice in self.menu}
+        self.default_engine = default_choice(self.menu)
         # `none` configured means deaf, even where recognizer keys are present.
         hears = hears and ears_provider != NO_EARS
         self.listeners: tuple[str, ...] = (stt_available() or (ears_provider,)) if hears else ()
-        self.default_engine = provider if provider in self.engines else self.engines[0]
         self.default_ears = (
             ears_provider
             if ears_provider in self.listeners
@@ -72,14 +70,6 @@ class Backends:
         self._built_engines: dict[str, LLM] = {}
         self._built_ears: dict[str, STT] = {}
 
-    def model_for(self, provider: str) -> str | None:
-        """The model override, for the provider it was configured alongside
-        only: a Claude model name means nothing to DeepSeek."""
-        return self._model if provider == self._provider else None
-
-    def model_named(self, provider: str) -> str:
-        return self.model_for(provider) or ENGINES[provider].default_model
-
     def choose(self, conversation: Conversation, asked: Mapping[str, str]) -> tuple[str, str, str]:
         """The stack and role this conversation runs, pinned on its first connect.
 
@@ -89,7 +79,7 @@ class Backends:
         """
         if conversation.engine is None:
             wanted = asked.get("llm", "")
-            conversation.engine = wanted if wanted in self.engines else self.default_engine
+            conversation.engine = wanted if wanted in self._names else self.default_engine
             heard = asked.get("stt", "")
             conversation.ears = heard if heard in self.listeners else self.default_ears
             wanted_role = asked.get("role", "")
@@ -128,8 +118,14 @@ class Backends:
         return {
             "role": roles,
             "llm": [
-                {"name": name, "model": self.model_named(name), "default": name == engine}
-                for name in self.engines
+                {
+                    "name": choice.name,
+                    "title": choice.title,
+                    "provider": choice.provider,
+                    "model": choice.model,
+                    "default": choice.name == engine,
+                }
+                for choice in self.menu
             ],
             "stt": [{**describe(name), "default": name == ears} for name in self.listeners],
         }
@@ -138,8 +134,11 @@ class Backends:
         if self._fixed_engine is not None:
             return self._fixed_engine
         if name not in self._built_engines:
-            logger.info("building the %s engine", name)
-            self._built_engines[name] = Traced(create_llm(name, self.model_for(name)))
+            choice = BY_NAME[name]
+            logger.info("building the %s engine", choice.name)
+            self._built_engines[name] = Traced(
+                create_llm(choice.provider, choice.model, choice.effort)
+            )
         return self._built_engines[name]
 
     def ears(self, name: str) -> STT | None:

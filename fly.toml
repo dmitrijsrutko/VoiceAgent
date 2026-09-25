@@ -57,15 +57,12 @@ primary_region = "iad"
   VOICE_AGENT_HOST = "0.0.0.0"
   VOICE_AGENT_PORT = "8000"
 
-  # Not the project's default, which stays DeepSeek. Measured from *this*
-  # region with `--bench-llm`, DeepSeek's time to first token is 915 ms p50
-  # against Haiku's 435 ms — a gap of 2.1x, where from the dev machine in
-  # Europe it was 1.5x. DeepSeek is served from China and iad is the wrong
-  # side of the planet for it. Whichever provider the deployment uses is a
-  # property of where the deployment is, so it is set here rather than in the
-  # code, and re-run the bench before moving region.
-  VOICE_AGENT_PROVIDER = "anthropic"
-  VOICE_AGENT_MODEL = "claude-haiku-4-5"
+  # No reasoning engine is pinned here any more. The page offers the menu and
+  # preselects Haiku 4.5, which is what this deployment was set to run: measured
+  # from *this* region with `--bench-llm`, DeepSeek's time to first token is
+  # 915 ms p50 against Haiku's 435 ms — a gap of 2.1x — because DeepSeek is
+  # served from China and iad is the wrong side of the planet for it. A visitor
+  # can still pick DeepSeek per conversation, which is the point of the menu.
 
   # Recorded, and the page says so before anybody speaks (`noteRecording`).
   VOICE_AGENT_SESSIONS = "/data/sessions"
@@ -77,7 +74,10 @@ primary_region = "iad"
 
   # The caps. Off everywhere else; see `limits.py` for what each one bounds.
   VOICE_AGENT_MAX_LIVE = "4"
-  VOICE_AGENT_SESSION_BUDGET = "360"
+  # 30 minutes, raised from 6. A conversation is charged for every turn of its
+  # whole history, so the ceiling on one session is also the ceiling on one
+  # address's spend — and `deepseek-max` reasons for thousands of tokens a turn.
+  VOICE_AGENT_SESSION_BUDGET = "1800"
   VOICE_AGENT_MINTS_PER_IP = "10"
   VOICE_AGENT_MAX_STORED = "500"
 

@@ -60,6 +60,26 @@ def test_a_conversation_is_written_down_in_order(tmp_path: Path) -> None:
     assert f"# Conversation {key}" in text
 
 
+def test_the_header_says_which_option_ran_not_just_the_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Provider and model cannot name the choice: the three DeepSeek tiers are
+    one provider and one model, differing only in the effort sent with the
+    request. Live, a session that waited 3-12 s per turn could not be traced to
+    a tier at all — and the startup log builds all six, so it cannot either."""
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
+    store = SessionStore()
+    client = app_for(tmp_path, store)
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max") as socket:
+        receive(socket)
+
+    header = recorded(tmp_path).splitlines()[1]
+    assert "deepseek-max" in header, header
+    assert "fake-1" in header, "the model is still named too"
+
+
 def test_no_audio_ever_reaches_the_file(tmp_path: Path) -> None:
     """Speech is biometric data and a five-minute session is tens of megabytes.
     Binary frames are counted; the bytes themselves are never kept."""

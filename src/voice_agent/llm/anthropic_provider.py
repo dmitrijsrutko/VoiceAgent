@@ -20,24 +20,43 @@ from anthropic.types import (
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
 from voice_agent.llm.http import http_client, record_call
 
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
 """Named once, so `registry.ENGINES` can say what this backend needs without
 restating it. The OpenAI-compatible backends carry theirs on their spec."""
 
-DEFAULT_MODEL = "claude-opus-5"
+DEFAULT_MODEL = "claude-opus-5-5"
 
-EFFORT: OutputConfigParam = {"effort": "low"}
-"""Thinking is on by default on this model family. Reasoning before the first
-token is exactly what a spoken conversation cannot afford, and low effort is
-the supported way to shorten it — disabling thinking outright is documented to
-cause the model to narrate tool calls and leak reasoning tags into the reply.
+MODELS: tuple[str, ...] = (
+    "claude-fable-5-1",
+    "claude-opus-5-5",
+    "claude-sonnet-5",
+    "claude-haiku-4-5",
+)
+"""Every model this provider serves. `registry.check_model` holds a configured
+model to this list, which is what stops a Claude name reaching another vendor.
 
-Sent only to a model that accepts it. Claude Haiku 4.5 rejects the parameter
-outright (400, "This model does not support the effort parameter"), which made
-`--model claude-haiku-4-5` fail every turn."""
+The list is the truth rather than a guess about how models are named, and a
+vendor's next model is added here. That is the cost of refusing a wrong pair
+instead of discovering it on a conversation's first turn. Two other spellings
+resolve and are deliberately absent: `claude-opus-5` is the *previous* Opus, and
+`claude-haiku-4-5-20251001` is the dated form of the alias already listed."""
+
+DEFAULT_EFFORT: Effort = "low"
+"""What this engine asks for when a caller names no effort. It lives here with
+the provider's other facts and `registry.ENGINES` carries it, so that is the one
+place the decision is made.
+
+Thinking is on by default on this model family, and reasoning before the first
+token is exactly what a spoken conversation cannot afford; low is the supported
+way to shorten it — disabling thinking outright is documented to cause the model
+to narrate tool calls and leak reasoning tags into the reply.
+
+Whether a given model accepts it is not something this constant can know: Claude
+Haiku 4.5 rejects the parameter outright with a 400, so `_effort` asks the Models
+API and drops it for the models that have none."""
 
 
 CACHE_THROUGH_LAST: CacheControlEphemeralParam = {"type": "ephemeral"}
@@ -69,9 +88,19 @@ def to_anthropic_messages(messages: Sequence[Message]) -> list[MessageParam]:
 
 
 class AnthropicLLM:
-    def __init__(self, model: str | None = None, client: AsyncAnthropic | None = None) -> None:
+    def __init__(
+        self,
+        model: str | None = None,
+        effort: Effort | None = None,
+        client: AsyncAnthropic | None = None,
+    ) -> None:
         self.provider = "anthropic"
         self.model = model or DEFAULT_MODEL
+        self.effort = effort
+        """What this adapter was told to ask for. `None` is an instruction and
+        not a default: it means send nothing, leaving the model at its own —
+        which is also what a model with no effort of its own gets, since
+        `_effort` drops whatever it was told for those."""
         self._client = client or AsyncAnthropic(
             api_key=require_env(ANTHROPIC_API_KEY),
             http_client=http_client(DefaultAsyncHttpxClient),
@@ -92,14 +121,21 @@ class AnthropicLLM:
             except AnthropicError as exc:
                 raise ProviderError(f"{self.provider} connect failed: {exc}") from exc
             self._supports_effort = bool(info.capabilities and info.capabilities.effort.supported)
-        return EFFORT if self._supports_effort else omit
+        if not self._supports_effort or self.effort is None:
+            return omit
+        return {"effort": self.effort}
 
     async def stream(
         self, system: str, messages: Sequence[Message], usage: Usage | None = None
     ) -> AsyncIterator[str]:
         call = record_call()
+        wrote = False
+        sent: Effort | None = None
         try:
             effort = await self._effort()
+            # What the model was actually asked for: `_effort` drops it for the
+            # models that have none, and the report must not claim otherwise.
+            sent = None if effort is omit else self.effort
             # Only a turn whose startup connect failed looks the model up. A
             # connection it opened is this turn's cost; its request is not.
             call.restart()
@@ -114,6 +150,7 @@ class AnthropicLLM:
                 if usage is not None:
                     call.fill(usage)
                 async for text in stream.text_stream:
+                    wrote = True
                     yield text
                 if usage is not None:
                     final = (await stream.get_final_message()).usage
@@ -126,3 +163,4 @@ class AnthropicLLM:
                     usage.output_tokens = final.output_tokens
         except AnthropicError as exc:
             raise ProviderError(f"{self.provider} request failed: {exc}") from exc
+        refuse_silent_reply(self.provider, self.model, sent, wrote, usage)

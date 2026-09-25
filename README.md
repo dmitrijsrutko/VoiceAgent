@@ -56,6 +56,14 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **16 — Ears that hear pauses.** A voice detector on the server shows who holds the floor, ~0.75 s before AssemblyAI commits (~1.6 s before Scribe).
 - **17 — The inner voice.** Pick a role on the start screen (none by default, a devil's advocate, or a thinking partner, each a card in `prompts/roles/`), and a fast model thinks alongside you, shown on the page but not spoken.
 - **Refactor.** Whole conversations replay on virtual time against golden transcripts (`tests/tapes/`); every turn-taking decision runs on one inbox (`Session`, `events.py`); one clock, one settings path, prompts as data; OpenAI's voice dropped.
+- **18 — Whose model.** Every provider declares the models it serves, and a provider/model pair that cannot work stops the server at startup instead of 400-ing on a conversation's first turn. DeepSeek's default is `deepseek-flash`, the name its API actually accepts.
+- **19 — The model is the choice.** The start screen offers six models rather than three providers, fastest first: Haiku 4.5 (default), Sonnet 5, Opus 5.5, then DeepSeek V4.1 Flash at low, high and max effort. `VOICE_AGENT_PROVIDER`, `VOICE_AGENT_MODEL`, `--provider` and `--model` are gone.
+- **20 — Silence is a failure.** A thinking model can spend its whole output budget reasoning and send no answer; a reply the provider billed for and never sent now fails the turn, naming the model and the effort, instead of being recorded as a successful reply that said nothing.
+- **21 — Room to think.** The output ceiling is raised 1024 → 8192 because a thinking model spends it on the reasoning as well as the reply. Measured: a hard turn at `max` effort wanted 4389 tokens and produced nothing at 1024. `deepseek-max` therefore answers rather than fails — after 23.7 s, which is why it is a setting for a patient user and not a conversational one.
+- **22 — The tail of the reply.** A barge-in is judged against the last 30 words of what the agent is saying, not the whole reply. A reply's text is complete long before its audio has finished playing, so judging against all of it read a user's own question as the agent's voice — live, they had to say "wait" seven times before anything interrupted.
+- **23 — Two lines, not four.** The six models are grouped by vendor, one line each, and a title no longer repeats its vendor's name — saying it six times was what pushed a group past the column and split it across two lines.
+- **24 — Which option ran.** A session record names the menu option (`deepseek-flash (deepseek-max)`), not only the provider and model. Three DeepSeek tiers share both, so the record could not say which one a slow session used.
+- **25 — Thirty minutes.** The deployed instance allows a 30-minute conversation instead of 6, which is also the spend ceiling for one address since every turn is charged for the whole history.
 
 ## Requirements
 
@@ -67,8 +75,8 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 ```bash
 uv sync                                     # install, including dev tools
 cp .env.example .env                        # fill in only the keys you need
-uv run voice-agent                          # Anthropic + AssemblyAI + ElevenLabs, on :8000
-uv run voice-agent --provider deepseek      # or openai; --model overrides the model
+uv run voice-agent                          # Haiku 4.5 + AssemblyAI + ElevenLabs, on :8000
+                                            # the start screen picks the model per conversation
 uv run voice-agent --stt elevenlabs         # Scribe, for languages AssemblyAI lacks
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first

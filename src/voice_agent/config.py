@@ -9,10 +9,6 @@ from voice_agent import prompts
 from voice_agent.errors import ConfigError
 from voice_agent.roles import DEFAULT_ROLE
 
-DEFAULT_PROVIDER = "anthropic"
-"""The reasoning engine a conversation runs on unless it picks another: the
-fastest to first token in `--bench-llm`. Its default *model* is not the one
-measured; a deployment sets `VOICE_AGENT_MODEL` (`fly.toml` does)."""
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
 DEFAULT_EARS_PROVIDER = "assemblyai"
 
@@ -52,8 +48,6 @@ DEFAULT_PORT = 8000
 
 @dataclass(frozen=True, slots=True)
 class Settings:
-    provider: str
-    model: str | None
     voice_provider: str
     voice: str | None
     ears_provider: str
@@ -76,8 +70,6 @@ class Settings:
 
 def load_settings() -> Settings:
     return Settings(
-        provider=os.environ.get("VOICE_AGENT_PROVIDER", DEFAULT_PROVIDER),
-        model=os.environ.get("VOICE_AGENT_MODEL") or None,
         voice_provider=os.environ.get("VOICE_AGENT_TTS", DEFAULT_VOICE_PROVIDER),
         voice=os.environ.get("VOICE_AGENT_VOICE") or None,
         ears_provider=os.environ.get("VOICE_AGENT_STT", DEFAULT_EARS_PROVIDER),

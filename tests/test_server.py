@@ -971,23 +971,41 @@ def stacked(
     ):
         monkeypatch.setenv(name, "sk-test")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("VOICE_AGENT_PROVIDER", "anthropic")
     monkeypatch.setenv("VOICE_AGENT_STT", "assemblyai")
     return TestClient(create_app(llm=llm, tts=tts, stt=stt, greeting=""))
 
 
-def test_the_page_offers_only_backends_this_deployment_has_keys_for(
+def test_the_page_offers_only_models_this_deployment_has_keys_for(
     llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Offering a backend that cannot be built is offering an error."""
+    """Offering a model that cannot be built is offering an error."""
     client = stacked(llm, tts, stt, monkeypatch)
     choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
     assert isinstance(choices, dict)
 
-    assert [o["name"] for o in choices["llm"]] == ["deepseek", "anthropic"]
+    assert [o["name"] for o in choices["llm"]] == [
+        "haiku-4-5",
+        "sonnet-5",
+        "opus-5-5",
+        "deepseek-low",
+        "deepseek-high",
+        "deepseek-max",
+    ]
     assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
-    assert [o["name"] for o in choices["llm"] if o["default"]] == ["anthropic"]
+    assert [o["name"] for o in choices["llm"] if o["default"]] == ["haiku-4-5"]
     assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
+
+    # The menu is fixed when the app is built, so this needs a second app.
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    without = TestClient(create_app(llm=llm, tts=tts, stt=stt, greeting=""))
+    choices = served_facts(without.get(f"/c/{start(without)}").text)["choices"]
+    assert isinstance(choices, dict)
+
+    assert [o["name"] for o in choices["llm"]] == [
+        "deepseek-low",
+        "deepseek-high",
+        "deepseek-max",
+    ], "a provider without a key offers none of its models"
 
 
 def test_ears_configured_off_stay_off_even_with_recognizer_keys(
@@ -1029,10 +1047,10 @@ def test_the_query_string_chooses_the_stack(
     client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
     key = start(client)
 
-    with client.websocket_connect(f"/ws/{key}?llm=deepseek&stt=elevenlabs") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max&stt=elevenlabs") as socket:
         receive(socket)
 
-    assert (store.get(key).engine, store.get(key).ears) == ("deepseek", "elevenlabs")
+    assert (store.get(key).engine, store.get(key).ears) == ("deepseek-max", "elevenlabs")
 
 
 def test_a_reconnect_keeps_the_stack_it_started_on(
@@ -1046,55 +1064,53 @@ def test_a_reconnect_keeps_the_stack_it_started_on(
     client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
     key = start(client)
 
-    with client.websocket_connect(f"/ws/{key}?llm=deepseek&stt=elevenlabs") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max&stt=elevenlabs") as socket:
         receive(socket)
     chose = (store.get(key).engine, store.get(key).ears)
 
-    with client.websocket_connect(f"/ws/{key}?llm=anthropic&stt=assemblyai") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=opus-5-5&stt=assemblyai") as socket:
         receive(socket)
 
     assert (store.get(key).engine, store.get(key).ears) == chose
-    assert chose == ("deepseek", "elevenlabs")
+    assert chose == ("deepseek-max", "elevenlabs")
 
 
-@pytest.mark.parametrize("query", ["?llm=bogus&stt=bogus", "?llm=openai", ""])
+@pytest.mark.parametrize("query", ["?llm=bogus&stt=bogus", "?llm=deepseek-max", ""])
 def test_an_unknown_or_keyless_choice_falls_back_to_the_default(
     llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """A URL a stranger can type, not configuration — so it is repaired rather
-    than refused. `openai` is a real backend with no key here, which is the
-    same situation from the visitor's side."""
+    than refused. `deepseek-max` is a real option with no key behind it here,
+    which is the same situation from the visitor's side."""
     store = SessionStore()
-    for name in ("ANTHROPIC_API_KEY", "DEEPSEEK_API_KEY", "ASSEMBLYAI_API_KEY"):
-        monkeypatch.setenv(name, "sk-test")
-    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("VOICE_AGENT_PROVIDER", "anthropic")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "sk-test")
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    monkeypatch.setenv("VOICE_AGENT_STT", "assemblyai")
     client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
     key = start(client)
 
     with client.websocket_connect(f"/ws/{key}{query}") as socket:
         receive(socket)
 
-    assert store.get(key).engine == "anthropic"
+    assert store.get(key).engine == "haiku-4-5"
 
 
-def test_the_page_names_the_model_the_deployment_would_actually_run(
+def test_the_page_names_the_model_each_option_would_actually_run(
     llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Found on the deployed page: it advertised `claude-opus-5` — the
     registry's default for the provider — beside a deployment configured for
-    `claude-haiku-4-5`. Every other fact on that screen is assembled in one
-    place precisely so the page cannot say what the server will not do, and
-    the model had slipped out of that arrangement."""
+    `claude-haiku-4-5`. Everything on that screen is assembled in one place so
+    the page cannot say what the server will not do. Now the model is the choice
+    itself, so the name shown and the model run come from a single entry."""
     stacked(llm, tts, stt, monkeypatch)
-    monkeypatch.setenv("VOICE_AGENT_MODEL", "claude-haiku-4-5")
     client = TestClient(create_app(tts=tts, stt=stt, greeting=""))
 
     choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
     assert isinstance(choices, dict)
-    advertised = {o["name"]: o["model"] for o in choices["llm"]}
+    advertised = {o["name"]: (o["title"], o["model"]) for o in choices["llm"]}
 
-    assert advertised["anthropic"] == "claude-haiku-4-5"
-    # And the override belongs to its provider: DeepSeek keeps its own default,
-    # since asking DeepSeek for a Claude model would simply fail.
-    assert advertised["deepseek"] == "deepseek-chat"
+    assert advertised["haiku-4-5"] == ("Haiku 4.5", "claude-haiku-4-5")
+    assert advertised["opus-5-5"] == ("Opus 5.5", "claude-opus-5-5")
+    assert advertised["deepseek-max"] == ("V4.1 Flash — max", "deepseek-flash")
