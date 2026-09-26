@@ -209,19 +209,15 @@ def test_a_missing_key_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None
         create_stt("assemblyai")
 
 
-def test_assemblyai_is_the_default_pair_of_ears(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("ASSEMBLYAI_API_KEY", "test")
+def test_elevenlabs_scribe_is_the_default_pair_of_ears(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VOICE_AGENT_STT", raising=False)
-    settings = load_settings()
 
-    backend = create_stt(settings.ears_provider, settings.vad_silence)
-
-    assert isinstance(backend, AssemblyAISTT)
+    assert load_settings().ears_provider == "elevenlabs"
 
 
 def test_the_pause_is_tunable_on_this_backend_too(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ASSEMBLYAI_API_KEY", "test")
-    monkeypatch.delenv("VOICE_AGENT_STT", raising=False)
+    monkeypatch.setenv("VOICE_AGENT_STT", "assemblyai")
     monkeypatch.setenv("VOICE_AGENT_VAD_SILENCE", "2.5")
     settings = load_settings()
 

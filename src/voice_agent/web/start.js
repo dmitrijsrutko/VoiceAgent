@@ -57,39 +57,28 @@ function notice(html) {
 
 // One radio group of what the server offered, default first. A single option
 // is only drawn when asked (the voice); otherwise there is nothing to choose.
+// Options sit in a grid of equal cells, so every group lines up the same way
+// at every width.
 function choose(group, title, options, describe, { single = false, byProvider = false } = {}) {
   if (options.length < (single ? 1 : 2)) return;
   const ordered = [...options].sort((a, b) => Number(!!b.default) - Number(!!a.default));
   const radios = (list) =>
-    list.map((o) =>
+    `<div class="opts">` + list.map((o) =>
       `<label><input type="radio" name="${group}" value="${o.name}"` +
-      `${o.default ? " checked" : ""}>${describe(o)}</label>`).join("");
+      `${o.default ? " checked" : ""}><span>${describe(o)}</span></label>`).join("") + `</div>`;
   let body = radios(ordered);
   if (byProvider) {
+    // The default's provider first, but each provider's models in menu order,
+    // so the two rows line up column for column (low / high / max).
     const names = [...new Set(ordered.map((o) => o.provider))];
     body = `<div class="rows">` + names.map((p) =>
       `<div class="row"><b>${escape(PROVIDERS[p] ?? p)}</b>` +
-      `${radios(ordered.filter((o) => o.provider === p))}</div>`).join("") + `</div>`;
+      `${radios(options.filter((o) => o.provider === p))}</div>`).join("") + `</div>`;
   }
   const el = document.createElement("div");
   el.className = "pick";
   el.innerHTML = `<span>${title}</span>${body}`;
   startStack.appendChild(el);
-}
-
-function languagesLine(known) {
-  const langs = chosenEars(known)?.languages ?? [];
-  return langs.length
-    ? `It hears <strong>${langs.length}</strong> languages: <code>${langs.join(" ")}</code>.`
-    : "";
-}
-
-// What the picked role will do, or nothing for the plain assistant.
-function roleLine(known) {
-  const role = (known.choices?.role ?? []).find((o) => o.name === picked("role"));
-  if (!role || role.name === "none") return "";
-  return `It will play <strong>${escape(role.title)}</strong>: ${escape(role.summary)} ` +
-    "What it would say next, and why, shows under <strong>details</strong>.";
 }
 
 export function showStart(known) {
@@ -104,15 +93,6 @@ export function showStart(known) {
     choose("tts", "Voice", [{ name: known.voice.provider, voice: known.voice.voice, default: true }],
       (o) => `${label("tts", o.name)} <small>${o.voice.slice(0, 10)}</small>`, { single: true });
   }
-
-  // Both lines follow the choice: the role changes what the agent will do,
-  // and the two recognizers differ most in what they hear.
-  const playing = notice(roleLine(known));
-  const heard = notice(languagesLine(known));
-  startStack.addEventListener("change", () => {
-    playing.innerHTML = roleLine(known);
-    heard.innerHTML = languagesLine(known);
-  });
 
   if (!known.ears) notice("This agent has <strong>no microphone</strong> — typing only.");
   if (!known.voice) notice("This agent is <strong>silent</strong> — it will not speak.");

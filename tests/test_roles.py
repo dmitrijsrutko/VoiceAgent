@@ -47,7 +47,8 @@ def test_every_shipped_role_loads() -> None:
     shipped = roles.available()
 
     assert "devils_advocate" in shipped
-    assert roles.DEFAULT_ROLE == roles.NO_ROLE  # a role is chosen, never assumed
+    assert roles.DEFAULT_ROLE == "devils_advocate"
+    assert roles.DEFAULT_ROLE in shipped, "the default has to be a card that ships"
     for slug in shipped:
         role = roles.load(slug)
         assert role.opening and set(role.moves) <= set(roles.MOVES)

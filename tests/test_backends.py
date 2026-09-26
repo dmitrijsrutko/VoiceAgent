@@ -136,18 +136,18 @@ def test_the_menu_offers_only_what_holds_a_key(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
-def test_the_default_is_offered_first_and_is_haiku(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_default_is_v4_1_flash_max(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.setenv(name, "sk-test")
 
     pool = Backends("assemblyai")
 
-    assert pool.default_engine == DEFAULT_CHOICE == "haiku-4-5"
-    assert pool.menu.index(CHOICES[0]) == 0
+    assert pool.default_engine == DEFAULT_CHOICE == "deepseek-max"
+    assert pool.menu.index(CHOICES[0]) == 0, "the menu keeps its order"
 
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    assert Backends("assemblyai").default_engine == "deepseek-low", (
-        "without an Anthropic key the default is the first model that is offered"
+    monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
+    assert Backends("assemblyai").default_engine == "haiku-4-5", (
+        "without a DeepSeek key the default is the first model that is offered"
     )
 
 
@@ -161,10 +161,10 @@ def test_an_option_that_cannot_be_run_is_not_offered(monkeypatch: pytest.MonkeyP
 
     chosen, _, _ = pool.choose(conversation, {"llm": "opus-5-5"})
 
-    assert chosen == "deepseek-low"
+    assert chosen == "deepseek-max"
 
-    kept, _, _ = pool.choose(Conversation(id="u"), {"llm": "deepseek-max"})
-    assert kept == "deepseek-max"
+    kept, _, _ = pool.choose(Conversation(id="u"), {"llm": "deepseek-low"})
+    assert kept == "deepseek-low"
 
 
 # --- what the registries can answer without building anything ---------------
@@ -231,17 +231,18 @@ def test_an_unknown_role_is_the_default_not_an_error() -> None:
     assert role == "devils_advocate"
 
 
-def test_a_preselected_role_that_is_not_a_card_is_no_role() -> None:
-    assert Backends("assemblyai", default_role="nobody").default_role == "none"
+def test_a_preselected_role_that_is_not_a_card_is_the_first_card() -> None:
+    assert Backends("assemblyai", roles=(DEVIL,), default_role="nobody").default_role == DEVIL.slug
+    assert Backends("assemblyai", default_role="nobody").default_role == "none", (
+        "with no cards at all there is nothing else to run"
+    )
 
 
-def test_the_plain_assistant_is_offered_first_and_only_with_a_card_to_choose() -> None:
-    offered = Backends("assemblyai", roles=(DEVIL,)).choices("haiku-4-5", "assemblyai")["role"]
+def test_only_cards_are_offered_as_roles() -> None:
+    pool = Backends("assemblyai", roles=(DEVIL,), default_role="devils_advocate")
+    offered = pool.choices("haiku-4-5", "assemblyai", "devils_advocate")["role"]
     alone = Backends("assemblyai").choices("haiku-4-5", "assemblyai")["role"]
 
-    assert [(o["name"], o["default"]) for o in offered] == [
-        ("none", True),
-        ("devils_advocate", False),
-    ]
-    assert offered[1]["title"] == DEVIL.name
+    assert [(o["name"], o["default"]) for o in offered] == [("devils_advocate", True)]
+    assert offered[0]["title"] == DEVIL.name
     assert alone == []

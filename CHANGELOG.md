@@ -14,6 +14,49 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 26 — A start screen for phones, and a record that names the whole stack
+
+The start screen was built at desktop width. On a phone the model rows could
+not wrap (`nowrap`, kept from Chapter 23 so a vendor's models never split), so
+DeepSeek's three options ran off the right edge; and whether the two vendor
+groups sat side by side or stacked depended on the window, so the list read
+left, right or vertical from one screen to the next. The global `input` style
+also reached the radio buttons, padding and bordering each one. Meanwhile the
+defaults were the ones the page opened with before roles existed.
+
+**What changed**
+- Defaults: role **Devil's advocate** (`roles.DEFAULT_ROLE`), model
+  **`deepseek-max`** (`llm.registry.DEFAULT_CHOICE`), ears **ElevenLabs Scribe**
+  (`config.DEFAULT_EARS_PROVIDER`). Each still falls back to the first thing
+  offered when its key is missing.
+- "None" is no longer a role: `Backends.choices()` offers only cards, and
+  `?role=none` falls back to the default like any unknown name. `NO_ROLE` stays
+  as what runs with no cards at all, or when an operator sets
+  `VOICE_AGENT_ROLE=none` — which the test suite now does explicitly
+  (`conftest._plain_assistant`), because its pipeline tests are about the plain
+  assistant. `--role` no longer lists `none`.
+- The "It will play …" line under the pickers is gone; a role's summary is
+  already on its option.
+- So is "It hears 100 languages: afr amh …": a hundred codes took half a phone
+  screen. Each Ears option still says how many languages it hears.
+- Layout: every picker is a grid of equal cells (two per line on desktop, one on
+  a phone); models are always one vendor per line, the vendor's name in its own
+  column and its models in three equal cells, in menu order — so low / high /
+  max line up with Haiku / Sonnet / Opus. Under 480 px the vendor's name sits
+  above its row. The text-box style is scoped to `#input`.
+- Debugging: the record's header names all four settings, always, and says
+  `role none` / `ears deaf` / `voice silent` rather than leaving one out; a
+  reconnect restates them. `converse()` logs one line per connect —
+  `conversation <id>: role=… llm=… (provider/model) ears=… voice=…` — so the
+  Fly logs say what a session ran on without its record. The `ready` frame's
+  `role` carries the card's `slug`.
+
+**Latency.** Unchanged for a visitor who picks; a visitor who does not now gets
+`deepseek-max`, which Chapter 21 measured at up to 23.7 s on a hard turn,
+instead of Haiku 4.5. That is the user's call and is recorded here as such.
+
+**Not doing.** No user-made roles, no role picker redesign beyond layout.
+
 ## Chapter 25 — Thirty minutes, not six
 
 The deployed instance ended every conversation at 360 seconds. A real

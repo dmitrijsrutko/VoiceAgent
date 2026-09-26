@@ -491,14 +491,13 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
     assert "llm" not in labels.group(1), "the page is naming models itself again"
 
 
-def test_the_languages_notice_follows_the_chosen_ears() -> None:
-    """Scribe hears 100 languages and AssemblyAI 18, and which is running is
-    the visitor's choice now — so a notice fixed at page load would describe a
-    recognizer they did not pick."""
+def test_the_start_screen_counts_languages_rather_than_listing_them() -> None:
+    """A hundred language codes took half a phone screen and told a visitor
+    little; each pair of ears says how many it hears on its own option."""
     start = without_comments(source("start.js"))
 
-    assert 'startStack.addEventListener("change"' in start
-    assert "languages: <code>" in start
+    assert "languages.length} languages" in start, "the count on the Ears option is gone"
+    assert "languages.join(" not in start, "the start screen lists every language again"
 
 
 def test_the_start_screen_warns_about_no_particular_language() -> None:
@@ -535,7 +534,6 @@ def test_what_a_role_card_says_is_escaped_on_the_start_screen() -> None:
     start = without_comments(source("start.js"))
 
     assert "escape(o.title)" in start and "escape(o.summary)" in start
-    assert "escape(role.title)" in start and "escape(role.summary)" in start
 
 
 def test_the_microphone_is_asked_for_inside_the_tap() -> None:

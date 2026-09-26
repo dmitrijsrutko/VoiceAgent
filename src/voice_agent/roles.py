@@ -31,11 +31,13 @@ ROLES_DIR = prompts.DIR / "roles"
 """Resolved relative to the source checkout, like the system prompt."""
 
 NO_ROLE = "none"
-"""The plain assistant: no role section, no thinker."""
+"""The plain assistant: no role section, no thinker. Never offered on the page
+nor accepted from `?role=`; only what runs with no cards at all, or when an
+operator pre-selects it with `VOICE_AGENT_ROLE=none` (the test suite does)."""
 
-DEFAULT_ROLE = NO_ROLE
+DEFAULT_ROLE = "devils_advocate"
 """What the start screen has selected before anyone chooses. `VOICE_AGENT_ROLE`
-/ `--role` pre-select a card instead; each conversation still picks its own."""
+/ `--role` pre-select another card; each conversation still picks its own."""
 
 MOVES = ("challenge", "clarify", "redirect", "summarise")
 """The fixed vocabulary of what a thought can propose. The contract with the

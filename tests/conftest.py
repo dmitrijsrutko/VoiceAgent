@@ -89,6 +89,14 @@ def _sessions_in_tmp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("VOICE_AGENT_TRACE", str(tmp_path / "traces"))
 
 
+@pytest.fixture(autouse=True)
+def _plain_assistant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The pipeline tests run the plain assistant: no role greeting, no thinker.
+    The page's default is a role card now, so this is said here rather than
+    assumed; a test about roles pre-selects one, or deletes this variable."""
+    monkeypatch.setenv("VOICE_AGENT_ROLE", "none")
+
+
 @pytest.fixture
 def llm() -> FakeLLM:
     return FakeLLM()

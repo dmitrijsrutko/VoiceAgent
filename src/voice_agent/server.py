@@ -110,7 +110,8 @@ async def connect(engine: LLM) -> None:
 def load_roles(preselected: str) -> dict[str, roles.Role]:
     """Every role card, read and validated at startup: a broken card stops the
     server with a reason, rather than failing the conversation that picks it.
-    So does pre-selecting a card that is not there."""
+    So does pre-selecting a card that is not there. `none` is the operator's
+    plain assistant: never offered on the page, but it may be pre-selected."""
     cards = {slug: roles.load(slug) for slug in roles.available()}
     if preselected != roles.NO_ROLE and preselected not in cards:
         roles.load(preselected)  # raises, naming the cards there are
@@ -203,7 +204,9 @@ class Agent:
         after it — one function, so the two cannot disagree."""
         card = self.roles.get(role)
         return {
-            "role": {"name": card.name, "summary": card.summary} if card else None,
+            "role": (
+                {"slug": card.slug, "name": card.name, "summary": card.summary} if card else None
+            ),
             "voice": (
                 {
                     "provider": self.speaker.provider,
@@ -376,6 +379,18 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
     engine = agent.backends.engine(engine_name)
     listener = agent.backends.ears(ears_name)
     role = agent.roles.get(role_name)
+    # One line per connect naming what it runs on, so the Fly logs can say
+    # which settings a misbehaving conversation had without its record.
+    logger.info(
+        "conversation %s: role=%s llm=%s (%s/%s) ears=%s voice=%s",
+        conversation.id,
+        role_name,
+        engine_name,
+        engine.provider,
+        engine.model,
+        ears_name if listener is not None else "deaf",
+        f"{agent.speaker.provider}/{agent.speaker.voice}" if agent.speaker else "silent",
+    )
     opening = agent.openings[role_name if role is not None else roles.NO_ROLE]
     # Per conversation, because it states what these ears can hear; stable for
     # the conversation's life, which is what a provider's prefix cache needs.

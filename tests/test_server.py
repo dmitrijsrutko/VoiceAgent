@@ -971,7 +971,7 @@ def stacked(
     ):
         monkeypatch.setenv(name, "sk-test")
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
-    monkeypatch.setenv("VOICE_AGENT_STT", "assemblyai")
+    monkeypatch.delenv("VOICE_AGENT_STT", raising=False)
     return TestClient(create_app(llm=llm, tts=tts, stt=stt, greeting=""))
 
 
@@ -992,8 +992,8 @@ def test_the_page_offers_only_models_this_deployment_has_keys_for(
         "deepseek-max",
     ]
     assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
-    assert [o["name"] for o in choices["llm"] if o["default"]] == ["haiku-4-5"]
-    assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
+    assert [o["name"] for o in choices["llm"] if o["default"]] == ["deepseek-max"]
+    assert [o["name"] for o in choices["stt"] if o["default"]] == ["elevenlabs"]
 
     # The menu is fixed when the app is built, so this needs a second app.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)

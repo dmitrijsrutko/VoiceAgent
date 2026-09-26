@@ -64,6 +64,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **23 — Two lines, not four.** The six models are grouped by vendor, one line each, and a title no longer repeats its vendor's name — saying it six times was what pushed a group past the column and split it across two lines.
 - **24 — Which option ran.** A session record names the menu option (`deepseek-flash (deepseek-max)`), not only the provider and model. Three DeepSeek tiers share both, so the record could not say which one a slow session used.
 - **25 — Thirty minutes.** The deployed instance allows a 30-minute conversation instead of 6, which is also the spend ceiling for one address since every turn is charged for the whole history.
+- **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and ElevenLabs Scribe; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
 
 ## Requirements
 
@@ -75,12 +76,12 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 ```bash
 uv sync                                     # install, including dev tools
 cp .env.example .env                        # fill in only the keys you need
-uv run voice-agent                          # Haiku 4.5 + AssemblyAI + ElevenLabs, on :8000
+uv run voice-agent                          # V4.1 Flash max + Scribe + ElevenLabs, on :8000
                                             # the start screen picks the model per conversation
-uv run voice-agent --stt elevenlabs         # Scribe, for languages AssemblyAI lacks
+uv run voice-agent --stt assemblyai         # AssemblyAI pre-selected instead of Scribe
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first
-uv run voice-agent --role devils_advocate   # pre-select a role (visitors still choose; default none)
+uv run voice-agent --role thinking_partner  # pre-select a role (visitors still choose; default devils_advocate)
 uv run voice-agent --replay-thinker         # score the inner voice on tests/scenarios/ (billed)
 uv run voice-agent --help                   # everything else
 ```

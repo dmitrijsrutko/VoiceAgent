@@ -75,9 +75,9 @@ def main() -> None:
     parser.add_argument(
         "--role",
         default=settings.role,
-        choices=[*roles.available(), roles.NO_ROLE],
-        help="the role pre-selected on the start screen, from prompts/roles/, or 'none' for "
-        "the plain assistant; each conversation still picks its own (default: %(default)s)",
+        choices=roles.available(),
+        help="the role pre-selected on the start screen, from prompts/roles/; each "
+        "conversation still picks its own (default: %(default)s)",
     )
     parser.add_argument(
         "--sessions",

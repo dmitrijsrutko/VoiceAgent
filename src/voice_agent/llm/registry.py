@@ -104,8 +104,9 @@ Repeating it in every option made each one wide enough that a group wrapped,
 which is the one thing the grouping exists to avoid.
 """
 
-DEFAULT_CHOICE = CHOICES[0].name
-"""What a conversation runs unless it picks another: the fastest to first token."""
+DEFAULT_CHOICE = "deepseek-max"
+"""What a conversation runs unless it picks another. Not the fastest to first
+token (that is Haiku 4.5): the one the page should start on."""
 
 BY_NAME: dict[str, Choice] = {choice.name: choice for choice in CHOICES}
 

@@ -50,7 +50,14 @@ class Backends:
         self._silence = silence
         self.roles = tuple(roles)
         names = {role.slug for role in self.roles}
-        self.default_role = default_role if default_role in names else NO_ROLE
+        # A card that is not there falls back to the first there is. The plain
+        # assistant is never offered, but an operator (or a test) may still run
+        # every conversation as one by pre-selecting it.
+        self.default_role = (
+            default_role
+            if default_role in names or default_role == NO_ROLE
+            else next((role.slug for role in self.roles), NO_ROLE)
+        )
         self.menu: tuple[Choice, ...] = offered()
         """The models this deployment can run, fastest first: what the page
         offers and what a conversation may be pinned to."""
@@ -83,7 +90,7 @@ class Backends:
             heard = asked.get("stt", "")
             conversation.ears = heard if heard in self.listeners else self.default_ears
             wanted_role = asked.get("role", "")
-            known = {role.slug for role in self.roles} | {NO_ROLE}
+            known = {role.slug for role in self.roles}
             conversation.role = wanted_role if wanted_role in known else self.default_role
         return conversation.engine, conversation.ears or NO_EARS, conversation.role or NO_ROLE
 
@@ -92,29 +99,11 @@ class Backends:
     ) -> dict[str, list[dict[str, object]]]:
         """What the page may offer, with `engine`, `ears` and `role` marked as
         chosen. Recognizers are described, not built, so no key is needed to
-        list one. The plain assistant is always the first role; no cards at all
-        means no role to choose."""
-        roles: list[dict[str, object]] = (
-            [
-                {
-                    "name": NO_ROLE,
-                    "title": "None",
-                    "summary": "a plain assistant",
-                    "default": role == NO_ROLE,
-                },
-                *(
-                    {
-                        "name": r.slug,
-                        "title": r.name,
-                        "summary": r.summary,
-                        "default": r.slug == role,
-                    }
-                    for r in self.roles
-                ),
-            ]
-            if self.roles
-            else []
-        )
+        list one. Only the cards are roles; the plain assistant is not offered."""
+        roles: list[dict[str, object]] = [
+            {"name": r.slug, "title": r.name, "summary": r.summary, "default": r.slug == role}
+            for r in self.roles
+        ]
         return {
             "role": roles,
             "llm": [

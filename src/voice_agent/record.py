@@ -181,29 +181,40 @@ class Record:
         if kind == "ended":
             self.flush()
 
-    def _header(self, payload: Mapping[str, Any]) -> None:
-        """Written once per conversation; a reconnect says so instead.
-
-        Reloading the link resumes the same conversation, so it is the same
-        file — a second header would read as a second conversation.
-        """
-        if self._path.exists() and self._path.stat().st_size:
-            self._write(f"\n## {self._clock()} — reconnected\n")
-            return
-        voice, ears = payload.get("voice") or {}, payload.get("ears") or {}
-        started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"started {started} · {payload.get('provider')}/{payload.get('model')}"
+    @staticmethod
+    def _settings(payload: Mapping[str, Any]) -> str:
+        """Role, model, ears and voice, every one named even when absent: a
+        record that leaves one out cannot say whether it was off or unlogged."""
+        role, voice, ears = (payload.get(k) or {} for k in ("role", "voice", "ears"))
+        model = f"{payload.get('provider')}/{payload.get('model')}"
         # The option, in brackets: provider and model cannot say which of the
         # six ran, because the three DeepSeek tiers are one provider and one
         # model differing only in the effort sent with the request. Live, that
         # made a session's tier unrecoverable — the startup log builds all six,
         # so nothing else in the record or the logs names the one chosen.
         if payload.get("choice"):
-            line += f" ({payload['choice']})"
-        if voice:
-            line += f" · voice {voice.get('provider')} {voice.get('voice')}"
-        if ears:
-            line += f" · ears {ears.get('provider')}"
+            model += f" ({payload['choice']})"
+        return " · ".join(
+            (
+                f"role {role.get('slug') or role.get('name')}" if role else "role none",
+                f"llm {model}",
+                f"ears {ears.get('provider')}" if ears else "ears deaf",
+                f"voice {voice.get('provider')} {voice.get('voice')}" if voice else "voice silent",
+            )
+        )
+
+    def _header(self, payload: Mapping[str, Any]) -> None:
+        """Written once per conversation; a reconnect says so instead.
+
+        Reloading the link resumes the same conversation, so it is the same
+        file — a second header would read as a second conversation.
+        """
+        settings = self._settings(payload)
+        if self._path.exists() and self._path.stat().st_size:
+            self._write(f"\n## {self._clock()} — reconnected\n{settings}\n")
+            return
+        started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        line = f"started {started} · {settings}"
         self._write(f"# Conversation {payload.get('session')}\n{line}\n")
         origin = " · ".join(
             part

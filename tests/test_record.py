@@ -80,6 +80,46 @@ def test_the_header_says_which_option_ran_not_just_the_model(
     assert "fake-1" in header, "the model is still named too"
 
 
+def test_the_header_names_role_model_ears_and_voice(tmp_path: Path) -> None:
+    """What a conversation ran on, in its first lines: debugging one later
+    starts from these four, and each one changes what the agent does."""
+    store = SessionStore()
+    client = app_for(tmp_path, store)
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?role=thinking_partner") as socket:
+        receive(socket)
+
+    header = recorded(tmp_path).splitlines()[1]
+    for part in ("role thinking_partner", "llm fake/fake-1", "ears ", "voice "):
+        assert part in header, header
+    assert "ears deaf" not in header and "voice silent" not in header
+
+
+def test_the_header_says_so_when_a_setting_is_absent(tmp_path: Path) -> None:
+    """Absent is written down, not left out: a missing field cannot tell
+    "switched off" from "never logged"."""
+    record = Record(tmp_path / "c.md")
+
+    record.frame({"type": "ready", "session": "c", "provider": "p", "model": "m"})
+
+    header = (tmp_path / "c.md").read_text(encoding="utf-8").splitlines()[1]
+    assert "role none · llm p/m · ears deaf · voice silent" in header
+
+
+def test_a_reconnect_restates_what_it_runs_on(tmp_path: Path) -> None:
+    store = SessionStore()
+    client = app_for(tmp_path, store)
+    key = start(client)
+
+    converse(client, key, "before")
+    converse(client, key, "after")
+
+    lines = recorded(tmp_path).splitlines()
+    again = lines[next(i for i, line in enumerate(lines) if "reconnected" in line) + 1]
+    assert again.startswith("role ") and "llm fake/fake-1" in again, again
+
+
 def test_no_audio_ever_reaches_the_file(tmp_path: Path) -> None:
     """Speech is biometric data and a five-minute session is tens of megabytes.
     Binary frames are counted; the bytes themselves are never kept."""

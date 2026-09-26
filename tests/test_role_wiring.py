@@ -131,11 +131,23 @@ def test_a_conversation_that_picks_the_role_plays_it() -> None:
         ready, greeting = converse(client, mint(client), "?role=devils_advocate")
 
     assert greeting == ROLE.opening
-    assert ready["role"] == {"name": ROLE.name, "summary": ROLE.summary}
+    assert ready["role"] == {"slug": ROLE.slug, "name": ROLE.name, "summary": ROLE.summary}
     assert "# Your role in this conversation" in llm.systems[0]
 
 
-def test_by_default_there_is_no_role() -> None:
+def test_by_default_the_devil_s_advocate_plays(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("VOICE_AGENT_ROLE", raising=False)
+    llm = FakeLLM()
+    with app_with(llm) as client:
+        ready, greeting = converse(client, mint(client))
+
+    assert greeting == ROLE.opening
+    assert ready["role"] == {"slug": ROLE.slug, "name": ROLE.name, "summary": ROLE.summary}
+
+
+def test_the_operator_may_still_run_the_plain_assistant() -> None:
+    """Never offered on the page, but `VOICE_AGENT_ROLE=none` (as the test
+    suite sets) still runs every conversation without a role."""
     llm = FakeLLM()
     with app_with(llm) as client:
         ready, greeting = converse(client, mint(client))
@@ -145,12 +157,14 @@ def test_by_default_there_is_no_role() -> None:
     assert "Your role in this conversation" not in llm.systems[0]
 
 
-def test_an_unknown_role_falls_back_to_the_default() -> None:
-    with app_with(FakeLLM()) as client:
-        ready, greeting = converse(client, mint(client), "?role=../../etc")
+@pytest.mark.parametrize("asked", ["../../etc", "none"])
+def test_an_unknown_role_falls_back_to_the_default(asked: str) -> None:
+    """`none` included: the plain assistant is not something a link can ask for."""
+    with app_with(FakeLLM(), preselected="devils_advocate") as client:
+        ready, greeting = converse(client, mint(client), f"?role={asked}")
 
-    assert ready["role"] is None
-    assert greeting == DEFAULT_GREETING
+    assert ready["role"] == {"slug": ROLE.slug, "name": ROLE.name, "summary": ROLE.summary}
+    assert greeting == ROLE.opening
 
 
 def test_a_reconnect_keeps_the_role_it_started_with() -> None:
@@ -161,17 +175,17 @@ def test_a_reconnect_keeps_the_role_it_started_with() -> None:
         converse(client, key, "?role=devils_advocate")
         ready, _ = converse(client, key, "?role=none", greeted=False)
 
-    assert ready["role"] == {"name": ROLE.name, "summary": ROLE.summary}
+    assert ready["role"] == {"slug": ROLE.slug, "name": ROLE.name, "summary": ROLE.summary}
     assert all("Your role in this conversation" in system for system in llm.systems)
 
 
-def test_the_start_screen_offers_none_first_and_preselected_as_asked() -> None:
+def test_the_start_screen_offers_only_cards_and_preselected_as_asked() -> None:
     with app_with(FakeLLM(), preselected="devils_advocate") as client:
         page = client.get(f"/c/{mint(client)}").text
 
     served = json.loads(page.split('id="facts" type="application/json">')[1].split("</script>")[0])
     offered = served["choices"]["role"]
-    assert [o["name"] for o in offered] == [roles.NO_ROLE, "devils_advocate", "thinking_partner"]
+    assert [o["name"] for o in offered] == ["devils_advocate", "thinking_partner"]
     assert [o["name"] for o in offered if o["default"]] == ["devils_advocate"]
 
 

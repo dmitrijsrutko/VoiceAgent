@@ -10,7 +10,7 @@ from voice_agent.errors import ConfigError
 from voice_agent.roles import DEFAULT_ROLE
 
 DEFAULT_VOICE_PROVIDER = "elevenlabs"
-DEFAULT_EARS_PROVIDER = "assemblyai"
+DEFAULT_EARS_PROVIDER = "elevenlabs"
 
 DEFAULT_GREETING = "Hi, I'm a voice agent. What can I help you with?"
 """What the agent says when a conversation opens with no role; empty to open in
