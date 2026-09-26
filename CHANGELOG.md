@@ -14,6 +14,33 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Refactor — The greeting is spoken like any other reply
+
+The opening line was synthesised at startup, cached as raw PCM under `.cache/`
+(keyed by provider, voice, format and text, written atomically, checked for
+damage, never retried after a failure) and sent through its own untimed
+delivery. That was a lot of machinery for one sentence, and it made the first
+message the one message that behaved differently.
+
+**What changed**
+- `greeting.py`: the `Greeting` class becomes `greet()`, which appends the
+  line and voices it through `turn.Speech`, the same streaming path as every
+  reply: word marks, real `audio_end` timings, `audio_error` on a failed voice.
+- `server.py`: `Agent.openings` holds plain text; the lifespan no longer
+  synthesises anything. `/healthz` waits on the VAD and engine connections only.
+- `telemetry.js`: the "cached" audio line is gone.
+
+**Design decisions**
+- Synthesised fresh per conversation, not cached: one TTS request per visitor
+  is a cost we accept for one audio path. An interrupted greeting is now cut by
+  its word marks rather than estimated.
+
+**Latency impact** — the greeting now waits for TTS first byte (150 ms in the
+tapes' fake; the real provider's first byte live). Not measured live.
+
+**Verification** — `uv run verify`. Tape goldens regenerated: every tape shifts
+by the greeting's 150 ms synthesis; no decision changed.
+
 ## Chapter 26 — A start screen for phones, and a record that names the whole stack
 
 The start screen was built at desktop width. On a phone the model rows could

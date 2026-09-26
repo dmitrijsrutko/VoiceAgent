@@ -19,8 +19,8 @@ TAPES = sorted((Path(__file__).parent / "tapes").glob("*.tape"))
 
 
 @pytest.mark.parametrize("tape", TAPES, ids=[t.stem for t in TAPES])
-def test_the_replay_matches_its_golden(tape: Path, tmp_path: Path) -> None:
-    got = run(load(tape), tmp_path)
+def test_the_replay_matches_its_golden(tape: Path) -> None:
+    got = run(load(tape))
     golden = tape.with_suffix(".golden")
     if os.environ.get("UPDATE_GOLDEN"):
         golden.write_text(got, encoding="utf-8")
@@ -28,16 +28,16 @@ def test_the_replay_matches_its_golden(tape: Path, tmp_path: Path) -> None:
     assert got == golden.read_text(encoding="utf-8")
 
 
-def test_a_replay_is_deterministic(tmp_path: Path) -> None:
+def test_a_replay_is_deterministic() -> None:
     tape = load(TAPES[0])
-    assert run(tape, tmp_path / "a") == run(load(TAPES[0]), tmp_path / "b")
+    assert run(tape) == run(load(TAPES[0]))
 
 
-def test_a_silence_of_minutes_replays_in_well_under_a_second(tmp_path: Path) -> None:
+def test_a_silence_of_minutes_replays_in_well_under_a_second() -> None:
     import time
 
     started = time.perf_counter()
-    run(load(Path(__file__).parent / "tapes" / "typed_then_silence.tape"), tmp_path)
+    run(load(Path(__file__).parent / "tapes" / "typed_then_silence.tape"))
     assert time.perf_counter() - started < 5.0
 
 

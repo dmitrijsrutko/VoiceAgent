@@ -1,9 +1,9 @@
   0.000  >   greeting text='Hi.'
-  0.000  >   audio_end seconds=0.18 cached=True
-  0.040  <   playback on
+  0.150  >   audio_end seconds=0.18 first_audio_ms=150
+  0.190  <   playback on
   0.220  <   listen_start
   0.220  >   listening active=True
-  0.240  <   playback off
+  0.390  <   playback off
   1.056  >   floor state='speaking'
   2.000  >   transcript text='what is the capital of Latvia'
   2.592  >   floor state='micro_pause'

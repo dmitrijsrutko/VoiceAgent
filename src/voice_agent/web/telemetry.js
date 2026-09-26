@@ -35,10 +35,6 @@ export const unpromptedLine = (msg) => `🗣 unprompted · rung ${msg.initiative
 
 export function audioLine(msg) {
   const length = `${msg.seconds.toFixed(1)} s of speech · ${(msg.bytes / 1024).toFixed(0)} kB in ${msg.chunks} chunks`;
-  if (msg.cached) {
-    const origin = msg.synthesis_ms ? `synthesized at startup in ${ms(msg.synthesis_ms)}` : "reused from an earlier run";
-    return `🔊 ${length} · ${origin} · no wait for you`;
-  }
   const early = msg.audio_before_reply_end ? " · spoke before the reply was written" : "";
   // A pause the listener heard because the voice arrived late, and where.
   const late = msg.late_ms >= 500 ? ` · ⚠ voice ${ms(msg.late_ms)} late after “${msg.late_after}”` : "";

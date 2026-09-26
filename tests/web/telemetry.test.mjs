@@ -53,11 +53,6 @@ test("retries and a fresh connection appear only when they happened", () => {
   assert.ok(line.includes("↻ sent 2×"));
 });
 
-test("audio from the startup cache says it cost the user nothing", () => {
-  const line = audioLine({ seconds: 2, bytes: 2048, chunks: 1, cached: true, synthesis_ms: 300 });
-  assert.ok(line.endsWith("synthesized at startup in 300 ms · no wait for you"));
-});
-
 test("a cut is marked approximate unless it was timed", () => {
   const base = { played_ms: 700, heard_chars: 10, chars: 40, stop_ms: 50 };
   assert.ok(truncatedLine({ ...base, timed: true }).includes("heard 10 of 40 chars ·"));

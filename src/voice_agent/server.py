@@ -43,7 +43,7 @@ from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_se
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
 from voice_agent.events import Playback, Typed
-from voice_agent.greeting import Greeting
+from voice_agent.greeting import greet
 from voice_agent.initiative import LADDER, Rung
 from voice_agent.limits import Live, MintLimit, budget_reason, client_address
 from voice_agent.llm import LLM, create_llm
@@ -187,9 +187,9 @@ class Agent:
     mints: MintLimit
     speaker: TTS | None
     backends: Backends
-    openings: dict[str, Greeting]
+    openings: dict[str, str]
     """The first line, per role: the plain greeting under `roles.NO_ROLE`, and
-    each card's own opening. Every one synthesised at startup."""
+    each card's own opening."""
     ladder: tuple[Rung, ...]
     roles: dict[str, roles.Role]
     thinker: LLM | None
@@ -197,7 +197,7 @@ class Agent:
     """The inner voice's instructions per role: fixed for the process."""
     record_dir: Path | None
     ready: bool = False
-    """The greeting is synthesised and the engines connected; `/healthz` waits on it."""
+    """The engines are connected; `/healthz` waits on it."""
 
     def facts(self, listener: STT | None, engine: str, ears: str, role: str) -> dict[str, object]:
         """What this agent is, for the page before the socket and for `ready`
@@ -278,8 +278,8 @@ def create_app(
         speaker=speaker,
         backends=backends,
         openings={
-            roles.NO_ROLE: Greeting(DEFAULT_GREETING if plain is None else plain, speaker),
-            **{slug: Greeting(card.opening, speaker) for slug, card in cards.items()},
+            roles.NO_ROLE: (DEFAULT_GREETING if plain is None else plain).strip(),
+            **{slug: card.opening.strip() for slug, card in cards.items()},
         },
         ladder=ladder_for(settings.initiative if initiative is None else initiative),
         roles=cards,
@@ -290,12 +290,10 @@ def create_app(
 
     @contextlib.asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
-        # Before anyone is waiting: the first synthesis in a process takes
-        # seconds, and every offered engine's first request pays DNS and TLS
+        # Before anyone is waiting: every offered engine's first request pays DNS and TLS
         # (`connect` only lists models, which nobody bills). The VAD model loads
         # here too, off the loop, rather than inside the first user's `listen`.
         await asyncio.gather(
-            *(opening.prepare() for opening in agent.openings.values()),
             asyncio.to_thread(vad.load),
             *(connect(backends.engine(choice.name)) for choice in backends.menu),
             *([connect(agent.thinker)] if agent.thinker is not None else []),
@@ -398,7 +396,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         listener.languages if listener else (),
         agent.settings.voice_gender,
         tuple(rung.after for rung in agent.ladder),
-        greeting=opening.text,
+        greeting=opening,
         role=role.when_speaking if role is not None else "",
     )
     recording = record_for(agent.record_dir, conversation, system_prompt)
@@ -431,7 +429,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             "ended": conversation.ended,
         }
     )
-    session.voiced(await opening.deliver(channel, conversation))
+    session.voiced(await greet(channel, conversation, agent.speaker, opening))
     # After the greeting, so the clock measures the silence after the agent's voice.
     session.start()
     budget_seconds = agent.settings.session_budget

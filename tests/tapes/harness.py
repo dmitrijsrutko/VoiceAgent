@@ -24,7 +24,7 @@ from typing import Any
 from voice_agent import roles, thinker, timing
 from voice_agent.config import build_prompt
 from voice_agent.conversation import Conversation, Message
-from voice_agent.greeting import Greeting
+from voice_agent.greeting import greet
 from voice_agent.initiative import LADDER, Rung
 from voice_agent.llm.base import Usage
 from voice_agent.server import handle_text, ladder_for
@@ -370,7 +370,7 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "reply_end": (
         "interrupted", "speculated", "merged", "initiative", "resumed", "ttft_ms", "text",
     ),
-    "audio_end": ("seconds", "first_audio_ms", "cached"),
+    "audio_end": ("seconds", "first_audio_ms"),
     "truncated": ("played_ms", "heard_chars", "chars", "estimated"),
     "interrupt": ("id",),
     "transcript": ("final", "text"),
@@ -412,7 +412,7 @@ def _transcripts(tape: Tape) -> list[tuple[float, Transcript]]:
     ]
 
 
-async def replay(tape: Tape, cache: Path) -> str:
+async def replay(tape: Tape) -> str:
     started = timing.now()
     log = Log(started)
     browser = Browser(log)
@@ -421,8 +421,6 @@ async def replay(tape: Tape, cache: Path) -> str:
     engine = ScriptedLLM(tape.replies, tape.ttft, tape.pace, log, "llm")
     card = roles.load(tape.role) if tape.role else None
     inner = ScriptedLLM(tape.thoughts, 1.0, 0.0, log, "thk") if card is not None else None
-    greeting = Greeting(tape.greeting, speaker, cache_dir=cache)
-    await greeting.prepare()
     log.started = started = timing.now()
     listener = TapeSTT(_transcripts(tape), started)
     prompt = build_prompt(
@@ -430,7 +428,7 @@ async def replay(tape: Tape, cache: Path) -> str:
         "female",
         tuple(rung.after for rung in tape.ladder),
         base="You are a test agent.",
-        greeting=greeting.text,
+        greeting=tape.greeting,
         role=card.when_speaking if card is not None else "",
     )
     session = Session(
@@ -450,7 +448,7 @@ async def replay(tape: Tape, cache: Path) -> str:
     browser.session = session
     microphone = asyncio.create_task(browser.microphone())
     try:
-        session.voiced(await greeting.deliver(browser, conversation))  # type: ignore[arg-type]
+        session.voiced(await greet(browser, conversation, speaker, tape.greeting))  # type: ignore[arg-type]
         session.start()
         for at, verb, arg in tape.events:
             await asyncio.sleep(max(0.0, started + at - timing.now()))
@@ -481,13 +479,13 @@ async def _act(browser: Browser, verb: str, arg: str, name: str) -> None:
         raise ValueError(f"{name}: unknown event {verb!r}")
 
 
-def run(tape: Tape, cache: Path, limit: float = 600.0) -> str:
+def run(tape: Tape, limit: float = 600.0) -> str:
     """Replay on a fresh virtual loop; `limit` virtual seconds is a hang."""
     loop = VirtualLoop()
 
     async def bounded() -> str:
         async with asyncio.timeout(limit):
-            return await replay(tape, cache)
+            return await replay(tape)
 
     try:
         with timing.using(loop.time):
@@ -500,4 +498,4 @@ def load(path: Path) -> Tape:
     return parse(path.read_text(encoding="utf-8"), path.stem)
 
 
-Runner = Callable[[Tape, Path], str]
+Runner = Callable[[Tape], str]

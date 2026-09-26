@@ -12,9 +12,6 @@ scale from later — it is what the code currently *is*:
 - `sessions.py` keeps conversations in this process's memory, so a conversation's
   link only means anything to the machine that minted it. A second instance
   would 404 half the links.
-- `greeting.py` caches the opening line's PCM per process, and `server.py`'s
-  lifespan pays a 3.1 s synthesis cold start to fill it. A machine that stops
-  charges that to whoever arrives next.
 - The transport is a long-lived WebSocket carrying PCM in both directions, so
   nothing serverless can host it.
 
@@ -67,7 +64,7 @@ fly logs
 ```
 
 The deploy does not cut traffic over until `/healthz` returns 200, which it does
-only once the greeting is synthesised and the reasoning connection is open.
+only once the VAD model is loaded and the reasoning connections are open.
 
 ## Checking it
 

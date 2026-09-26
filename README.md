@@ -119,7 +119,7 @@ src/voice_agent/
   initiative.py, decline.py  speaking into a silence; keeping the decline word unspoken
   heard.py                what the user actually heard of an interrupted reply; where to resume
   echo.py                 whether words heard over the agent are its own voice coming back
-  greeting.py             the opening line, synthesized once and cached
+  greeting.py             the opening line, spoken like any other reply
   record.py, trace.py     the conversation as Markdown; the span tree as JSONL
   limits.py, sessions.py  the public caps; the in-memory conversation store
   llm/ stt/ tts/          one protocol each, the vendor adapters, and a registry
@@ -141,8 +141,7 @@ scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records i
 ## Deployment
 
 One always-on machine, one region, one volume on Fly.io: conversations live in
-process memory and the greeting is cached per process, so a second instance
-would break links. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook and
+process memory, so a second instance would break links. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook and
 `fly.toml` the configuration. The public instance turns on the caps in
 `limits.py` and records conversations (never audio); the span-tree trace is off
 there.
