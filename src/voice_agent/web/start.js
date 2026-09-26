@@ -14,7 +14,6 @@ export function servedFacts() {
 
 const LABELS = {
   stt: { assemblyai: "AssemblyAI", elevenlabs: "ElevenLabs Scribe" },
-  tts: { elevenlabs: "ElevenLabs" },
 };
 // Display names for the provider a model belongs to. Not a claim about what
 // runs: the options themselves, and their titles, come from the server.
@@ -30,11 +29,10 @@ function picked(group) {
   return startStack.querySelector(`input[name="${group}"]:checked`)?.value ?? "";
 }
 
-// The chosen role, engine and ears as a query string. The voice is never
-// sent: it is one of a kind.
+// The chosen role, engine, ears and voice model as a query string.
 export function stackQuery() {
   const stack = new URLSearchParams();
-  for (const group of ["role", "llm", "stt"]) {
+  for (const group of ["role", "llm", "stt", "tts"]) {
     const value = picked(group);
     if (value) stack.set(group, value);
   }
@@ -56,7 +54,8 @@ function notice(html) {
 }
 
 // One radio group of what the server offered, default first. A single option
-// is only drawn when asked (the voice); otherwise there is nothing to choose.
+// is only drawn when asked (the voice, so the page says what speaks); otherwise
+// there is nothing to choose.
 // Options sit in a grid of equal cells, so every group lines up the same way
 // at every width.
 function choose(group, title, options, describe, { single = false, byProvider = false } = {}) {
@@ -89,9 +88,10 @@ export function showStart(known) {
   choose("llm", "Model", known.choices?.llm ?? [], (o) => escape(o.title), { byProvider: true });
   choose("stt", "Ears", known.choices?.stt ?? [],
     (o) => `${label("stt", o.name)} <small>${o.languages.length} languages</small>`);
+  // Like the models, the voice options are titled by the server.
   if (known.voice) {
-    choose("tts", "Voice", [{ name: known.voice.provider, voice: known.voice.voice, default: true }],
-      (o) => `${label("tts", o.name)} <small>${o.voice.slice(0, 10)}</small>`, { single: true });
+    choose("tts", "Voice", known.choices?.tts ?? [],
+      (o) => `${escape(o.title)} <small>${escape(o.hint)}</small>`, { single: true });
   }
 
   if (!known.ears) notice("This agent has <strong>no microphone</strong> — typing only.");

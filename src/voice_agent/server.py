@@ -54,8 +54,9 @@ from voice_agent.sessions import SessionStore
 from voice_agent.stt import STT
 from voice_agent.stt.registry import NO_EARS
 from voice_agent.thinker import THINKER_MODEL, system_prompt
-from voice_agent.tts import TTS, create_tts
+from voice_agent.tts import TTS
 from voice_agent.tts.base import SAMPLE_RATE
+from voice_agent.tts.registry import NO_VOICE
 
 logger = logging.getLogger(__name__)
 
@@ -185,7 +186,6 @@ class Agent:
     sessions: SessionStore
     live: Live
     mints: MintLimit
-    speaker: TTS | None
     backends: Backends
     openings: dict[str, str]
     """The first line, per role: the plain greeting under `roles.NO_ROLE`, and
@@ -199,7 +199,15 @@ class Agent:
     ready: bool = False
     """The engines are connected; `/healthz` waits on it."""
 
-    def facts(self, listener: STT | None, engine: str, ears: str, role: str) -> dict[str, object]:
+    def facts(
+        self,
+        listener: STT | None,
+        speaker: TTS | None,
+        engine: str,
+        ears: str,
+        role: str,
+        voice: str,
+    ) -> dict[str, object]:
         """What this agent is, for the page before the socket and for `ready`
         after it — one function, so the two cannot disagree."""
         card = self.roles.get(role)
@@ -209,11 +217,13 @@ class Agent:
             ),
             "voice": (
                 {
-                    "provider": self.speaker.provider,
-                    "voice": self.speaker.voice,
+                    "provider": speaker.provider,
+                    "voice": speaker.voice,
+                    "model": speaker.model,
+                    "choice": voice,
                     "sample_rate": SAMPLE_RATE,
                 }
-                if self.speaker
+                if speaker
                 else None
             ),
             "ears": (
@@ -226,7 +236,7 @@ class Agent:
                 else None
             ),
             "recording": self.record_dir is not None,
-            "choices": self.backends.choices(engine, ears, role),
+            "choices": self.backends.choices(engine, ears, role, voice),
         }
 
 
@@ -258,9 +268,6 @@ def create_app(
     else:
         inner = thinker_engine(cards) if llm is None else None
     plain = greeting if greeting is not None else settings.greeting
-    speaker = (
-        tts if tts is not None or not voice else create_tts(settings.voice_provider, settings.voice)
-    )
     backends = Backends(
         settings.ears_provider,
         silence=settings.vad_silence,
@@ -269,13 +276,18 @@ def create_app(
         default_role=preselected,
         engine=llm,
         ears=stt,
+        voice_provider=settings.voice_provider if voice else NO_VOICE,
+        voice=settings.voice,
+        speaker=tts,
     )
+    # The default voice is built now: a missing synthesis key stops the server
+    # here, as it did before voices were a choice, not every page load after.
+    backends.speaker(backends.default_voice)
     agent = Agent(
         settings=settings,
         sessions=store if store is not None else SessionStore(settings.max_stored),
         live=Live(settings.max_live),
         mints=MintLimit(settings.mints_per_ip),
-        speaker=speaker,
         backends=backends,
         openings={
             roles.NO_ROLE: (DEFAULT_GREETING if plain is None else plain).strip(),
@@ -337,7 +349,15 @@ def create_app(
             return HTMLResponse("<h1>404 — no such conversation</h1>", status_code=404)
         ears_default = backends.default_ears
         listener = backends.ears(ears_default) if ears_default != NO_EARS else None
-        known = agent.facts(listener, backends.default_engine, ears_default, backends.default_role)
+        speaker = backends.speaker(backends.default_voice)
+        known = agent.facts(
+            listener,
+            speaker,
+            backends.default_engine,
+            ears_default,
+            backends.default_role,
+            backends.default_voice,
+        )
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
 
     @app.websocket("/ws/{key}")
@@ -373,9 +393,12 @@ async def serve(agent: Agent, websocket: WebSocket, key: str) -> None:
 
 
 async def converse(agent: Agent, websocket: WebSocket, conversation: Conversation) -> None:
-    engine_name, ears_name, role_name = agent.backends.choose(conversation, websocket.query_params)
+    engine_name, ears_name, role_name, voice_name = agent.backends.choose(
+        conversation, websocket.query_params
+    )
     engine = agent.backends.engine(engine_name)
     listener = agent.backends.ears(ears_name)
+    speaker = agent.backends.speaker(voice_name)
     role = agent.roles.get(role_name)
     # One line per connect naming what it runs on, so the Fly logs can say
     # which settings a misbehaving conversation had without its record.
@@ -387,7 +410,9 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         engine.provider,
         engine.model,
         ears_name if listener is not None else "deaf",
-        f"{agent.speaker.provider}/{agent.speaker.voice}" if agent.speaker else "silent",
+        f"{speaker.provider}/{speaker.model}/{speaker.voice} ({voice_name})"
+        if speaker
+        else "silent",
     )
     opening = agent.openings[role_name if role is not None else roles.NO_ROLE]
     # Per conversation, because it states what these ears can hear; stable for
@@ -405,7 +430,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         channel,
         conversation,
         engine,
-        agent.speaker,
+        speaker,
         system_prompt,
         listener,
         agent.ladder,
@@ -422,14 +447,14 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             # The menu option, so the record says which of the six ran: three
             # DeepSeek tiers share a provider and a model.
             "choice": engine_name,
-            **agent.facts(listener, engine_name, ears_name, role_name),
+            **agent.facts(listener, speaker, engine_name, ears_name, role_name, voice_name),
             # From this connection: the page counts down the last minute.
             "budget_seconds": agent.settings.session_budget,
             "history": serialize(conversation.messages),
             "ended": conversation.ended,
         }
     )
-    session.voiced(await greet(channel, conversation, agent.speaker, opening))
+    session.voiced(await greet(channel, conversation, speaker, opening))
     # After the greeting, so the clock measures the silence after the agent's voice.
     session.start()
     budget_seconds = agent.settings.session_budget

@@ -14,6 +14,7 @@ from websockets.http11 import Response
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.streams import closing
 from voice_agent.tts import create_tts, elevenlabs_tts
+from voice_agent.tts import registry as tts_registry
 from voice_agent.tts.base import (
     SAMPLE_RATE,
     Alignment,
@@ -88,8 +89,36 @@ def test_none_is_silence_not_a_backend() -> None:
 def test_defaults_are_the_low_latency_ones(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
 
-    # Flash rather than the highest-quality model: this is a voice agent.
+    # The adapter's own fallback; the deployment default is `tts.registry.DEFAULT_CHOICE`.
     assert ElevenLabsTTS().model == "eleven_flash_v2_5"
+
+
+def test_the_registry_passes_the_model_through(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+
+    speaker = create_tts("elevenlabs", None, "eleven_multilingual_v2")
+
+    assert isinstance(speaker, ElevenLabsTTS)
+    assert "model_id=eleven_multilingual_v2" in speaker.url
+
+
+@pytest.mark.parametrize("model", sorted(tts_registry.DEPRECATED))
+def test_a_deprecated_model_is_refused(model: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+
+    with pytest.raises(ConfigError, match="deprecated"):
+        create_tts("elevenlabs", None, model)
+
+
+def test_no_offered_voice_model_is_deprecated() -> None:
+    """The vendor retires models; the menu must not offer one it has."""
+    assert not {option.model for option in tts_registry.MENU} & tts_registry.DEPRECATED
+    assert elevenlabs_tts.DEFAULT_MODEL not in tts_registry.DEPRECATED
+
+
+def test_the_default_voice_model_is_on_the_menu() -> None:
+    assert tts_registry.DEFAULT_CHOICE in tts_registry.BY_NAME
+    assert tts_registry.default_choice(tts_registry.MENU) == tts_registry.DEFAULT_CHOICE
 
 
 def test_voice_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:

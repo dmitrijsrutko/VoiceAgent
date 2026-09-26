@@ -76,9 +76,8 @@ one, so listing everything the API returns would reproduce the original bug in
 a new place."""
 
 DEFAULT_MODEL = "eleven_flash_v2_5"
-"""The low-latency model (~75 ms to first byte) rather than the highest-quality
-one. This is a voice agent: a reply that sounds slightly better but lands half
-a second later is the worse trade."""
+"""The adapter's own fallback, the low-latency model (~75 ms to first byte). What
+a conversation speaks with is chosen in `tts.registry.MENU`."""
 
 OUTPUT_FORMAT: Literal["pcm_24000"] = "pcm_24000"
 """Raw PCM at `tts.base.SAMPLE_RATE`. Asserted equal to it in the tests, since
@@ -155,7 +154,12 @@ class ElevenLabsTTS:
     async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         with trace.span(
             "tts",
-            {"gen_ai.system": self.provider, "voice": self.voice, "media_type": MEDIA_TYPE},
+            {
+                "gen_ai.system": self.provider,
+                "gen_ai.request.model": self.model,
+                "voice": self.voice,
+                "media_type": MEDIA_TYPE,
+            },
         ):
             said: list[str] = []
             chunks = 0

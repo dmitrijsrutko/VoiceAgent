@@ -8,7 +8,7 @@ its own adapter would undo that silently, and nothing downstream would notice.
 
 import pytest
 
-from tests.conftest import FakeLLM, FakeSTT
+from tests.conftest import FakeLLM, FakeSTT, FakeTTS
 from voice_agent import roles as roles_module
 from voice_agent.backends import Backends
 from voice_agent.conversation import Conversation
@@ -159,11 +159,11 @@ def test_an_option_that_cannot_be_run_is_not_offered(monkeypatch: pytest.MonkeyP
     pool = Backends("assemblyai")
     conversation = Conversation(id="t")
 
-    chosen, _, _ = pool.choose(conversation, {"llm": "opus-5-5"})
+    chosen, _, _, _ = pool.choose(conversation, {"llm": "opus-5-5"})
 
     assert chosen == "deepseek-max"
 
-    kept, _, _ = pool.choose(Conversation(id="u"), {"llm": "deepseek-low"})
+    kept, _, _, _ = pool.choose(Conversation(id="u"), {"llm": "deepseek-low"})
     assert kept == "deepseek-low"
 
 
@@ -217,8 +217,8 @@ def test_a_conversation_picks_its_role_and_keeps_it() -> None:
     backends = Backends("assemblyai", roles=(DEVIL,))
     conversation = Conversation(id="t")
 
-    _, _, first = backends.choose(conversation, {"role": "devils_advocate"})
-    _, _, again = backends.choose(conversation, {"role": "none"})
+    _, _, first, _ = backends.choose(conversation, {"role": "devils_advocate"})
+    _, _, again, _ = backends.choose(conversation, {"role": "none"})
 
     assert first == again == "devils_advocate"
 
@@ -226,7 +226,7 @@ def test_a_conversation_picks_its_role_and_keeps_it() -> None:
 def test_an_unknown_role_is_the_default_not_an_error() -> None:
     backends = Backends("assemblyai", roles=(DEVIL,), default_role="devils_advocate")
 
-    _, _, role = backends.choose(Conversation(id="t"), {"role": "nobody"})
+    _, _, role, _ = backends.choose(Conversation(id="t"), {"role": "nobody"})
 
     assert role == "devils_advocate"
 
@@ -246,3 +246,54 @@ def test_only_cards_are_offered_as_roles() -> None:
     assert [(o["name"], o["default"]) for o in offered] == [("devils_advocate", True)]
     assert offered[0]["title"] == DEVIL.name
     assert alone == []
+
+
+def voiced() -> Backends:
+    return Backends("assemblyai", voice_provider="elevenlabs")
+
+
+def test_the_voice_menu_offers_both_models_with_multilingual_by_default() -> None:
+    pool = voiced()
+    tts = pool.choices("x", "none", voice=pool.default_voice)["tts"]
+
+    assert [o["model"] for o in tts] == ["eleven_multilingual_v2", "eleven_flash_v2_5"]
+    assert [o["name"] for o in tts if o["default"]] == ["multilingual-v2"]
+
+
+def test_a_voice_model_is_picked_pinned_and_unknown_names_fall_back() -> None:
+    pool = voiced()
+    conversation = Conversation(id="v")
+
+    *_, first = pool.choose(conversation, {"tts": "flash-v2.5"})
+    *_, again = pool.choose(conversation, {"tts": "multilingual-v2"})
+    *_, unknown = pool.choose(Conversation(id="w"), {"tts": "eleven_turbo_v2_5"})
+
+    assert (first, again) == ("flash-v2.5", "flash-v2.5"), "a reconnect keeps its voice"
+    assert unknown == "multilingual-v2"
+
+
+def test_silent_offers_no_voice_and_builds_none() -> None:
+    pool = Backends("assemblyai")
+
+    *_, voice = pool.choose(Conversation(id="s"), {"tts": "flash-v2.5"})
+
+    assert pool.choices("x", "none")["tts"] == []
+    assert voice == "none" and pool.speaker(voice) is None
+
+
+def test_a_voice_is_built_once_per_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    pool = voiced()
+
+    multilingual, flash = pool.speaker("multilingual-v2"), pool.speaker("flash-v2.5")
+
+    assert multilingual is pool.speaker("multilingual-v2")
+    assert multilingual is not None and flash is not None
+    assert (multilingual.model, flash.model) == ("eleven_multilingual_v2", "eleven_flash_v2_5")
+
+
+def test_an_injected_speaker_serves_every_voice_name() -> None:
+    fake = FakeTTS()
+    pool = Backends("assemblyai", speaker=fake)
+
+    assert pool.speaker("flash-v2.5") is fake and pool.speaker("multilingual-v2") is fake

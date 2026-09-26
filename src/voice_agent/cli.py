@@ -146,7 +146,9 @@ def main() -> None:
     from voice_agent.server import create_app
 
     sex = {"female": "♀", "male": "♂", "neutral": "·"}[args.voice_gender]
-    voice = f"{args.tts} {sex}" if args.tts != "none" else "silent"
+    spoken = tts_registry.default_choice(tts_registry.offered(args.tts))
+    title = f" {tts_registry.BY_NAME[spoken].title}" if spoken else ""
+    voice = f"{args.tts}{title} {sex}" if args.tts != "none" else "silent"
     ears = args.stt if args.stt != "none" else "deaf"
     try:
         app = create_app(settings=settings)

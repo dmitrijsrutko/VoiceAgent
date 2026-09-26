@@ -14,6 +14,72 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 27 — The voice is a choice: Multilingual v2 beside Flash v2.5
+
+The agent spoke only through `eleven_flash_v2_5`, which was chosen for time to first
+byte. This chapter aims at how the voice *sounds*. The start screen offers a second
+ElevenLabs model, **Multilingual v2** (the vendor's "most advanced, emotionally-aware"
+model), and makes it the default. Next chapter adds and evaluates Eleven v3
+Conversational.
+
+**What changed**
+- `tts/registry.py`: `MENU` has two `Option`s (name, provider, model, title, hint):
+  `multilingual-v2` (default) and `flash-v2.5`. `DEPRECATED` lists the models the
+  vendor has retired, and `create_tts` refuses them.
+- `backends.py`: the voice is picked like the ears. `?tts=` is pinned on
+  `Conversation.voice` at first connect, an unknown name falls back to the default,
+  and one `ElevenLabsTTS` is built lazily per option and shared.
+- `server.py`: `Agent.speaker` is gone, and each conversation resolves its own. The
+  `voice` facts carry `model` and `choice`, and the per-connect log line names both.
+- `record.py` / `app.js`: the header and the page's meta line name the voice model.
+- `start.js`: Voice is a real picker built from `choices.tts`, titled by the server,
+  and `stackQuery` sends `tts`.
+- `TTS` protocol: gains a `model` property.
+
+**Design decisions**
+- **Same adapter, same socket.** Multilingual v2 runs on `stream-input` with the same
+  `pcm_24000`, chunk schedule and `alignment`, so word marks, barge-in and echo are
+  untouched. Only the URL's `model_id` differs.
+- **An option maps to a provider and a model, not just a model id.** v3 Conversational
+  is on the Text-to-Dialogue socket, so it will be a second adapter behind `TTS`.
+- **Same `chunk_length_schedule` and no `voice_settings`.** The model is the only
+  variable. Tuning either comes later.
+- **Multilingual v2 is the default by the user's decision**, knowing it is slower and
+  bills about 2× Flash per character. It hears 29 languages, not 32 (no Hungarian,
+  Norwegian or Vietnamese). The prompt's languages come from the ears, so nothing
+  depends on it.
+- **No deprecated models** (checked on elevenlabs.io/docs/overview/models, 2026-09-26).
+  Turbo v2/v2.5 are superseded by Flash, and the v1 models were removed 2026-07-09. A
+  test keeps them off the menu.
+
+**Latency impact** — measured with 10 live syntheses, 5 replies per model, interleaved,
+fed in 4-character fragments at 760 chars/s. This is first audio from the first
+fragment, including connect:
+
+| Model | p50 | min–max |
+| --- | --- | --- |
+| Flash v2.5 | 378 ms | 362–417 |
+| Multilingual v2 | 857 ms | 800–935 |
+
+The default costs **about +480 ms** on every reply, and on its own it takes the §7
+target (TTS ≤ 150 ms) past the whole 800 ms budget. Audio length was the same for both
+(±0.1 s on 4 of 5 replies).
+
+**Deliberately not done** — v3 Conversational (next chapter), per-model tuning, a
+voice-id picker, and a CLI/env default (the default is a constant, like the LLM's).
+
+**Verification** — `uv run verify`: 715 tests pass, and the tapes did not move. The
+live A/B above produced 10 non-silent 24 kHz clips, and both model ids were accepted by
+the socket. In headless Chrome the start screen shows Voice with two options and
+Multilingual v2 checked. One typed conversation per model on a local server, over
+`?tts=`, voiced its greeting and its reply with no late audio. The record headers named
+`eleven_multilingual_v2 (multilingual-v2)` and `eleven_flash_v2_5 (flash-v2.5)`. Not
+observed: the per-connect log line (local logging is off), a spoken barge-in, and a
+human listening comparison.
+
+**Fixes**
+- A missing `ELEVENLABS_API_KEY` served, then failed every page with a 500, once voices became lazy. `create_app` builds the default voice at startup again, so the server stops with the key's name.
+
 ## Refactor — The greeting is spoken like any other reply
 
 The opening line was synthesised at startup, cached as raw PCM under `.cache/`

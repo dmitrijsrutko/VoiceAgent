@@ -65,6 +65,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **24 — Which option ran.** A session record names the menu option (`deepseek-flash (deepseek-max)`), not only the provider and model. Three DeepSeek tiers share both, so the record could not say which one a slow session used.
 - **25 — Thirty minutes.** The deployed instance allows a 30-minute conversation instead of 6, which is also the spend ceiling for one address since every turn is charged for the whole history.
 - **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and ElevenLabs Scribe; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
+- **27 — The voice is a choice.** The start screen offers two ElevenLabs voice models on the same streaming socket: Multilingual v2 (default, most expressive) and Flash v2.5 (fastest). The pick travels as `?tts=` and is pinned per conversation; deprecated models (Turbo, v1) are refused. Measured first audio: 857 ms against 378 ms.
 
 ## Requirements
 
@@ -76,8 +77,8 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 ```bash
 uv sync                                     # install, including dev tools
 cp .env.example .env                        # fill in only the keys you need
-uv run voice-agent                          # V4.1 Flash max + Scribe + ElevenLabs, on :8000
-                                            # the start screen picks the model per conversation
+uv run voice-agent                          # V4.1 Flash max + Scribe + Multilingual v2, on :8000
+                                            # the start screen picks model, ears and voice per conversation
 uv run voice-agent --stt assemblyai         # AssemblyAI pre-selected instead of Scribe
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first
@@ -152,15 +153,18 @@ Measured so far, the round trip is dominated by the recognizer (about 1.0 s from
 the end of speech to a commit on AssemblyAI, 1.8–1.9 s on Scribe) and time to
 first token (about 0.5–0.9 s). Likely next, in order:
 
-1. **Our own endpointing**: the voice detector's pause plus a sentence that reads
+1. **Eleven v3 Conversational** as a third voice, evaluated against these two.
+   It is on the Text-to-Dialogue socket, not `stream-input`, so it is a second
+   adapter behind the same `TTS` protocol.
+2. **Our own endpointing**: the voice detector's pause plus a sentence that reads
    finished ends the turn (AssemblyAI's `ForceEndpoint`), and speculation starts
    on the same signal. Aimed at the recognizer's ~1 s.
-2. **Speaking a thought**: the inner voice cuts in at a pause, then speaks over
+3. **Speaking a thought**: the inner voice cuts in at a pause, then speaks over
    the user, with an assertiveness dial per role.
-3. **Leading**: the role has an agenda and steers toward it.
-4. **A golden conversation suite** from live sessions, on the tapes' format.
-5. **Cost accounting and small-model routing.**
-6. **Telephony transport.**
+4. **Leading**: the role has an agenda and steers toward it.
+5. **A golden conversation suite** from live sessions, on the tapes' format.
+6. **Cost accounting and small-model routing.**
+7. **Telephony transport.**
 
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version.
 

@@ -96,6 +96,19 @@ def test_the_header_names_role_model_ears_and_voice(tmp_path: Path) -> None:
     assert "ears deaf" not in header and "voice silent" not in header
 
 
+def test_the_header_names_the_voice_model_and_option(tmp_path: Path) -> None:
+    """Two voice options share a provider and a voice id; only the model and
+    the option say which one a conversation heard."""
+    client = app_for(tmp_path, SessionStore())
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?tts=flash-v2.5") as socket:
+        receive(socket)
+
+    header = recorded(tmp_path).splitlines()[1]
+    assert "voice fake-voice fake-voice-model (flash-v2.5) fake-voice-1" in header, header
+
+
 def test_the_header_says_so_when_a_setting_is_absent(tmp_path: Path) -> None:
     """Absent is written down, not left out: a missing field cannot tell
     "switched off" from "never logged"."""

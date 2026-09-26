@@ -14,7 +14,7 @@ from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
 from voice_agent import prompts
 from voice_agent import turn as turn_module
 from voice_agent.conversation import Message
-from voice_agent.errors import ProviderError
+from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.llm.base import Usage
 from voice_agent.server import create_app
 from voice_agent.session import is_exit_command
@@ -231,6 +231,17 @@ def test_non_exit_commands(text: str) -> None:
     assert not is_exit_command(text)
 
 
+def test_a_missing_voice_key_stops_the_server_not_the_page(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Voices are built lazily per option, but the default is built at startup:
+    otherwise a deployment without the key serves, then fails every page."""
+    monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
+
+    with pytest.raises(ConfigError, match="ELEVENLABS_API_KEY"):
+        create_app(llm=FakeLLM(), stt=FakeSTT(), ears=False)
+
+
 def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tts: FakeTTS) -> None:
     key = start(client)
 
@@ -239,6 +250,8 @@ def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tt
         assert ready["voice"] == {
             "provider": "fake-voice",
             "voice": "fake-voice-1",
+            "model": "fake-voice-model",
+            "choice": "multilingual-v2",
             "sample_rate": 24000,
         }
 

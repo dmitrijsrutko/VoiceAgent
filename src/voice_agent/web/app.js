@@ -245,7 +245,9 @@ const handlers = {
     // Once per socket: which browser this is, then anything that failed before it opened.
     ws.send(clientInfo(clientFacts(navigator.userAgent)));
     while (unsent.length) ws.send(unsent.shift());
-    const voice = msg.voice ? `${msg.voice.provider} ${msg.voice.voice.slice(0, 10)}` : "silent";
+    const voice = msg.voice
+      ? `${msg.voice.provider} ${msg.voice.model} ${msg.voice.voice.slice(0, 10)}`
+      : "silent";
     const langs = msg.ears?.languages ?? [];
     const heard = langs.length ? ` · ${langs.length} languages` : "";
     const ears = msg.ears ? `🎤 ${msg.ears.provider} ${msg.ears.sample_rate / 1000}kHz${heard}` : "🎤 deaf";

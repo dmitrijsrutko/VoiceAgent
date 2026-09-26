@@ -139,6 +139,7 @@ class FakeTTS:
     def __init__(self, fail: bool = False, fail_after: int | None = None) -> None:
         self.provider = "fake-voice"
         self.voice = "fake-voice-1"
+        self.model = "fake-voice-model"
         self.fail = fail
         self.fail_after = fail_after
         """Raise after this many chunks: a synthesis that dies mid-reply."""

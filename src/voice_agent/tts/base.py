@@ -97,6 +97,9 @@ class TTS(Protocol):
     @property
     def voice(self) -> str: ...
 
+    @property
+    def model(self) -> str: ...
+
     def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         """Raises `ProviderError` — possibly after some chunks have already
         been yielded, which a consumer that has started playing must handle."""

@@ -194,7 +194,7 @@ class PacedTTS:
     """Speaks each fragment as it arrives, at a steady speaking rate, timed
     per character like the real voice."""
 
-    provider, voice = "paced", "paced-1"
+    provider, voice, model = "paced", "paced-1", "paced-model"
 
     async def stream(self, text: AsyncIterator[str]) -> AsyncIterator[AudioChunk]:
         first = True

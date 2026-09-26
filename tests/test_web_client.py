@@ -473,7 +473,9 @@ def test_the_chosen_stack_travels_with_the_socket() -> None:
 
     assert connect, "connect() is gone"
     assert "stackQuery()" in connect.group(0)
-    assert 'for (const group of ["role", "llm", "stt"])' in start, "the stack and role must be sent"
+    assert 'for (const group of ["role", "llm", "stt", "tts"])' in start, (
+        "the stack, role and voice model must be sent"
+    )
 
 
 def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
@@ -489,6 +491,10 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
     labels = re.search(r"const LABELS = \{(.*?)\n\};", start, re.DOTALL)
     assert labels, "the label map is gone"
     assert "llm" not in labels.group(1), "the page is naming models itself again"
+    assert "tts" not in labels.group(1), "the page is naming voice models itself again"
+    assert 'choose("tts", "Voice", known.choices?.tts' in start, (
+        "the voice options are not the server's"
+    )
 
 
 def test_the_start_screen_counts_languages_rather_than_listing_them() -> None:
@@ -506,17 +512,14 @@ def test_the_start_screen_warns_about_no_particular_language() -> None:
     assert "russian" not in source("app.js").lower()
 
 
-def test_the_voice_is_a_group_of_one_that_is_never_sent() -> None:
-    """There is one voice. It is drawn like the other parts of the stack, with
-    one option, and the socket never carries a choice of it."""
+def test_the_voice_model_is_a_choice_drawn_even_alone() -> None:
+    """Chapter 27 made the voice model a choice sent on the socket like the
+    others. A single option is still drawn, so the page says what speaks."""
     start = without_comments(source("start.js"))
     choosing = re.findall(r'choose\("(\w+)"', start)
 
     assert choosing == ["role", "llm", "stt", "tts"], f"the pickers changed: {choosing}"
-    assert "{ single: true }" in start, "the voice is no longer drawn as a group of one"
-    assert 'for (const group of ["role", "llm", "stt"])' in start, (
-        "the socket now carries the voice"
-    )
+    assert "{ single: true }" in start, "a lone voice option is no longer drawn"
 
 
 def test_each_picker_draws_its_default_first() -> None:
