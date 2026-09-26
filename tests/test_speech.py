@@ -7,9 +7,11 @@ from typing import Any
 import pytest
 
 from tests.conftest import timed
+from voice_agent import timing
 from voice_agent.channel import Channel
+from voice_agent.llm.base import Usage
 from voice_agent.tts.base import AudioChunk
-from voice_agent.turn import Speech
+from voice_agent.turn import Speech, reply_report
 
 
 class Socket:
@@ -76,3 +78,15 @@ async def test_a_synthesis_still_stalled_when_its_turn_ends_is_logged(
 
     assert "synthesis unfinished when its turn ended" in caplog.text
     assert "'Dost'" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "reason, shown",
+    [("stop", None), ("end_turn", None), (None, None), ("length", "length")],
+)
+def test_the_record_names_only_an_unusual_end(reason: str | None, shown: str | None) -> None:
+    """A reply cut by `length` or a filter still has text; the record says so,
+    and stays quiet about the normal end every other turn has."""
+    report = reply_report("Yes.", 1, 10, timing.now(), Usage(finish_reason=reason))
+
+    assert report["finish"] == shown

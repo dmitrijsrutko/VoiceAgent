@@ -134,6 +134,13 @@ def test_a_billed_reply_with_no_text_is_refused() -> None:
     )
 
 
+def test_an_unknown_end_reason_adds_no_empty_brackets() -> None:
+    with pytest.raises(ProviderError) as raised:
+        refuse_silent_reply("deepseek", "deepseek-flash", "max", False, Usage(output_tokens=310))
+
+    assert str(raised.value).endswith("310 output tokens")
+
+
 @pytest.mark.parametrize(
     "wrote, usage",
     [(True, Usage(output_tokens=444)), (False, Usage()), (False, None)],
@@ -231,7 +238,7 @@ class FakeAnthropicStream:
         return texts()
 
     async def get_final_message(self) -> SimpleNamespace:
-        return SimpleNamespace(usage=self._usage)
+        return SimpleNamespace(usage=self._usage, stop_reason="end_turn")
 
 
 async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> None:
@@ -251,7 +258,9 @@ async def test_an_anthropic_reply_counts_cache_reads_and_writes_as_prompt() -> N
     text = [f async for f in AnthropicLLM(client=client).stream("s", CONVERSATION, usage)]  # type: ignore[arg-type]
 
     assert text == ["Hi", " there"]
-    assert usage == Usage(prompt_tokens=1050, cached_tokens=1000, output_tokens=7)
+    assert usage == Usage(
+        prompt_tokens=1050, cached_tokens=1000, output_tokens=7, finish_reason="end_turn"
+    )
 
 
 async def test_anthropic_caches_the_conversation_not_only_the_system_prompt() -> None:

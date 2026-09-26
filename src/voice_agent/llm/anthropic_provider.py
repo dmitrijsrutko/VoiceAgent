@@ -153,7 +153,9 @@ class AnthropicLLM:
                     wrote = True
                     yield text
                 if usage is not None:
-                    final = (await stream.get_final_message()).usage
+                    message = await stream.get_final_message()
+                    usage.finish_reason = message.stop_reason
+                    final = message.usage
                     cached = final.cache_read_input_tokens or 0
                     written = final.cache_creation_input_tokens or 0
                     # Anthropic's `input_tokens` excludes both cache reads and

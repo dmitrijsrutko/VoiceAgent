@@ -174,6 +174,10 @@ async def run_turn(
             await speech.cancel()
 
 
+NORMAL_ENDS = frozenset({None, "stop", "end_turn"})
+"""The reasons a reply ends when nothing went wrong: DeepSeek's and Anthropic's."""
+
+
 def reply_report(
     written: str, fragments: int, ttft_ms: int, generation_started: float, usage: Usage
 ) -> dict[str, object]:
@@ -198,6 +202,9 @@ def reply_report(
         # accept then a long wait = the provider queueing.
         "accepted_ms": usage.accepted_ms,
         "attempts": usage.attempts,
+        # Only an unusual end: a reply cut by `length` or a filter still has
+        # text, and would otherwise read as a whole answer.
+        "finish": None if usage.finish_reason in NORMAL_ENDS else usage.finish_reason,
     }
 
 

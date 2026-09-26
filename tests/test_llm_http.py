@@ -324,6 +324,43 @@ async def test_a_billed_reply_with_no_text_fails_the_turn() -> None:
     assert "at effort max" in str(raised.value)
 
 
+async def test_an_empty_reply_says_why_the_stream_ended() -> None:
+    """Seen live: three empty replies in 46 s, with nothing to tell a capacity
+    failure from a filter. The end reason and the reasoning length say which."""
+    body = sse(
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": None,
+                             "delta": {"reasoning_content": "Let me think."}}]}),
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": "insufficient_system_resource",
+                             "delta": {"reasoning_content": " More."}}]}),
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [], "usage": {"prompt_tokens": 3234, "completion_tokens": 310,
+                                         "total_tokens": 3544}}),
+        (None, "[DONE]"),
+    )  # fmt: skip
+    async with Provider(openai_reply=body) as provider:
+        with pytest.raises(ProviderError) as raised:
+            await reply(openai_compatible(provider.port, effort="max"))
+
+    assert "(finish_reason insufficient_system_resource, 19 reasoning chars)" in str(raised.value)
+
+
+async def test_a_normal_reply_records_its_end_and_its_reasoning() -> None:
+    body = sse(
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": None,
+                             "delta": {"reasoning_content": "Easy."}}]}),
+        (None, {"id": "c", "object": "chat.completion.chunk", "created": 0, "model": "m",
+                "choices": [{"index": 0, "finish_reason": "stop", "delta": {"content": "Yes."}}]}),
+        (None, "[DONE]"),
+    )  # fmt: skip
+    async with Provider(openai_reply=body) as provider:
+        text, usage = await reply(openai_compatible(provider.port))
+
+    assert (text, usage.finish_reason, usage.reasoning_chars) == ("Yes.", "stop", 5)
+
+
 async def test_a_chain_of_thought_is_never_spoken() -> None:
     """Thinking mode streams its reasoning as `reasoning_content`, beside the
     `content` that is the reply. Only `content` may reach the voice."""

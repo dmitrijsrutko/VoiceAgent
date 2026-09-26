@@ -135,7 +135,12 @@ class OpenAICompatibleLLM:
                 # its reasoning as `reasoning_content` beside it, and that is not
                 # something to say out loud — so a turn whose whole budget went
                 # on reasoning leaves this loop having yielded nothing at all.
-                delta = (choices[0].get("delta") or {}).get("content") if choices else None
+                first = choices[0] if choices else {}
+                delta = (first.get("delta") or {}).get("content")
+                if usage is not None:
+                    usage.finish_reason = first.get("finish_reason") or usage.finish_reason
+                    thought = (first.get("delta") or {}).get("reasoning_content")
+                    usage.reasoning_chars += len(thought) if isinstance(thought, str) else 0
                 if delta:
                     wrote = True
                     yield delta

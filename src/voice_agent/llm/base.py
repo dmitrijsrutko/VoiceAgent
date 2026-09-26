@@ -69,6 +69,13 @@ class Usage:
     Opus 5.5 does not — one live session accepted at 1405 ms and produced its
     first token at 3852 ms, every turn, a 2.4 s gap that reading this field as
     "the two are the same" would have hidden."""
+    finish_reason: str | None = None
+    """Why the provider ended the stream, as it said it: `stop`, `length`,
+    `content_filter`, `insufficient_system_resource`, `aborted` (DeepSeek) or a
+    `stop_reason` (Anthropic). None when it said nothing."""
+    reasoning_chars: int = 0
+    """Characters of chain of thought streamed beside the reply, never spoken.
+    Zero for a provider that does not stream its reasoning."""
     attempts: int = 0
     """HTTP requests the call took. More than one means the SDK retried after a
     refusal (429, 5xx) or a dropped connection, with a backoff in between. Zero
@@ -91,9 +98,15 @@ def refuse_silent_reply(
     if wrote or usage is None or not usage.output_tokens:
         return
     at = f" at effort {effort}" if effort is not None else ""
+    # Why the stream ended is what tells a provider's capacity failure from a
+    # filter or a model that only thought; without it the cause is a guess.
+    why = [f"finish_reason {usage.finish_reason}"] if usage.finish_reason else []
+    if usage.reasoning_chars:
+        why.append(f"{usage.reasoning_chars} reasoning chars")
     raise ProviderError(
         f"{provider} sent no text for {model}{at} "
         f"after reporting {usage.output_tokens} output tokens"
+        + (f" ({', '.join(why)})" if why else "")
     )
 
 

@@ -53,6 +53,8 @@ class Traced:
                     "accepted_ms": counted.accepted_ms,
                     "connect_ms": counted.connect_ms,
                     "attempts": counted.attempts,
+                    "finish_reason": counted.finish_reason,
+                    "reasoning_chars": counted.reasoning_chars,
                 },
             )
 

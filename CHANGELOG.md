@@ -79,6 +79,7 @@ human listening comparison.
 
 **Fixes**
 - A missing `ELEVENLABS_API_KEY` served, then failed every page with a 500, once voices became lazy. `create_app` builds the default voice at startup again, so the server stops with the key's name.
+- DeepSeek billed tokens and sent no text three times in 46 s (1136, 310, 295 tokens) on deepseek-max, and the log could not say why. The stream's `finish_reason` and the length of its reasoning are now kept on `Usage`. The empty-reply error names both (`… (finish_reason insufficient_system_resource, 19 reasoning chars)`), and a turn's record line adds `finish <reason>` when a reply ends unusually. Checked live: a real deepseek-max reply reports `stop` with 533 reasoning chars. No retry yet; it waits for real end reasons.
 
 ## Refactor — The greeting is spoken like any other reply
 
