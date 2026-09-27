@@ -134,6 +134,10 @@ function endConversation(why) {
     mic.context.close();
     mic = null;
   }
+  // The reply outruns playback, so seconds of it can still be queued: silenced
+  // here, or the agent talks on after the conversation is over.
+  player.stop(() => {});
+  if (bubble) endBubble();
   status.textContent = why === "ended" ? "· ended" : "· disconnected";
   setEnabled(false);
   again = document.createElement("button");
@@ -281,7 +285,7 @@ const handlers = {
     // Pressing start was saying "ready"; not again after a refused microphone,
     // which would put a second prompt over the greeting.
     if (msg.ears && !micRefused) beginListening();
-    for (const m of msg.history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
+    replay(msg.history);
     if (msg.ended) {
       add("This conversation has ended.", "note");
       setEnabled(false);
@@ -512,6 +516,8 @@ async function awaitRuling() {
 endButton.onclick = () => {
   if (!sending()) return;
   endButton.disabled = true;
+  // On the click, not on `ended`, which waits for the server to cancel the turn.
+  player.stop(() => {});
   ws.send(endRound());
 };
 
@@ -577,8 +583,24 @@ begin.onclick = async () => {
   connect();
 };
 
-showStart(servedFacts());
+function replay(history) {
+  for (const m of history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
+}
+
+// An ended conversation opens as its record — transcript, then ruling — with
+// no socket: reviewing a shared link must not take a live slot or the microphone.
+const served = servedFacts();
 setEnabled(false);
+if (served.ended) {
+  start.remove();
+  judge = served.judge;
+  replay(served.history ?? []);
+  add("This conversation has ended.", "note");
+  endConversation("ended");
+  awaitRuling();
+} else {
+  showStart(served);
+}
 
 // Telemetry under every bubble, for whoever wants to see what each part cost.
 // Remembered per browser; storage may be unavailable, and that only forgets it.

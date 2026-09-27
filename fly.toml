@@ -79,7 +79,7 @@ primary_region = "iad"
   # address's spend — and `deepseek-max` reasons for thousands of tokens a turn.
   VOICE_AGENT_SESSION_BUDGET = "1800"
   VOICE_AGENT_MINTS_PER_IP = "10"
-  VOICE_AGENT_MAX_STORED = "500"
+  VOICE_AGENT_MAX_STORED = "1024"
 
 [[vm]]
   size = "shared-cpu-1x"

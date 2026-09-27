@@ -234,3 +234,22 @@ def test_rulings_wait_their_turn_under_the_live_cap(monkeypatch: pytest.MonkeyPa
         rulings = [ruling(client, key) for key in keys]
     assert [r["status"] for r in rulings] == ["done", "done"]
     assert Crowded.peak == 1
+
+
+def facts(client: TestClient, key: str) -> dict[str, Any]:
+    page = client.get(f"/c/{key}").text
+    block = page.split('<script id="facts" type="application/json">', 1)[1]
+    return dict(json.loads(block.split("</script>", 1)[0]))
+
+
+def test_an_ended_round_s_page_carries_its_record_without_a_socket(tmp_path: Path) -> None:
+    with TestClient(app("devils_advocate", sessions=tmp_path)) as client:
+        key = mint(client)
+        assert "ended" not in facts(client, key)  # live: the start screen, as before
+        with client.websocket_connect(f"/ws/{key}") as socket:
+            _ = socket.receive_json()
+            argue_and_end(socket)
+        known = facts(client, key)
+    assert known["ended"] is True
+    assert known["judge"] == {"name": "deepseek-high", "title": "DeepSeek V4.1 Flash"}
+    assert [m["content"] for m in known["history"] if m["role"] == "user"] == list(LINES)

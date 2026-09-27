@@ -74,6 +74,11 @@ FACTS_BLOCK = '<script id="facts" type="application/json">{}</script>'
 has a socket. Empty by default, so a page served any other way claims nothing."""
 
 
+def named_judge(name: str | None) -> dict[str, str] | None:
+    """The judge as the page names it, in `ready` and in an ended page's facts."""
+    return {"name": name, "title": judge.BY_NAME[name].title} if name is not None else None
+
+
 def with_facts(page: str, known: dict[str, object]) -> str:
     """Put the facts into the page. `<` is escaped so a `</script>` in any
     value cannot end the block early."""
@@ -388,9 +393,11 @@ def create_app(
     @app.get("/c/{key}")
     async def chat_page(key: str) -> HTMLResponse:
         """The page, with the facts already in it: the start screen says what
-        starting entails before there is a socket to ask over."""
+        starting entails before there is a socket to ask over. An ended
+        conversation carries its history instead, so its link can be reviewed
+        without a socket, a microphone or a live slot."""
         try:
-            agent.sessions.get(key)
+            conversation = agent.sessions.get(key)
         except SessionNotFoundError:
             return HTMLResponse("<h1>404 — no such conversation</h1>", status_code=404)
         ears_default = backends.default_ears
@@ -404,6 +411,12 @@ def create_app(
             backends.default_role,
             backends.default_voice,
         )
+        if conversation.ended:
+            known |= {
+                "ended": True,
+                "history": serialize(conversation.messages),
+                "judge": named_judge(conversation.judge),
+            }
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
 
     @app.get("/c/{key}/verdict")
@@ -520,11 +533,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             # What is left of it: the page counts down from here.
             "budget_seconds": left,
             # Named when this round will be judged: the page waits for a ruling.
-            "judge": (
-                {"name": judge_name, "title": judge.BY_NAME[judge_name].title}
-                if judge_name is not None
-                else None
-            ),
+            "judge": named_judge(judge_name),
             "history": serialize(conversation.messages),
             "ended": conversation.ended,
         }

@@ -86,6 +86,8 @@ the card's top in view. Not observed: a spoken round, or the 6:00 expiry.
 - A reload restarted the round's clock (and the deployment's 30 minutes); it now counts from the first connect.
 - A committed echo removed the user's last turn from the timeline; now only the commit it names.
 - An unjudged conversation's time-limit note lost "Start a new one below."; only a judged round replaces it.
+- Reopening an ended link showed the start screen, and the record appeared only after Start (mic + a live slot); the page now carries the transcript and verdict with no socket. `MAX_STORED` raised to 1024.
+- End left the queued reply playing after the conversation was over; ending now silences the player.
 
 ## Chapter 27 — The voice is a choice: Multilingual v2 beside Flash v2.5
 
