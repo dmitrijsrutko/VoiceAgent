@@ -27,12 +27,6 @@ class Ears:
 
 
 EARS: dict[str, Ears] = {
-    "assemblyai": Ears(
-        "ASSEMBLYAI_API_KEY",
-        assemblyai_stt.LANGUAGES,
-        assemblyai_stt.SAMPLE_RATE,
-        lambda silence: AssemblyAISTT(silence_seconds=silence),
-    ),
     "elevenlabs": Ears(
         # Scribe realtime is billed on the same key as synthesis.
         "ELEVENLABS_API_KEY",
@@ -40,7 +34,14 @@ EARS: dict[str, Ears] = {
         elevenlabs_stt.SAMPLE_RATE,
         lambda silence: ElevenLabsSTT(silence_seconds=silence),
     ),
+    "assemblyai": Ears(
+        "ASSEMBLYAI_API_KEY",
+        assemblyai_stt.LANGUAGES,
+        assemblyai_stt.SAMPLE_RATE,
+        lambda silence: AssemblyAISTT(silence_seconds=silence),
+    ),
 }
+"""In the order the start screen draws them, whichever is the default."""
 
 
 def available() -> tuple[str, ...]:

@@ -1004,9 +1004,9 @@ def test_the_page_offers_only_models_this_deployment_has_keys_for(
         "deepseek-high",
         "deepseek-max",
     ]
-    assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
+    assert [o["name"] for o in choices["stt"]] == ["elevenlabs", "assemblyai"]
     assert [o["name"] for o in choices["llm"] if o["default"]] == ["deepseek-max"]
-    assert [o["name"] for o in choices["stt"] if o["default"]] == ["elevenlabs"]
+    assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
 
     # The menu is fixed when the app is built, so this needs a second app.
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
@@ -1126,4 +1126,6 @@ def test_the_page_names_the_model_each_option_would_actually_run(
 
     assert advertised["haiku-4-5"] == ("Haiku 4.5", "claude-haiku-4-5")
     assert advertised["opus-5-5"] == ("Opus 5.5", "claude-opus-5-5")
-    assert advertised["deepseek-max"] == ("V4.1 Flash — max", "deepseek-flash")
+    assert advertised["deepseek-max"] == ("V4.1 Flash", "deepseek-flash")
+    hints = {o["name"]: o["hint"] for o in choices["llm"]}
+    assert hints["deepseek-max"] == "deepest thinking" and hints["opus-5-5"] == "smartest"

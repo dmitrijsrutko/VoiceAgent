@@ -16,7 +16,7 @@ from voice_agent.llm.anthropic_provider import (
     MODELS,
     AnthropicLLM,
 )
-from voice_agent.llm.base import LLM, Effort
+from voice_agent.llm.base import LLM, MAX_OUTPUT_TOKENS, Effort
 from voice_agent.llm.openai_compatible import DEEPSEEK, OPENAI, OpenAICompatibleLLM
 
 
@@ -35,8 +35,8 @@ class Engine:
     default_effort: Effort | None
     """What this engine asks for when a caller names no effort — which may be
     `None`, meaning it has no such parameter to set. Not the same as `low`."""
-    build: Callable[[str | None, Effort | None], LLM]
-    """`(model, effort)` already resolved by `create_llm`: an adapter is handed
+    build: Callable[[str | None, Effort | None, int], LLM]
+    """`(model, effort, max_tokens)` already resolved by `create_llm`: an adapter is handed
     an instruction, never a policy."""
 
 
@@ -46,16 +46,22 @@ ENGINES: dict[str, Engine] = {
         DEEPSEEK.default_model,
         DEEPSEEK.models,
         DEEPSEEK.default_effort,
-        lambda m, e: OpenAICompatibleLLM(DEEPSEEK, m, e),
+        lambda m, e, t: OpenAICompatibleLLM(DEEPSEEK, m, e, max_tokens=t),
     ),
     "openai": Engine(
         OPENAI.api_key_env,
         OPENAI.default_model,
         OPENAI.models,
         OPENAI.default_effort,
-        lambda m, e: OpenAICompatibleLLM(OPENAI, m, e),
+        lambda m, e, t: OpenAICompatibleLLM(OPENAI, m, e, max_tokens=t),
     ),
-    "anthropic": Engine(ANTHROPIC_API_KEY, DEFAULT_MODEL, MODELS, DEFAULT_EFFORT, AnthropicLLM),
+    "anthropic": Engine(
+        ANTHROPIC_API_KEY,
+        DEFAULT_MODEL,
+        MODELS,
+        DEFAULT_EFFORT,
+        lambda m, e, t: AnthropicLLM(m, e, max_tokens=t),
+    ),
 }
 
 
@@ -75,17 +81,24 @@ class Choice:
     """What to ask for, or `None` to take the engine's own default. An option
     that does not set an effort is not claiming the model has none — only the
     adapter can know that, and it asks."""
+    hint: str = ""
+    """The page's grey line under the title: what sets this option apart from
+    its neighbours (the tier, or how hard it thinks), like a voice's hint. The
+    tier as the vendor ranks it, not a measurement: Chapter 21 has the numbers."""
 
 
 CHOICES: tuple[Choice, ...] = (
-    Choice("haiku-4-5", "anthropic", "claude-haiku-4-5", "Haiku 4.5"),
-    Choice("sonnet-5", "anthropic", "claude-sonnet-5", "Sonnet 5"),
-    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Opus 5.5"),
-    Choice("deepseek-low", "deepseek", "deepseek-flash", "V4.1 Flash — low", "low"),
-    Choice("deepseek-high", "deepseek", "deepseek-flash", "V4.1 Flash — high", "high"),
-    Choice("deepseek-max", "deepseek", "deepseek-flash", "V4.1 Flash — max", "max"),
+    Choice("haiku-4-5", "anthropic", "claude-haiku-4-5", "Haiku 4.5", hint="fastest"),
+    Choice("sonnet-5", "anthropic", "claude-sonnet-5", "Sonnet 5", hint="balanced"),
+    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Opus 5.5", hint="smartest"),
+    Choice("deepseek-low", "deepseek", "deepseek-flash", "V4.1 Flash", "low", "fastest"),
+    Choice(
+        "deepseek-high", "deepseek", "deepseek-flash", "V4.1 Flash", "high", "balanced thinking"
+    ),
+    Choice("deepseek-max", "deepseek", "deepseek-flash", "V4.1 Flash", "max", "deepest thinking"),
 )
-"""The menu, fastest first, which is the order the page draws it.
+"""The menu, fastest first: `offered()` falls back to the first, which should be
+the cheapest. The page draws each vendor's row the other way, strongest first.
 
 One headline idea: the page offers models, not providers. Every Anthropic choice
 is a different model and sets no effort of its own, so all three run at the
@@ -159,7 +172,12 @@ def default_choice(have: Iterable[Choice]) -> str:
     return choices[0].name
 
 
-def create_llm(provider: str, model: str | None = None, effort: Effort | None = None) -> LLM:
+def create_llm(
+    provider: str,
+    model: str | None = None,
+    effort: Effort | None = None,
+    max_tokens: int = MAX_OUTPUT_TOKENS,
+) -> LLM:
     """Build one engine, resolving `None` to the engine's own defaults.
 
     This is the only place the policy lives: a caller says what it wants and
@@ -173,4 +191,4 @@ def create_llm(provider: str, model: str | None = None, effort: Effort | None = 
         known = ", ".join(sorted(ENGINES))
         raise ConfigError(f"unknown provider {provider!r}; expected one of: {known}") from None
     check_model(provider, model)
-    return engine.build(model, engine.default_effort if effort is None else effort)
+    return engine.build(model, engine.default_effort if effort is None else effort, max_tokens)

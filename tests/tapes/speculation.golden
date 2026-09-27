@@ -40,3 +40,10 @@ assistant: Hi.
 assistant: Riga.
      user: What about, and Estonia?
 assistant: Tallinn.
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 0.2 s): "Hi."
+[00:01] YOU (answered after 0.7 s · spoke 1.2 s · 6 words): "What is the capital of Latvia?"
+[00:04] ADVOCATE (spoke 0.4 s): "Riga."
+[00:07] YOU (answered after 2.9 s · spoke 1.5 s · 4 words): "What about, and Estonia?"
+[00:11] ADVOCATE (spoke 0.5 s): "Tallinn."

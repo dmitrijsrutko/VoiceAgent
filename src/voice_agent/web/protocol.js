@@ -8,6 +8,9 @@ export const listenStart = () => JSON.stringify({ type: "listen_start" });
 
 export const listenStop = () => JSON.stringify({ type: "listen_stop" });
 
+// The End button: the conversation ends as an exit word or the time limit ends it.
+export const endRound = () => JSON.stringify({ type: "end" });
+
 // How much of an interrupted reply was played, in milliseconds; null if none was
 // playing. Carries the interrupt's id, so a late answer cannot settle the next one.
 export const interrupted = (id, playedMs) =>

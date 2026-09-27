@@ -15,6 +15,8 @@ A card is Markdown with TOML front matter between `+++` lines:
     opening = "…"                 # the greeting; it asks for what to work on
     moves = ["challenge", …]      # a subset of MOVES
     assertiveness = "assertive"   # one of ASSERTIVENESS
+    minutes = 6                   # optional: the round's length, under any deployment cap
+    judged = true                 # optional: a judge rules on the round once it ends
     +++
     ## Job / ## Worth it / ## Not worth it / ## When speaking
 """
@@ -68,6 +70,11 @@ class Role:
     worth_it: str
     not_worth_it: str
     when_speaking: str
+    minutes: float | None = None
+    """How long a round with this role lasts. A conversation ends at the
+    shorter of this and the deployment's own budget."""
+    judged: bool = False
+    """Whether an ended conversation goes to the judge (`judge.py`)."""
 
 
 def parse(text: str, slug: str) -> Role:
@@ -100,6 +107,14 @@ def parse(text: str, slug: str) -> Role:
             f"role {slug!r}: assertiveness must be one of {list(ASSERTIVENESS)}, "
             f"not {front['assertiveness']!r}"
         )
+    minutes = front.get("minutes")
+    if minutes is not None and (
+        isinstance(minutes, bool) or not isinstance(minutes, int | float) or minutes <= 0
+    ):
+        raise ConfigError(f"role {slug!r}: 'minutes' must be a positive number")
+    judged = front.get("judged", False)
+    if not isinstance(judged, bool):
+        raise ConfigError(f"role {slug!r}: 'judged' must be true or false")
     return Role(
         slug=slug,
         name=front["name"].strip(),
@@ -111,6 +126,8 @@ def parse(text: str, slug: str) -> Role:
         worth_it=found["Worth it"],
         not_worth_it=found["Not worth it"],
         when_speaking=found["When speaking"],
+        minutes=None if minutes is None else float(minutes),
+        judged=judged,
     )
 
 

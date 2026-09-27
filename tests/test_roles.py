@@ -121,3 +121,26 @@ def test_a_placeholder_written_in_a_card_stays_literal(tmp_path: Path) -> None:
     prompt = system_prompt(roles.load("sneaky", tmp_path))
 
     assert "Say {moves} and {assertiveness}" in prompt
+
+
+def test_the_devil_s_advocate_plays_a_judged_six_minute_round() -> None:
+    card = roles.load("devils_advocate")
+    assert (card.minutes, card.judged) == (6.0, True)
+    partner = roles.load("thinking_partner")
+    assert (partner.minutes, partner.judged) == (None, False)
+
+
+@pytest.mark.parametrize(
+    ("line", "complaint"),
+    [
+        ("minutes = 0", "'minutes' must be a positive number"),
+        ('minutes = "six"', "'minutes' must be a positive number"),
+        ("minutes = true", "'minutes' must be a positive number"),
+        ('judged = "yes"', "'judged' must be true or false"),
+    ],
+)
+def test_a_bad_round_is_refused(tmp_path: Path, line: str, complaint: str) -> None:
+    patient = 'assertiveness = "patient"'
+    write(tmp_path, "coach", CARD.replace(patient, f"{patient}\n{line}"))
+    with pytest.raises(ConfigError, match=complaint):
+        roles.load("coach", tmp_path)

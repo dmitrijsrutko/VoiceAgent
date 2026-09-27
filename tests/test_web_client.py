@@ -83,6 +83,7 @@ BROWSER_GLOBALS = {
     "registerProcessor",
     "requestAnimationFrame",
     "setInterval",
+    "clearInterval",
     "setTimeout",
     "window",
 }
@@ -473,7 +474,7 @@ def test_the_chosen_stack_travels_with_the_socket() -> None:
 
     assert connect, "connect() is gone"
     assert "stackQuery()" in connect.group(0)
-    assert 'for (const group of ["role", "llm", "stt", "tts"])' in start, (
+    assert 'for (const group of ["role", "llm", "stt", "tts", "judge"])' in start, (
         "the stack, role and voice model must be sent"
     )
 
@@ -485,7 +486,12 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
     `title`, and the page prints what it is given and nothing of its own."""
     start = without_comments(source("start.js"))
 
-    assert 'choose("llm", "Model"' in start, "the model group is gone"
+    assert 'choose("llm", "Reasoning"' in start, "the reasoning group is gone"
+    assert "escape(o.hint)" in start, "the model's grey line is not the server's"
+    assert "=== p).reverse()" in start, "each vendor's row is no longer strongest first"
+    assert "PROVIDERS[o.provider] ?? o.provider)} ${escape(o.title)}" in start, (
+        "a voice option no longer names its vendor"
+    )
     assert "escape(o.title)" in start, "the option label no longer comes from the server"
 
     labels = re.search(r"const LABELS = \{(.*?)\n\};", start, re.DOTALL)
@@ -518,7 +524,7 @@ def test_the_voice_model_is_a_choice_drawn_even_alone() -> None:
     start = without_comments(source("start.js"))
     choosing = re.findall(r'choose\("(\w+)"', start)
 
-    assert choosing == ["role", "llm", "stt", "tts"], f"the pickers changed: {choosing}"
+    assert choosing == ["role", "llm", "stt", "tts", "judge"], f"the pickers changed: {choosing}"
     assert "{ single: true }" in start, "a lone voice option is no longer drawn"
 
 
@@ -563,3 +569,33 @@ def test_an_ended_conversation_lets_go_of_the_microphone_and_offers_a_new_one() 
     assert "listening = false" in body and "listen.disabled = true" in body
     assert 'location.href = "/"' in body, "no way to start a new conversation"
     assert 'endConversation("ended")' in app and 'endConversation("disconnected")' in app
+
+
+def test_the_ears_keep_their_places_whichever_is_the_default() -> None:
+    start = without_comments(source("start.js"))
+    ears = re.search(r'choose\("stt", "Ears".*?\);', start, re.S)
+    assert ears and "asServed: true" in ears.group(0)
+
+
+def test_only_a_judged_round_trades_start_a_new_one_for_the_wait() -> None:
+    """An unjudged conversation that runs out of time keeps its next step."""
+    app = source("app.js")
+    ended = re.search(r"  ended\(msg\) \{.*?\n  \},", app, re.S)
+    assert ended, "the ended handler is gone"
+    body = ended.group(0)
+    assert ': msg.reason || "Conversation ended. Start a new one below."' in body
+
+
+def test_a_judged_round_waits_for_its_ruling_above_a_shut_way_out() -> None:
+    """The ruling goes above "Start a new round", which stays disabled until it
+    arrives, and the page shows the card's top rather than the log's bottom."""
+    app = source("app.js")
+    ending = re.search(r"function endConversation\(why\) \{.*?\n\}", app, re.S)
+    assert ending, "endConversation() is gone"
+    assert "again.disabled = Boolean(judge && !ruled)" in ending.group(0)
+    waiting = re.search(r"async function awaitRuling\(\) \{.*?\n\}", app, re.S)
+    assert waiting, "awaitRuling() is gone"
+    body = waiting.group(0)
+    assert "beforeAgain(panel)" in body and "wrap.appendChild" not in body
+    assert 'card.scrollIntoView({ block: "start"' in body
+    assert "stick(" not in body, "stick() pins the log's bottom: the card's top would scroll away"

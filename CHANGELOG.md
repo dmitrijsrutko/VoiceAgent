@@ -14,6 +14,79 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 28 — The judge: a devil's-advocate round ends with a verdict
+
+The devil's advocate argued, and nothing ever said how the user did. A DA conversation
+is now a **round**: six minutes at most, **⏹ End** at any time, then a judge model reads
+the timed transcript and rules. It gives win or lose, a split, the reasoning, a
+scorecard, the deciding moments, how to improve, a rematch brief, and a fun layer. The
+DA itself spars with wit. The aim is repeat play. Progress across rounds is not tracked.
+
+**What changed**
+- `roles.py`: optional card fields `minutes` and `judged` (the DA sets 6 and true). A
+  round lasts the shorter of the card and the deployment, counted from the first
+  connect (`Conversation.started`).
+- `timeline.py` (new): taps `Channel` like `Record`, plus the page's playback end and
+  typed lines, and pairs them into turns with each answer's **think time** (negative
+  for a talk-over). `stats()` measures talk share, pauses, words and cut-offs.
+- `judge.py` and `prompts/judge.md` (new): `deepseek-high` (the default) or
+  `opus-5-5` at `medium` (`Effort` gains it), with their own 32 000-token ceiling.
+  `parse` clamps the split, which decides the outcome. Under 2 turns or 30 words is
+  no contest, with no call. Any failure is a ruling that says so. `--judge RECORD`
+  rules on a saved round.
+- `server.py`: `{"type":"end"}` goes through `session.finish()`. An ended judged round
+  starts a ruling task under a `MAX_LIVE` semaphore, because `Live` stops counting at
+  hang-up. The ruling is kept on the `Conversation`; the record gets the whole review;
+  `GET /c/{key}/verdict` answers 200, 202 or 404.
+- Page: an End chip; the countdown throughout a short round; a Judge picker; a panel
+  with a text bar against the usual 30 s while judging, above a disabled "Start a new
+  round"; then `verdict.js`'s card, scrolled to its top. The start screen: "Reasoning"
+  with a grey hint per model (`Choice.hint`), strongest first; voices name ElevenLabs;
+  the ears default to AssemblyAI again (the user's call), drawn in place, not first.
+- The DA card: dry irony folded into the objection, bite for the argument and never
+  the person, a real fact in passing (doubt as a question), and "touché" for a good hit.
+
+**Design decisions**
+- **Code measures, the model judges.** Pauses and talk share are computed and handed
+  over, and the prompt says to trust them.
+- **The verdict comes over HTTP.** The socket closes with the round, and a reload has
+  to find the ruling again.
+- **The debate starts at the thesis.** Small talk is not scored, and a user who says
+  they were misheard is believed. Both rules came from judging a real round.
+- **One call, no retry**, and the efforts are the user's calls: DeepSeek `max` kept
+  people waiting, and Opus `max` never finished.
+
+**Latency impact** — none on the conversation: the judge runs after `ended`.
+
+| Judge (effort) | Round | Time | Tokens in / out | Result |
+| --- | --- | --- | --- | --- |
+| DeepSeek V4.1 Flash (max) | a real 10-turn round, from its record | 37.4 s | 2 813 / 8 313 | lose 25/75 |
+| DeepSeek V4.1 Flash (max) | live, typed, 3 turns | 25.9 s | 2 064 / 5 178 | lose 40/60 |
+| DeepSeek V4.1 Flash (high) | live, typed, 2 turns | ≈16 s | not read | lose 44/56 |
+| Claude Opus 5.5 (max) | the same 10-turn record | 309 s | ? / 32 000 | **no text** |
+| Claude Opus 5.5 (medium) | the same 10-turn record | 30.7 s | 3 896 / 3 008 | lose 18/82 |
+
+At the replies' 8 192 tokens, the 8 313-token verdict would have been cut off. Opus
+at `max` spent all 32 000 thinking (about $0.64); at `medium` it cost about $0.08.
+
+**Deliberately not done** — progress across rounds, a rematch seeded with the last
+verdict, a shareable verdict page, a streamed or spoken verdict, and judging other
+roles. The DA's replies still ran 45–60 words, against the card's 30, on
+DeepSeek-high, and two sweeping claims came out as fact; the prompt alone does not
+hold it.
+
+**Verification** — `uv run verify`: 773 tests; 82 node tests. Every tape golden gains
+"what a judge would read", and no turn-taking line moved. The fixtures are a made-up
+round. Live, typed rounds ended on End and got rulings, in the record and again on
+reload. Headless Chrome at 390×844 showed the wait panel, the disabled button, and
+the card's top in view. Not observed: a spoken round, or the 6:00 expiry.
+
+**Fixes**
+- A judge that could not be built (a missing key) left `/verdict` at 202 forever; it is now a failed ruling.
+- A reload restarted the round's clock (and the deployment's 30 minutes); it now counts from the first connect.
+- A committed echo removed the user's last turn from the timeline; now only the commit it names.
+- An unjudged conversation's time-limit note lost "Start a new one below."; only a judged round replaces it.
+
 ## Chapter 27 — The voice is a choice: Multilingual v2 beside Flash v2.5
 
 The agent spoke only through `eleven_flash_v2_5`, which was chosen for time to first

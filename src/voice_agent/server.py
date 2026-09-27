@@ -31,12 +31,12 @@ from hashlib import sha256
 from pathlib import Path
 
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
-from voice_agent import roles, trace, vad
+from voice_agent import judge, roles, timing, trace, vad
 from voice_agent.backends import Backends
 from voice_agent.channel import Channel
 from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_settings
@@ -54,6 +54,7 @@ from voice_agent.sessions import SessionStore
 from voice_agent.stt import STT
 from voice_agent.stt.registry import NO_EARS
 from voice_agent.thinker import THINKER_MODEL, system_prompt
+from voice_agent.timeline import Timeline
 from voice_agent.tts import TTS
 from voice_agent.tts.base import SAMPLE_RATE
 from voice_agent.tts.registry import NO_VOICE
@@ -139,11 +140,51 @@ async def refuse(websocket: WebSocket, code: int, reason: str) -> None:
     await websocket.close(code=code, reason=reason)
 
 
-async def expire(after: float, session: Session, websocket: WebSocket) -> None:
+def round_budget(deployment: float | None, role: roles.Role | None) -> float | None:
+    """How long this conversation may run: the deployment's cap, or the role's
+    round if that is shorter."""
+    if role is None or role.minutes is None:
+        return deployment
+    own = role.minutes * 60
+    return own if deployment is None else min(own, deployment)
+
+
+async def adjudicate(agent: "Agent", conversation: Conversation, name: str) -> None:
+    """Rule on an ended round, keep the ruling, and write it down. Never leaves
+    the page waiting: a judge that cannot be built is a failed ruling too."""
+    turns = conversation.timeline.turns() if conversation.timeline is not None else []
+    # A ruling is a billed call made after the socket has gone, so `Live` no
+    # longer counts it: the same cap holds here, and a round over it waits.
+    async with agent.rulings or contextlib.nullcontext():
+        try:
+            engine = agent.backends.judge(name)
+        except Exception as exc:  # a missing key: said on the page, not raised
+            logger.warning("no judge %s: %s", name, exc)
+            ruling = judge.unavailable(name, turns, exc)
+        else:
+            ruling = await judge.rule(engine, name, turns)
+    conversation.verdict = ruling
+    if conversation.record is not None and agent.record_dir is not None:
+        record = Record(conversation.record)
+        record.ruling(ruling)
+        record.close()
+
+
+def time_left(budget: float | None, conversation: Conversation) -> float | None:
+    """What remains of the budget, counted from the first connect: a reload
+    resumes the clock rather than starting it again."""
+    if budget is None:
+        return None
+    if conversation.started is None:
+        conversation.started = timing.now()
+    return max(0.0, round(budget - (timing.now() - conversation.started), 1))
+
+
+async def expire(after: float, budget: float, session: Session, websocket: WebSocket) -> None:
     """End a conversation that ran out of budget, and hang up. The socket must
     be closed too: a silent browser sends nothing that would end the loop."""
     await asyncio.sleep(after)
-    await session.finish(budget_reason(after))
+    await session.finish(budget_reason(budget))
     with contextlib.suppress(RuntimeError):
         await websocket.close()  # possibly already closed by the other side
 
@@ -196,6 +237,8 @@ class Agent:
     thinker_prompts: dict[str, str]
     """The inner voice's instructions per role: fixed for the process."""
     record_dir: Path | None
+    rulings: asyncio.Semaphore | None = None
+    """How many rulings may run at once: `MAX_LIVE`, or no cap without one."""
     ready: bool = False
     """The engines are connected; `/healthz` waits on it."""
 
@@ -254,6 +297,7 @@ def create_app(
     settings: Settings | None = None,
     role: str | None = None,
     thinker: LLM | None = None,
+    judge: LLM | None = None,
 ) -> FastAPI:
     """The app. The keyword arguments are test seams: `llm`/`stt`/`tts` inject
     fakes, `voice=False`/`ears=False` run silent or deaf (as `…_TTS=none` and
@@ -279,6 +323,7 @@ def create_app(
         voice_provider=settings.voice_provider if voice else NO_VOICE,
         voice=settings.voice,
         speaker=tts,
+        judge=judge,
     )
     # The default voice is built now: a missing synthesis key stops the server
     # here, as it did before voices were a choice, not every page load after.
@@ -298,6 +343,7 @@ def create_app(
         thinker=inner,
         thinker_prompts={slug: system_prompt(card) for slug, card in cards.items()},
         record_dir=(sessions_dir or settings.sessions) if record else None,
+        rulings=asyncio.Semaphore(settings.max_live) if settings.max_live else None,
     )
 
     @contextlib.asynccontextmanager
@@ -360,6 +406,23 @@ def create_app(
         )
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
 
+    @app.get("/c/{key}/verdict")
+    async def verdict(key: str) -> Response:
+        """The ruling on an ended round: 200 with it, 202 while the judge is
+        still thinking, 404 when there is none to wait for."""
+        try:
+            conversation = agent.sessions.get(key)
+        except SessionNotFoundError:
+            return JSONResponse({"status": "unknown"}, status_code=404)
+        if conversation.verdict is not None:
+            return JSONResponse(conversation.verdict)
+        if conversation.judging is not None:
+            began, _ = conversation.judging
+            return JSONResponse(
+                {"status": "judging", "elapsed": round(timing.now() - began, 1)}, status_code=202
+            )
+        return JSONResponse({"status": "none"}, status_code=404)
+
     @app.websocket("/ws/{key}")
     async def chat_socket(websocket: WebSocket, key: str) -> None:
         await serve(agent, websocket, key)
@@ -414,6 +477,8 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         if speaker
         else "silent",
     )
+    judged = role is not None and role.judged
+    judge_name = agent.backends.judge_for(conversation, websocket.query_params) if judged else None
     opening = agent.openings[role_name if role is not None else roles.NO_ROLE]
     # Per conversation, because it states what these ears can hear; stable for
     # the conversation's life, which is what a provider's prefix cache needs.
@@ -425,7 +490,9 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         role=role.when_speaking if role is not None else "",
     )
     recording = record_for(agent.record_dir, conversation, system_prompt)
-    channel = Channel(websocket, recording)
+    if judge_name is not None and conversation.timeline is None:
+        conversation.timeline = Timeline()
+    channel = Channel(websocket, recording, conversation.timeline)
     session = Session(
         channel,
         conversation,
@@ -438,6 +505,8 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         thinker=agent.thinker if role is not None else None,
         thinker_prompt=agent.thinker_prompts.get(role_name),
     )
+    budget_seconds = round_budget(agent.settings.session_budget, role)
+    left = time_left(budget_seconds, conversation)
     await channel.send_json(
         {
             "type": "ready",
@@ -448,8 +517,14 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             # DeepSeek tiers share a provider and a model.
             "choice": engine_name,
             **agent.facts(listener, speaker, engine_name, ears_name, role_name, voice_name),
-            # From this connection: the page counts down the last minute.
-            "budget_seconds": agent.settings.session_budget,
+            # What is left of it: the page counts down from here.
+            "budget_seconds": left,
+            # Named when this round will be judged: the page waits for a ruling.
+            "judge": (
+                {"name": judge_name, "title": judge.BY_NAME[judge_name].title}
+                if judge_name is not None
+                else None
+            ),
             "history": serialize(conversation.messages),
             "ended": conversation.ended,
         }
@@ -457,10 +532,9 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
     session.voiced(await greet(channel, conversation, speaker, opening))
     # After the greeting, so the clock measures the silence after the agent's voice.
     session.start()
-    budget_seconds = agent.settings.session_budget
     budget = (
-        asyncio.create_task(expire(budget_seconds, session, websocket))
-        if budget_seconds is not None
+        asyncio.create_task(expire(left, budget_seconds, session, websocket))
+        if left is not None and budget_seconds is not None and not conversation.ended
         else None
     )
     ending = asyncio.ensure_future(session.ended.wait())
@@ -497,6 +571,10 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         await session.close()
         if recording is not None:
             recording.close()
+        if judge_name is not None and conversation.ended and conversation.judging is None:
+            # After the record is closed: the ruling appends to the same file.
+            task = asyncio.create_task(adjudicate(agent, conversation, judge_name))
+            conversation.judging = (timing.now(), task)
 
 
 CLIENT_WORD = re.compile(r"[^\w .:/()-]")
@@ -535,6 +613,8 @@ async def handle_text(
         # which for a long answer is far more than the idle window — and only
         # the browser knows when playback actually ends.
         session.post(Playback(bool(payload.get("active"))))
+        if channel.timeline is not None:
+            channel.timeline.playback(bool(payload.get("active")))
         # Chunks that arrived after the previous one had finished playing. Only
         # the browser can see them, and a stutter nobody logs is a stutter
         # nobody fixes. Coerced first: these are client-supplied, and a string
@@ -569,6 +649,11 @@ async def handle_text(
             )
         return
 
+    if kind == "end":
+        # The End button: the same ending as an exit word or the time limit.
+        await session.finish()
+        return
+
     if kind in ("listen_start", "listen_stop"):
         mic = session.mic
         if mic is None:
@@ -586,4 +671,6 @@ async def handle_text(
         # a committed `transcript` frame and is recorded there.
         if record is not None:
             record.said(text)
+        if channel.timeline is not None:
+            channel.timeline.typed(text)
         session.post(Typed(text))

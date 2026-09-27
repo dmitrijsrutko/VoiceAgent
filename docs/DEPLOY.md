@@ -86,7 +86,7 @@ still the agent of chapters 1-13:
 
 | Variable | Deployed | Bounds |
 | --- | --- | --- |
-| `VOICE_AGENT_MAX_LIVE` | 4 | conversations held open at once |
+| `VOICE_AGENT_MAX_LIVE` | 4 | conversations held open at once, and judge rulings running at once |
 | `VOICE_AGENT_SESSION_BUDGET` | 1800 | seconds before a conversation ends itself (30 min) |
 | `VOICE_AGENT_MINTS_PER_IP` | 10 | new conversations per address per 10 minutes |
 | `VOICE_AGENT_MAX_STORED` | 500 | conversations kept before the oldest is dropped |

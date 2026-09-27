@@ -115,7 +115,22 @@ def main() -> None:
         help="replay scripted conversations from tests/scenarios/ through the inner voice "
         "and score it, then exit; billed, one call per pause (default: all)",
     )
+    parser.add_argument(
+        "--judge",
+        metavar="RECORD",
+        type=Path,
+        help="judge a saved conversation (a sessions/*.md record), print the ruling, "
+        "then exit; billed, one call",
+    )
+    parser.add_argument(
+        "--judge-with",
+        metavar="NAME",
+        default=None,
+        help="which judge --judge uses (default: deepseek-high; also opus-5-5)",
+    )
     args = parser.parse_args()
+    if args.judge_with is not None and args.judge is None:
+        parser.error("--judge-with needs --judge RECORD")
     try:
         settings = with_flags(settings, args)
     except ConfigError as exc:
@@ -133,6 +148,12 @@ def main() -> None:
         from voice_agent.replay import main as replay
 
         replay(args.replay_thinker)
+        return
+
+    if args.judge is not None:
+        from voice_agent.judge import main as judge
+
+        judge(args.judge, args.judge_with)
         return
 
     if args.purge_sessions:
@@ -157,9 +178,10 @@ def main() -> None:
     delays = settings.initiative
     clock = "+".join(f"{d:g}s" for d in delays) if delays else "reactive"
     menu = offered()
+    chosen = BY_NAME[default_choice(menu)]
     print(
         f"voice-agent → http://{args.host}:{args.port}  "
-        f"({BY_NAME[default_choice(menu)].title} by default · {len(menu)} models "
+        f"({chosen.title} ({chosen.hint}) by default · {len(menu)} models "
         f"· 🔊 {voice} · 🎤 {ears} · ⏱ {clock} "
         f"· 📝 {settings.sessions or 'off'} · 🔬 {settings.trace or 'off'})"
     )

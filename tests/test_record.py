@@ -343,3 +343,22 @@ def test_what_the_page_reports_is_written_down_and_cannot_forge_lines(tmp_path: 
     assert "client: Safari on iOS · mobile" in text
     assert "client error: microphone · NotAllowedError · denied" in text
     assert "\n## 12:00 — agent" not in text
+
+
+def test_a_ruling_that_leaves_parts_out_is_written_without_them() -> None:
+    from voice_agent.record import review
+
+    text = review(
+        {
+            "outcome": "win",
+            "split": {"you": 60, "advocate": 40},
+            "headline": "Held the line.",
+            "reasoning": "The thesis survived.",
+            "scorecard": [{"criterion": "logic", "score": 7, "evidence": "clean steps"}],
+        }
+    )
+    assert text.startswith("**WIN** 60/40 — Held the line.")
+    assert "- logic 7/10 — clean steps" in text
+    assert "None" not in text
+    for absent in ("**Fun**", "**Rematch**", "**Fallacies**", "**Position**", "**Moments**"):
+        assert absent not in text

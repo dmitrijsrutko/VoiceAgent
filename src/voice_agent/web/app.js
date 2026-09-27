@@ -8,15 +8,16 @@ import { addMarks, spokenChars } from "./karaoke.js";
 import { createPlayer } from "./player.js";
 import { clientFacts } from "./client.js";
 import {
-  clientError, clientInfo, interrupted, listenStart, listenStop, playback, userMessage,
+  clientError, clientInfo, endRound, interrupted, listenStart, listenStop, playback, userMessage,
 } from "./protocol.js";
+import { progress, renderRuling } from "./verdict.js";
 import { chosenEars, servedFacts, showStart, stackQuery } from "./start.js";
 import {
   audioLine, committedLine, gapsLine, initiativeLine, quietLine, replyLines, thoughtLine,
   truncatedLine, unpromptedLine,
 } from "./telemetry.js";
 import {
-  add, begin, details, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
+  add, begin, details, endButton, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
   pinLast, setEnabled, start, status, stick, timer, wrap,
 } from "./ui.js";
 
@@ -99,15 +100,16 @@ function paintListening() { paint(listening, speaking); }
 // The time limit, counted from this connection like the server's own. Shown
 // only in the last minute, with one note when it starts.
 let deadline = null;
+let budgetMs = Infinity;
 let warned = false;
 setInterval(() => {
   if (deadline === null) return;
   const left = deadline - performance.now();
-  const shown = countdown(left);
+  const shown = countdown(left, budgetMs);
   timer.hidden = !shown.show;
   timer.textContent = shown.text;
   timer.classList.toggle("urgent", shown.urgent);
-  if (shown.show && !warned && left > WARN_MS - 5_000) {
+  if (left <= WARN_MS && !warned && left > WARN_MS - 5_000) {
     warned = true;
     add("One minute left in this conversation.", "note");
   }
@@ -123,6 +125,7 @@ function endConversation(why) {
   over = true;
   deadline = null;
   timer.hidden = true;
+  endButton.disabled = true;
   listening = false;
   paintListening();
   listen.disabled = true;
@@ -133,12 +136,21 @@ function endConversation(why) {
   }
   status.textContent = why === "ended" ? "· ended" : "· disconnected";
   setEnabled(false);
-  const again = document.createElement("button");
+  again = document.createElement("button");
   again.id = "again";
   again.type = "button";
-  again.textContent = "Start a new conversation";
+  // A judged round waits for its ruling: leaving now would lose it.
+  again.textContent = judge ? "Start a new round" : "Start a new conversation";
+  again.disabled = Boolean(judge && !ruled);
+  if (again.disabled) again.title = "Waiting for the judge…";
   again.onclick = () => { location.href = "/"; };
   stick(() => wrap.appendChild(again));
+}
+
+let again = null;          // the way to a new conversation: always the last thing
+function beforeAgain(el) {
+  if (again?.parentNode === wrap) wrap.insertBefore(el, again);
+  else wrap.appendChild(el);
 }
 
 function setSpeaking(active, report = {}) {
@@ -239,9 +251,11 @@ function releaseLive() {
 const handlers = {
   ready(msg) {
     if (msg.budget_seconds) {
-      deadline = performance.now() + msg.budget_seconds * 1000;
+      budgetMs = msg.budget_seconds * 1000;
+      deadline = performance.now() + budgetMs;
       warned = false;
     }
+    judge = msg.judge;
     // Once per socket: which browser this is, then anything that failed before it opened.
     ws.send(clientInfo(clientFacts(navigator.userAgent)));
     while (unsent.length) ws.send(unsent.shift());
@@ -268,8 +282,19 @@ const handlers = {
     // which would put a second prompt over the greeting.
     if (msg.ears && !micRefused) beginListening();
     for (const m of msg.history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
-    if (msg.ended) { add("This conversation has ended.", "note"); setEnabled(false); }
-    else setEnabled(true);
+    if (msg.ended) {
+      add("This conversation has ended.", "note");
+      setEnabled(false);
+      awaitRuling();
+    } else {
+      setEnabled(true);
+      endButton.disabled = false;
+      if (judge && !announced) {
+        announced = true;
+        const length = msg.budget_seconds ? `${Math.round(msg.budget_seconds / 60)} minutes` : "no time limit";
+        add(`A judged round: ${length}. Press ⏹ End whenever you are done — then ${judge.title} rules on it.`, "note");
+      }
+    }
   },
 
   greeting(msg) { reply = newReply(msg.text, "msg agent"); },
@@ -406,9 +431,88 @@ const handlers = {
   },
 
   ended(msg) {
-    add(msg.reason || "Conversation ended. Start a new one below.", "note");
+    // A judged round is not over for the user yet: its verdict is coming, so
+    // "start a new one" is replaced by what to wait for. Otherwise, as it was.
+    const judging = "Round over. The judge is reviewing it — the verdict appears below.";
+    const said = judge
+      ? `${(msg.reason || "").replace(/ Start a new one below\.$/, "")} ${judging}`.trim()
+      : msg.reason || "Conversation ended. Start a new one below.";
+    add(said, "note");
     endConversation("ended");
+    awaitRuling();
   },
+};
+
+// The judge, once a judged round is over: asked over HTTP rather than the
+// socket, which closes with the conversation, so a reload asks again. The wait
+// is shown as a panel above the way out, and the way out stays shut until the
+// ruling is in.
+const JUDGE_PATIENCE_MS = 10 * 60_000;  // then stop asking; a reload asks again
+let judge = null;
+let announced = false;
+let panel = null;          // the wait, then the card: drawn once
+let ruled = false;         // the wait is over, whatever its outcome
+function settle(el, message) {
+  ruled = true;
+  if (message !== undefined) el.innerHTML = `<p>${message}</p>`;
+  if (again) {
+    again.disabled = false;
+    again.removeAttribute("title");
+  }
+}
+
+async function awaitRuling() {
+  if (!judge || panel) return;
+  panel = document.createElement("section");
+  panel.className = "verdict pending";
+  panel.setAttribute("role", "status");
+  panel.innerHTML = progress(judge.title, 0);
+  beforeAgain(panel);
+  panel.scrollIntoView({ block: "center", behavior: "smooth" });
+  const began = performance.now();
+  const elapsed = () => (performance.now() - began) / 1000;
+  const tick = setInterval(() => { panel.innerHTML = progress(judge.title, elapsed()); }, 250);
+  try {
+    for (;;) {
+      let response;
+      try {
+        response = await fetch(`/c/${key}/verdict`, { cache: "no-store" });
+      } catch {
+        response = null;  // offline for a moment: keep waiting
+      }
+      if (response?.status === 200) {
+        const holder = document.createElement("div");
+        holder.innerHTML = renderRuling(await response.json());
+        const card = holder.firstElementChild;
+        clearInterval(tick);
+        panel.replaceWith(card);
+        panel = card;
+        settle(card);
+        // Its top, not the log's bottom: the outcome and the split are the point.
+        card.scrollIntoView({ block: "start", behavior: "smooth" });
+        return;
+      }
+      // The judge is handed the round as the socket closes, a moment after
+      // `ended` arrives here: a 404 that early means "not yet".
+      if (response?.status === 404 && elapsed() > 15) {
+        settle(panel, "No ruling for this conversation.");
+        return;
+      }
+      if (elapsed() * 1000 > JUDGE_PATIENCE_MS) {
+        settle(panel, "The judge is taking too long. Reload this page later to see the ruling.");
+        return;
+      }
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  } finally {
+    clearInterval(tick);
+  }
+}
+
+endButton.onclick = () => {
+  if (!sending()) return;
+  endButton.disabled = true;
+  ws.send(endRound());
 };
 
 // Shared by the button and by the start of a conversation, which want exactly
@@ -448,7 +552,7 @@ begin.onclick = async () => {
   const opening = rate ? buildMic(rate, sendFrame) : null;
   opening?.catch(() => {});  // reported below; not an unhandled rejection meanwhile
   start.remove();
-  add("Just talk — it is already listening. Or type. Say or type “exit” to end.", "note");
+  add("Just talk — it is already listening. Or type. Press ⏹ End, or say “bye”, to finish.", "note");
   // Awaited *before* the socket opens, because the greeting follows it by about
   // 20 ms — comfortably fast enough to beat a resume that has been asked for
   // but has not finished. `player.chunk` would then see a context still reading

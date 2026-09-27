@@ -73,6 +73,105 @@ def attributes(payload: Mapping[str, Any]) -> str:
     return " · ".join(parts)
 
 
+def review(verdict: Mapping[str, Any]) -> str:
+    """The whole ruling as Markdown: everything the page's card shows, so the
+    record can be read without the page. A part the judge left out is left out
+    here too, never written as "None"."""
+
+    def get(mapping: Any, key: str) -> Any:
+        value = mapping.get(key) if isinstance(mapping, Mapping) else None
+        return value if value not in (None, "", [], {}) else None
+
+    def section(title: str, rows: list[str]) -> str:
+        return f"**{title}**\n" + "\n".join(rows) if rows else ""
+
+    def labelled(pairs: list[tuple[str, Any]]) -> list[str]:
+        return [f"- {label}: {value}" for label, value in pairs if value is not None]
+
+    def items(values: Any) -> list[str]:
+        return [f"- {value}" for value in values] if isinstance(values, list) else []
+
+    split = get(verdict, "split") or {}
+    position = get(verdict, "position")
+    moments = get(verdict, "moments")
+    persuasion = get(verdict, "persuasion")
+    rematch = get(verdict, "rematch")
+    fun = get(verdict, "fun")
+    cards = [
+        f"- {get(card, 'criterion')} {get(card, 'score')}/10 — {get(card, 'evidence')}"
+        + (f" ({get(card, 'at')})" if get(card, "at") else "")
+        for card in get(verdict, "scorecard") or []
+        if get(card, "criterion") and get(card, "score") is not None
+    ]
+    moment_rows = [
+        f"- {label} ({get(moment, 'at')}): "
+        f"{get(moment, 'quote') or get(moment, 'objection')} — {get(moment, 'why')}"
+        for label, moment in (
+            ("best", get(moments, "best")),
+            ("weakest", get(moments, "worst")),
+            ("unanswered", get(moments, "unanswered")),
+        )
+        if isinstance(moment, Mapping)
+    ]
+    fallacies = [
+        f"- {get(f, 'name')} ({get(f, 'at')}): {get(f, 'quote')}"
+        for f in get(verdict, "fallacies") or []
+        if get(f, "name")
+    ]
+    moved = get(persuasion, "advocate_moved")
+    landed = " ".join(
+        part
+        for part in (
+            f"moved the advocate: {moved}." if moved else "",
+            str(get(persuasion, "audience") or ""),
+        )
+        if part
+    )
+    fun_line = " · ".join(
+        str(part)
+        for part in (
+            get(fun, "nickname"),
+            f"badge {get(fun, 'badge')}" if get(fun, "badge") else None,
+            get(fun, "crowd"),
+            get(fun, "roast"),
+        )
+        if part
+    )
+    parts = [
+        f"**{str(get(verdict, 'outcome') or '').upper()}** "
+        f"{split.get('you')}/{split.get('advocate')} — {get(verdict, 'headline') or ''}",
+        str(get(verdict, "reasoning") or ""),
+        section(
+            "Position",
+            labelled(
+                [
+                    ("stated", get(position, "stated")),
+                    ("held", get(position, "survived")),
+                    ("fell", get(position, "fell")),
+                ]
+            ),
+        ),
+        section("Scorecard", cards),
+        section("Moments", moment_rows),
+        section("Fallacies", fallacies),
+        f"**Did it land?** {landed}" if landed else "",
+        f"**Timing** {get(verdict, 'timing')}" if get(verdict, "timing") else "",
+        section("How to improve", items(get(verdict, "improve"))),
+        section(
+            "Rematch",
+            items(get(rematch, "prepare"))
+            + labelled(
+                [
+                    ("next attack", get(rematch, "next_attack")),
+                    ("missed angle", get(rematch, "missed_angle")),
+                ]
+            ),
+        ),
+        f"**Fun** {fun_line}" if fun_line else "",
+    ]
+    return "\n\n".join(part for part in parts if part.strip())
+
+
 class Record:
     """One conversation's file, appended to as the conversation happens.
 
@@ -194,6 +293,7 @@ class Record:
         # so nothing else in the record or the logs names the one chosen.
         if payload.get("choice"):
             model += f" ({payload['choice']})"
+        judge = payload.get("judge") or {}
         return " · ".join(
             (
                 f"role {role.get('slug') or role.get('name')}" if role else "role none",
@@ -205,6 +305,7 @@ class Record:
                     if voice
                     else "voice silent"
                 ),
+                *((f"judge {judge.get('name')}",) if judge else ()),
             )
         )
 
@@ -231,6 +332,26 @@ class Record:
         )
         if origin:
             self._write(f"{origin}\n")
+        self.flush()
+
+    def ruling(self, ruling: Mapping[str, Any]) -> None:
+        """The judge's ruling, after the conversation it rules on."""
+        judge = ruling.get("judge") or {}
+        verdict = ruling.get("verdict") or {}
+        status = ruling.get("status")
+        if status == "done":
+            body = review(verdict)
+        elif status == "no_contest":
+            body = "No contest: too little was said to rule on."
+        else:
+            body = f"The judge failed: {ruling.get('error', '')}"
+        usage = ruling.get("usage") or {}
+        self.block(
+            f"judge ({judge.get('name')})",
+            body,
+            attributes({"model": judge.get("model"), "ms": ruling.get("ms"), **usage}),
+        )
+        self.note(attributes(ruling.get("stats") or {}))
         self.flush()
 
     def flush(self) -> None:

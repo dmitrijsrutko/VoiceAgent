@@ -192,6 +192,7 @@ def test_every_offered_model_could_actually_be_built() -> None:
         assert choice.name, "an option needs an id for `?llm=` to carry"
         check_model(choice.provider, choice.model)
         assert choice.title, "and something for the page to show"
+        assert choice.hint, "and a grey line saying how it differs"
 
     names = [choice.name for choice in CHOICES]
     assert len(names) == len(set(names)), "two options share an id"

@@ -36,3 +36,10 @@ assistant: Hi.
 assistant: Riga is the capital of Latvia. It sits on the
      user: And Estonia?
 assistant: Tallinn.
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 0.2 s): "Hi."
+[00:01] YOU (answered after 0.7 s · spoke 1.3 s · 6 words): "What is the capital of Latvia?"
+[00:04] ADVOCATE (cut off by YOU after 2.8 s of 7.9 s): "Riga is the capital of Latvia. It sits on the Baltic Sea, at the mouth of the Daugava river. Its old town is a World Heritage site."
+[00:07] YOU (started 0.3 s before the ADVOCATE finished (talked over it) · spoke 0.7 s · 2 words): "And Estonia?"
+[00:09] ADVOCATE (spoke 0.5 s): "Tallinn."

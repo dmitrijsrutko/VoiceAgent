@@ -21,7 +21,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from voice_agent import roles, thinker, timing
+from voice_agent import judge, roles, thinker, timing
 from voice_agent.config import build_prompt
 from voice_agent.conversation import Conversation, Message
 from voice_agent.greeting import greet
@@ -30,6 +30,7 @@ from voice_agent.llm.base import Usage
 from voice_agent.server import handle_text, ladder_for
 from voice_agent.session import Session
 from voice_agent.stt.base import Transcript
+from voice_agent.timeline import Timeline
 from voice_agent.tts.base import Alignment, AudioChunk, pcm_seconds
 from voice_agent.vad import WINDOW_BYTES
 
@@ -270,11 +271,15 @@ class Browser:
         self._cut = False
         self._stream: dict[str, Any] | None = None
         self._tasks: set[asyncio.Task[None]] = set()
+        self.timeline: Timeline | None = None
+        """Tapped as `Channel` taps it, so the goldens show what a judge reads."""
 
     # Server -> page.
 
     async def send_json(self, payload: dict[str, object]) -> None:
         kind = str(payload["type"])
+        if self.timeline is not None:
+            self.timeline.frame(payload)
         line = describe(payload)
         if line is not None:
             self._log(">", line)
@@ -416,7 +421,9 @@ async def replay(tape: Tape) -> str:
     started = timing.now()
     log = Log(started)
     browser = Browser(log)
-    conversation = Conversation(id=f"tape-{tape.name}")
+    timeline = Timeline()
+    conversation = Conversation(id=f"tape-{tape.name}", timeline=timeline)
+    browser.timeline = timeline
     speaker = PacedTTS()
     engine = ScriptedLLM(tape.replies, tape.ttft, tape.pace, log, "llm")
     card = roles.load(tape.role) if tape.role else None
@@ -461,6 +468,9 @@ async def replay(tape: Tape) -> str:
         await browser.close()
     log.lines.append("")
     log.lines.extend(f"{m.role:>9}: {m.content}" for m in conversation.messages)
+    log.lines.append("")
+    log.lines.append("what a judge would read:")
+    log.lines.extend(judge.describe(turn) for turn in timeline.turns())
     return "\n".join(log.lines) + "\n"
 
 

@@ -4,9 +4,12 @@ This is the "context" that is resent to the reasoning engine on every call.
 A plain in-memory list: no trimming, no summarization, no persistence.
 """
 
+import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
+
+from voice_agent.timeline import Timeline
 
 Role = Literal["user", "assistant"]
 
@@ -44,6 +47,19 @@ class Conversation:
     prompt says it was said instead)."""
     record: Path | None = None
     """Where this conversation is written down, once it has been."""
+    judge: str | None = None
+    """Which judge rules on it (`judge.JUDGES`), pinned like the engine."""
+    started: float | None = None
+    """When it was first connected to, on `timing.now()`: a time limit counts
+    from here, so reconnecting does not start the clock again."""
+    timeline: Timeline | None = None
+    """Who said what and when, across reconnects: what the judge reads. Kept
+    only for a judged round."""
+    judging: "tuple[float, asyncio.Task[None]] | None" = None
+    """The ruling in progress: when it began, and the task, held so it is not
+    collected mid-call."""
+    verdict: dict[str, Any] | None = None
+    """The judge's ruling, once there is one; a reload shows it again."""
 
     @property
     def context(self) -> list[Message]:

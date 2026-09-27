@@ -15,3 +15,8 @@ test("the last minute counts down, and turns urgent near the end", () => {
   assert.deepEqual(countdown(9_000), { show: true, urgent: true, text: "⏳ 0:09" });
   assert.equal(countdown(-500).text, "⏳ 0:00");
 });
+
+test("a short round counts down from its start", () => {
+  assert.deepEqual(countdown(5 * 60_000 + 30_000, 6 * 60_000), { show: true, urgent: false, text: "⏳ 5:30" });
+  assert.equal(countdown(5 * 60_000, 30 * 60_000).show, false);
+});

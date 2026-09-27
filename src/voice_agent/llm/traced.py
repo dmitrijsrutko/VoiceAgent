@@ -65,7 +65,7 @@ class Traced:
             "gen_ai.system": self.provider,
             "gen_ai.operation.name": "chat",
             "gen_ai.request.model": self.model,
-            "gen_ai.request.max_tokens": MAX_OUTPUT_TOKENS,
+            "gen_ai.request.max_tokens": getattr(self._inner, "max_tokens", MAX_OUTPUT_TOKENS),
             "system": system,
             "messages": [{"role": m.role, "content": m.content} for m in messages],
         }

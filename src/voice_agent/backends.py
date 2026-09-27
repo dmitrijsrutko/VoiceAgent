@@ -19,6 +19,7 @@ exception: every option shares the backend's one key, so all are offered and
 import logging
 from collections.abc import Mapping, Sequence
 
+from voice_agent import judge as judging
 from voice_agent.conversation import Conversation
 from voice_agent.llm import LLM, create_llm
 from voice_agent.llm.registry import BY_NAME, Choice, default_choice, offered
@@ -55,8 +56,13 @@ class Backends:
         voice_provider: str = tts_registry.NO_VOICE,
         voice: str | None = None,
         speaker: TTS | None = None,
+        judge: LLM | None = None,
     ) -> None:
         self._silence = silence
+        self.judges: tuple[Choice, ...] = judging.offered()
+        """Who may rule on a judged round; the first is the default."""
+        self._fixed_judge = Traced(judge) if judge is not None else None
+        self._built_judges: dict[str, LLM] = {}
         self.roles = tuple(roles)
         names = {role.slug for role in self.roles}
         # A card that is not there falls back to the first there is. The plain
@@ -122,6 +128,22 @@ class Backends:
             conversation.voice or tts_registry.NO_VOICE,
         )
 
+    def judge_for(self, conversation: Conversation, asked: Mapping[str, str]) -> str:
+        """The judge this conversation is ruled on by, pinned on first connect."""
+        if conversation.judge is None:
+            wanted = asked.get("judge", "")
+            names = {choice.name for choice in self.judges}
+            conversation.judge = wanted if wanted in names else self.judges[0].name
+        return conversation.judge
+
+    def judge(self, name: str) -> LLM:
+        if self._fixed_judge is not None:
+            return self._fixed_judge
+        if name not in self._built_judges:
+            logger.info("building the %s judge", name)
+            self._built_judges[name] = judging.build(name)
+        return self._built_judges[name]
+
     def choices(
         self, engine: str, ears: str, role: str = NO_ROLE, voice: str = tts_registry.NO_VOICE
     ) -> dict[str, list[dict[str, object]]]:
@@ -129,7 +151,14 @@ class Backends:
         chosen. Recognizers are described, not built, so no key is needed to
         list one. Only the cards are roles; the plain assistant is not offered."""
         roles: list[dict[str, object]] = [
-            {"name": r.slug, "title": r.name, "summary": r.summary, "default": r.slug == role}
+            {
+                "name": r.slug,
+                "title": r.name,
+                "summary": r.summary,
+                "default": r.slug == role,
+                "judged": r.judged,
+                "minutes": r.minutes,
+            }
             for r in self.roles
         ]
         return {
@@ -138,6 +167,7 @@ class Backends:
                 {
                     "name": choice.name,
                     "title": choice.title,
+                    "hint": choice.hint,
                     "provider": choice.provider,
                     "model": choice.model,
                     "default": choice.name == engine,
@@ -145,11 +175,16 @@ class Backends:
                 for choice in self.menu
             ],
             "stt": [{**describe(name), "default": name == ears} for name in self.listeners],
+            "judge": [
+                {"name": c.name, "title": c.title, "provider": c.provider, "default": not n}
+                for n, c in enumerate(self.judges)
+            ],
             "tts": [
                 {
                     "name": option.name,
                     "title": option.title,
                     "hint": option.hint,
+                    "provider": option.provider,
                     "model": option.model,
                     "default": option.name == voice,
                 }

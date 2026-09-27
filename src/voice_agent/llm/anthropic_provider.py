@@ -93,10 +93,12 @@ class AnthropicLLM:
         model: str | None = None,
         effort: Effort | None = None,
         client: AsyncAnthropic | None = None,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
     ) -> None:
         self.provider = "anthropic"
         self.model = model or DEFAULT_MODEL
         self.effort = effort
+        self.max_tokens = max_tokens
         """What this adapter was told to ask for. `None` is an instruction and
         not a default: it means send nothing, leaving the model at its own —
         which is also what a model with no effort of its own gets, since
@@ -141,7 +143,7 @@ class AnthropicLLM:
             call.restart()
             async with self._client.messages.stream(
                 model=self.model,
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=self.max_tokens,
                 system=cacheable(system),
                 output_config=effort,
                 messages=to_anthropic_messages(messages),

@@ -86,10 +86,12 @@ class OpenAICompatibleLLM:
         model: str | None = None,
         effort: Effort | None = None,
         client: AsyncOpenAI | None = None,
+        max_tokens: int = MAX_OUTPUT_TOKENS,
     ) -> None:
         self.provider = spec.provider
         self.model = model or spec.default_model
         self.effort = effort
+        self.max_tokens = max_tokens
         """What this adapter was told to ask for. `None` is an instruction and
         not a default: it means send nothing, which is what an engine with no
         effort to set resolves to."""
@@ -115,7 +117,7 @@ class OpenAICompatibleLLM:
             chunks = await self._client.chat.completions.create(
                 model=self.model,
                 messages=to_openai_messages(system, messages),
-                max_tokens=MAX_OUTPUT_TOKENS,
+                max_tokens=self.max_tokens,
                 stream=True,
                 # Without this a streamed reply reports no usage at all. With it,
                 # one extra final chunk carries the counts and has no choices.

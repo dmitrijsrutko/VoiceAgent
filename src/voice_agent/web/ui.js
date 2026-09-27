@@ -12,6 +12,7 @@ export const mute = document.getElementById("mute");
 export const details = document.getElementById("details");
 export const floor = document.getElementById("floor");
 export const listen = document.getElementById("listen");
+export const endButton = document.getElementById("end");
 export const start = document.getElementById("start");
 export const begin = document.getElementById("begin");
 export const startNotices = document.getElementById("start-notices");

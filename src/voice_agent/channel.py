@@ -14,6 +14,7 @@ if TYPE_CHECKING:
     from collections.abc import Coroutine
 
     from voice_agent.record import Record
+    from voice_agent.timeline import Timeline
 
 logger = logging.getLogger(__name__)
 
@@ -35,9 +36,17 @@ class Channel:
     is harmless — so each write is locked on its own.
     """
 
-    def __init__(self, websocket: WebSocket, record: "Record | None" = None) -> None:
+    def __init__(
+        self,
+        websocket: WebSocket,
+        record: "Record | None" = None,
+        timeline: "Timeline | None" = None,
+    ) -> None:
         self._websocket = websocket
         self._lock = asyncio.Lock()
+        self.timeline = timeline
+        """The round's timings, for the judge; tapped here for the same reason
+        as the record."""
         self._record = record
         """Where the conversation is written down, if it is. Recording here
         rather than at each call site is what keeps the file from drifting from
@@ -52,6 +61,8 @@ class Channel:
         async with self._lock:
             if not await self._write(self._websocket.send_json(payload)):
                 return
+            if self.timeline is not None:
+                self.timeline.frame(payload)
             if self._record is not None:
                 self._record.frame(payload)
 

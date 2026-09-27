@@ -66,6 +66,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **25 — Thirty minutes.** The deployed instance allows a 30-minute conversation instead of 6, which is also the spend ceiling for one address since every turn is charged for the whole history.
 - **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and ElevenLabs Scribe; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
 - **27 — The voice is a choice.** The start screen offers two ElevenLabs voice models on the same streaming socket: Multilingual v2 (default, most expressive) and Flash v2.5 (fastest). The pick travels as `?tts=` and is pinned per conversation; deprecated models (Turbo, v1) are refused. Measured first audio: 857 ms against 378 ms.
+- **28 — The judge.** The devil's advocate spars with wit and a little bite, and each conversation with it is a round: six minutes at most, an **⏹ End** button, and then a judge (DeepSeek V4.1 Flash at high effort by default, or Claude Opus 5.5 at medium) reads the timed transcript and rules. It gives win or lose, a split such as 40/60, the reasoning, a ten-point scorecard with quotes, the best and weakest moments, how to improve, a rematch brief, and a nickname and badge. It is drawn as a card under the transcript. `--judge RECORD` rules on a saved conversation offline.
 
 ## Requirements
 
@@ -84,12 +85,13 @@ uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first
 uv run voice-agent --role thinking_partner  # pre-select a role (visitors still choose; default devils_advocate)
 uv run voice-agent --replay-thinker         # score the inner voice on tests/scenarios/ (billed)
+uv run voice-agent --judge sessions/X.md    # rule on a saved round (billed, one call; --judge-with opus-5-5)
 uv run voice-agent --help                   # everything else
 ```
 
 Open <http://127.0.0.1:8000>, press **start conversation**, and talk or type.
-Keep the link to come back to the same conversation; type or say `exit` to end
-it. Conversations live in memory, so a restart clears them.
+Keep the link to come back to the same conversation; press **⏹ End**, or type
+or say `exit`, to end it. A devil's-advocate round is then judged. Conversations live in memory, so a restart clears them.
 
 ## Development
 
@@ -105,6 +107,7 @@ uv run verify     # ruff + format check + mypy (strict) + pytest (+ node tests)
 AGENTS.md, CHANGELOG.md   the working contract; the chapter log
 prompts/system_prompt.md  the agent's runtime system prompt; rules.md, the facts and rules put around it
 prompts/roles/, thinker.md  role cards, and the inner voice's instructions
+prompts/judge.md          what the judge is asked for, and the verdict's JSON shape
 src/voice_agent/
   cli.py, config.py       `uv run voice-agent`; settings from the environment and flags
   prompts.py              reads prompts/*.md past their preamble
@@ -115,6 +118,7 @@ src/voice_agent/
   mic.py                  one listening session: transcripts, expiry, keepalive
   vad.py, floor.py        speech per 32 ms window (Silero, in models/); who holds the floor
   roles.py, thinker.py    role cards; the inner voice that decides what is worth saying
+  timeline.py, judge.py   a round's turns and pauses; the judge that rules on it
   replay.py               scripted scenarios through the inner voice, scored
   speculation.py          answering before the question finishes
   initiative.py, decline.py  speaking into a silence; keeping the decline word unspoken
@@ -129,13 +133,15 @@ src/voice_agent/
     start.js              the start screen
     telemetry.js          the lines under each bubble (tested in node)
     floor.js              the floor strip (tested in node)
-    timer.js, client.js   the last-minute countdown; the browser family reported (tested in node)
+    timer.js, client.js   the countdown; the browser family reported (tested in node)
+    verdict.js            the judge's ruling as a card (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js
 docs/                     ROADMAP.md (research), DEPLOY.md (runbook), history.md (Chapters 0–15),
                           vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
 tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the thinker replay's scripts;
-                          tests/tapes/ whole conversations replayed on virtual time against golden transcripts
+                          tests/tapes/ whole conversations replayed on virtual time against golden transcripts,
+                          each ending with what a judge would read; tests/fixtures/ a real record and ruling
 scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records into fly-archive/ (gitignored)
 ```
 

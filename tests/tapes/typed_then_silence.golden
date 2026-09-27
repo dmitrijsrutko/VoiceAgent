@@ -30,3 +30,10 @@ assistant: Hi, I'm a test agent. What shall we talk about?
 assistant: Riga. It sits on the Baltic.
 assistant: Shall I say more about Riga itself?
 assistant: I'll stay quiet now; start again whenever you like.
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 2.9 s): "Hi, I'm a test agent. What shall we talk about?"
+[00:04] YOU (answered after 1.0 s · typed · 6 words): "What is the capital of Latvia?"
+[00:05] ADVOCATE (spoke 1.7 s): "Riga. It sits on the Baltic."
+[00:23] ADVOCATE (spoke 2.2 s): "Shall I say more about Riga itself?"
+[00:54] ADVOCATE (spoke 3.1 s): "I'll stay quiet now; start again whenever you like."

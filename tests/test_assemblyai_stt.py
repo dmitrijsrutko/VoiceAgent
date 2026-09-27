@@ -209,10 +209,10 @@ def test_a_missing_key_fails_at_startup(monkeypatch: pytest.MonkeyPatch) -> None
         create_stt("assemblyai")
 
 
-def test_elevenlabs_scribe_is_the_default_pair_of_ears(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_assemblyai_is_the_default_pair_of_ears(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("VOICE_AGENT_STT", raising=False)
 
-    assert load_settings().ears_provider == "elevenlabs"
+    assert load_settings().ears_provider == "assemblyai"
 
 
 def test_the_pause_is_tunable_on_this_backend_too(monkeypatch: pytest.MonkeyPatch) -> None:
