@@ -76,11 +76,12 @@ SILENCE_CEILING_MS = 10_000
 """The service's own clamp on both turn-silence bounds. Applied here so a wild
 --vad-silence is corrected before it becomes a 3006, not after."""
 
-MIN_SILENCE_FRACTION = 0.5
+MIN_SILENCE_FRACTION = 0.8
 """Where the floor of the turn-silence window sits relative to its ceiling.
 
 The floor is what governs in practice (measured: 200 ms -> 830 ms to the final,
-900 ms -> 1453 ms), so half makes `--vad-silence 1.5` feel like 1.5 s."""
+900 ms -> 1453 ms): past it the model may end the turn on its own, and at half
+(750 ms) a mid-sentence breath was enough. 1200 ms costs ~0.45 s a turn."""
 
 FLUSH_GRACE_SECONDS = 2.0
 """After `Terminate`, how long to wait for a last turn before closing the

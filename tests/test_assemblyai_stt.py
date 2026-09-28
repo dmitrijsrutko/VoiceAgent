@@ -186,7 +186,7 @@ def test_the_pause_reaches_the_url_in_milliseconds() -> None:
     url = AssemblyAISTT(api_key="test", silence_seconds=0.7).url
 
     assert "max_turn_silence=700" in url
-    assert "min_turn_silence=350" in url
+    assert "min_turn_silence=560" in url
 
 
 def test_a_wild_pause_is_clamped_to_what_the_service_accepts() -> None:

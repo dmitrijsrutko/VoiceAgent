@@ -80,8 +80,9 @@ editing files in the repo, scratch scripts, running and killing the local
 server, inspecting audio this project produced, re-running after a fix. If a
 command fails, fix the real cause and re-run.
 
-**Outward-facing, destructive or expensive: confirm first.** `git push`, PRs,
-`git commit` (only when asked), `rm -rf` or deleting files you did not create,
+**Outward-facing, destructive or expensive: confirm first.** `git commit` and
+`git push` (only when asked; then no confirmation), PRs, force-pushes,
+`rm -rf` or deleting files you did not create,
 `git reset --hard`, anything touching `.env` or secrets, deploying or
 provisioning, bulk paid API calls (a few smoke calls are fine; a sweep needs a
 cost estimate and a yes), system-wide installs.
