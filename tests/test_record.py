@@ -72,11 +72,11 @@ def test_the_header_says_which_option_ran_not_just_the_model(
     client = app_for(tmp_path, store)
     key = start(client)
 
-    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-high") as socket:
         receive(socket)
 
     header = recorded(tmp_path).splitlines()[1]
-    assert "deepseek-max" in header, header
+    assert "deepseek-high" in header, header
     assert "fake-1" in header, "the model is still named too"
 
 
@@ -362,3 +362,12 @@ def test_a_ruling_that_leaves_parts_out_is_written_without_them() -> None:
     assert "None" not in text
     for absent in ("**Fun**", "**Rematch**", "**Fallacies**", "**Position**", "**Moments**"):
         assert absent not in text
+
+
+def test_a_note_is_on_disk_before_the_record_is_closed(tmp_path: Path) -> None:
+    """A conversation whose teardown hangs never closes its record; its notes
+    (the last reply's `audio_end`, above all) must not wait for that."""
+    record = Record(tmp_path / "c.md")
+    record.note("audio_end: late_ms 900")
+
+    assert "late_ms 900" in (tmp_path / "c.md").read_text(encoding="utf-8")

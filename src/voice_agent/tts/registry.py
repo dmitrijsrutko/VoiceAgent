@@ -37,6 +37,7 @@ class Option:
 
 
 MENU: tuple[Option, ...] = (
+    Option("flash-v2.5", "elevenlabs", "eleven_flash_v2_5", "Flash v2.5", "fastest"),
     Option(
         "multilingual-v2",
         "elevenlabs",
@@ -44,12 +45,12 @@ MENU: tuple[Option, ...] = (
         "Multilingual v2",
         "most expressive",
     ),
-    Option("flash-v2.5", "elevenlabs", "eleven_flash_v2_5", "Flash v2.5", "fastest"),
 )
+"""Fastest first: the page draws it left to right, as it does every group."""
 
-DEFAULT_CHOICE = "multilingual-v2"
-"""What a conversation speaks with unless it picks another. Not the fastest
-to first audio (that is Flash): the one that sounds most alive."""
+DEFAULT_CHOICE = "flash-v2.5"
+"""What a conversation speaks with unless it picks another: the fastest to first
+audio, and so the leftmost option, as in every other group."""
 
 BY_NAME: dict[str, Option] = {option.name: option for option in MENU}
 

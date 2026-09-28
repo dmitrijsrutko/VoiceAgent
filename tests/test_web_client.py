@@ -488,7 +488,9 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
 
     assert 'choose("llm", "Reasoning"' in start, "the reasoning group is gone"
     assert "escape(o.hint)" in start, "the model's grey line is not the server's"
-    assert "=== p).reverse()" in start, "each vendor's row is no longer strongest first"
+    assert "=== p))" in start and ".reverse()" not in start, (
+        "each vendor's row is no longer fastest first, as the menu is"
+    )
     assert "PROVIDERS[o.provider] ?? o.provider)} ${escape(o.title)}" in start, (
         "a voice option no longer names its vendor"
     )

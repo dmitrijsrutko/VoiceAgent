@@ -27,14 +27,16 @@ from voice_agent.timeline import Turn, stats, with_think_times
 logger = logging.getLogger(__name__)
 
 JUDGES: tuple[Choice, ...] = (
-    Choice("deepseek-high", "deepseek", "deepseek-flash", "DeepSeek V4.1 Flash", "high"),
-    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Claude Opus 5.5", "medium"),
+    Choice(
+        "deepseek-high", "deepseek", "deepseek-flash", "DeepSeek V4.1 Flash", "high", "smartest"
+    ),
+    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Claude Opus 5.5", "medium", "smartest"),
 )
-"""The models a round may be judged by: the conversation's own. DeepSeek first and
-the default, at `high`: at `max` it kept the user waiting too long. Opus 5.5 at
-`medium`, its own default: at `max` it spent all 32 000 tokens thinking about a
-10-turn round and wrote no verdict. Both by the user's decision. Named, not left to
-`create_llm`, which would give the conversation's `low`."""
+"""The models a round may be judged by: the menu's two "smartest", each at its
+vendor's default effort. DeepSeek first and the default, at `high` (at `max` it
+kept the user waiting too long). Opus 5.5 at `medium` (at `max` it spent all
+32 000 tokens thinking about a 10-turn round and wrote no verdict). Named, not
+left to `create_llm`, which would give the conversation's `low`."""
 
 BY_NAME = {choice.name: choice for choice in JUDGES}
 

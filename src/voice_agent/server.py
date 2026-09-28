@@ -443,6 +443,11 @@ def create_app(
     return app
 
 
+SLOW_TEARDOWN_SECONDS = 1.0
+"""Closing a conversation cancels a few tasks and should take milliseconds;
+past this it is worth a line."""
+
+
 async def serve(agent: Agent, websocket: WebSocket, key: str) -> None:
     """One conversation's socket, from admission to hang-up."""
     try:
@@ -547,10 +552,16 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         else None
     )
     ending = asyncio.ensure_future(session.ended.wait())
+    opened = timing.now()
+    # Why the socket's loop stopped, for the one line that says how it ended:
+    # without it, a conversation that vanished mid-reply left no trace at all.
+    why = "failed"
     try:
         # A reconnect to an ended conversation gets its history and nothing more.
         # Otherwise the loop runs until `end()` has finished, not merely begun.
         already_over = conversation.ended
+        if already_over:
+            why = "reopened after its end"
         while not already_over:
             # Raced with the ending: after `ended` the page sends nothing, and a
             # loop waiting on it would hold a live slot until the tab closed.
@@ -560,24 +571,34 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
                 receiving.cancel()
                 with contextlib.suppress(RuntimeError):
                     await websocket.close()  # possibly closed already, by the time limit
+                why = "ended"
                 break
             message = receiving.result()
             if message["type"] == "websocket.disconnect":
+                why = f"page disconnected (code {message.get('code')})"
                 break
             if (frame := message.get("bytes")) is not None:
                 if session.mic is not None:
                     session.mic.feed(frame)
             elif (raw := message.get("text")) is not None:
                 await handle_text(channel, session, raw, recording)
-    except WebSocketDisconnect:
+    except WebSocketDisconnect as exc:
+        why = f"page disconnected (code {exc.code})"
         return
     finally:
+        lived = timing.now() - opened
+        logger.info("conversation %s: socket closed, %s, after %.0f s", conversation.id, why, lived)
+        if recording is not None:
+            recording.note(f"socket closed: {why} · after_s {lived:.0f}")
         ending.cancel()
         if budget is not None:
             budget.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await budget
+        closing = timing.now()
         await session.close()
+        if (teardown := timing.now() - closing) > SLOW_TEARDOWN_SECONDS:
+            logger.warning("conversation %s: teardown took %.1f s", conversation.id, teardown)
         if recording is not None:
             recording.close()
         if judge_name is not None and conversation.ended and conversation.judging is None:

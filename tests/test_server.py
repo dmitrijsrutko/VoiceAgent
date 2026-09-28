@@ -251,7 +251,7 @@ def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tt
             "provider": "fake-voice",
             "voice": "fake-voice-1",
             "model": "fake-voice-model",
-            "choice": "multilingual-v2",
+            "choice": "flash-v2.5",
             "sample_rate": 24000,
         }
 
@@ -1000,12 +1000,12 @@ def test_the_page_offers_only_models_this_deployment_has_keys_for(
         "haiku-4-5",
         "sonnet-5",
         "opus-5-5",
+        "deepseek-off",
         "deepseek-low",
         "deepseek-high",
-        "deepseek-max",
     ]
-    assert [o["name"] for o in choices["stt"]] == ["elevenlabs", "assemblyai"]
-    assert [o["name"] for o in choices["llm"] if o["default"]] == ["deepseek-max"]
+    assert [o["name"] for o in choices["stt"]] == ["assemblyai", "elevenlabs"]
+    assert [o["name"] for o in choices["llm"] if o["default"]] == ["deepseek-off"]
     assert [o["name"] for o in choices["stt"] if o["default"]] == ["assemblyai"]
 
     # The menu is fixed when the app is built, so this needs a second app.
@@ -1015,9 +1015,9 @@ def test_the_page_offers_only_models_this_deployment_has_keys_for(
     assert isinstance(choices, dict)
 
     assert [o["name"] for o in choices["llm"]] == [
+        "deepseek-off",
         "deepseek-low",
         "deepseek-high",
-        "deepseek-max",
     ], "a provider without a key offers none of its models"
 
 
@@ -1060,10 +1060,10 @@ def test_the_query_string_chooses_the_stack(
     client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
     key = start(client)
 
-    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max&stt=elevenlabs") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-high&stt=elevenlabs") as socket:
         receive(socket)
 
-    assert (store.get(key).engine, store.get(key).ears) == ("deepseek-max", "elevenlabs")
+    assert (store.get(key).engine, store.get(key).ears) == ("deepseek-high", "elevenlabs")
 
 
 def test_a_reconnect_keeps_the_stack_it_started_on(
@@ -1077,7 +1077,7 @@ def test_a_reconnect_keeps_the_stack_it_started_on(
     client = TestClient(create_app(llm=llm, tts=tts, stt=stt, store=store, greeting=""))
     key = start(client)
 
-    with client.websocket_connect(f"/ws/{key}?llm=deepseek-max&stt=elevenlabs") as socket:
+    with client.websocket_connect(f"/ws/{key}?llm=deepseek-high&stt=elevenlabs") as socket:
         receive(socket)
     chose = (store.get(key).engine, store.get(key).ears)
 
@@ -1085,15 +1085,15 @@ def test_a_reconnect_keeps_the_stack_it_started_on(
         receive(socket)
 
     assert (store.get(key).engine, store.get(key).ears) == chose
-    assert chose == ("deepseek-max", "elevenlabs")
+    assert chose == ("deepseek-high", "elevenlabs")
 
 
-@pytest.mark.parametrize("query", ["?llm=bogus&stt=bogus", "?llm=deepseek-max", ""])
+@pytest.mark.parametrize("query", ["?llm=bogus&stt=bogus", "?llm=deepseek-high", ""])
 def test_an_unknown_or_keyless_choice_falls_back_to_the_default(
     llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch, query: str
 ) -> None:
     """A URL a stranger can type, not configuration — so it is repaired rather
-    than refused. `deepseek-max` is a real option with no key behind it here,
+    than refused. `deepseek-high` is a real option with no key behind it here,
     which is the same situation from the visitor's side."""
     store = SessionStore()
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
@@ -1126,6 +1126,6 @@ def test_the_page_names_the_model_each_option_would_actually_run(
 
     assert advertised["haiku-4-5"] == ("Haiku 4.5", "claude-haiku-4-5")
     assert advertised["opus-5-5"] == ("Opus 5.5", "claude-opus-5-5")
-    assert advertised["deepseek-max"] == ("V4.1 Flash", "deepseek-flash")
+    assert advertised["deepseek-high"] == ("V4.1 Flash", "deepseek-flash")
     hints = {o["name"]: o["hint"] for o in choices["llm"]}
-    assert hints["deepseek-max"] == "deepest thinking" and hints["opus-5-5"] == "smartest"
+    assert hints["deepseek-high"] == "smartest" and hints["opus-5-5"] == "smartest"

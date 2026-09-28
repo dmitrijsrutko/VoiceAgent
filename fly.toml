@@ -58,11 +58,11 @@ primary_region = "iad"
   VOICE_AGENT_PORT = "8000"
 
   # No reasoning engine is pinned here any more. The page offers the menu and
-  # preselects Haiku 4.5, which is what this deployment was set to run: measured
+  # preselects DeepSeek V4.1 Flash with thinking off, the leftmost option. Measured
   # from *this* region with `--bench-llm`, DeepSeek's time to first token is
   # 915 ms p50 against Haiku's 435 ms — a gap of 2.1x — because DeepSeek is
   # served from China and iad is the wrong side of the planet for it. A visitor
-  # can still pick DeepSeek per conversation, which is the point of the menu.
+  # can pick Haiku per conversation, which is the point of the menu.
 
   # Recorded, and the page says so before anybody speaks (`noteRecording`).
   VOICE_AGENT_SESSIONS = "/data/sessions"

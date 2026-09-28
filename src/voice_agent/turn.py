@@ -378,6 +378,14 @@ class Speech:
             return
         late_ms = round((now - self._first_sent_at - pcm_seconds(self._sent)) * 1000)
         if late_ms > self._late_ms:
+            if self._late_ms < FELL_BEHIND_MS <= late_ms:
+                # As it happens, not only in `audio_end`: a reply whose audio
+                # never closes would otherwise take its lateness with it.
+                logger.warning(
+                    "synthesis falling behind playback: %d ms after %r",
+                    late_ms,
+                    self._voiced_tail(),
+                )
             self._late_ms = late_ms
             self._late_after = self._voiced_tail()
 

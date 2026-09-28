@@ -19,7 +19,7 @@ from anthropic.types import (
 
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
-from voice_agent.errors import ProviderError
+from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
 from voice_agent.llm.http import http_client, record_call
 
@@ -97,6 +97,10 @@ class AnthropicLLM:
     ) -> None:
         self.provider = "anthropic"
         self.model = model or DEFAULT_MODEL
+        if effort == "off":
+            # At startup, not on the first turn: Haiku has no thinking to switch
+            # off, and Opus 5.5 refuses to — `low` is the least there is.
+            raise ConfigError("no Claude option switches thinking off; ask for low")
         self.effort = effort
         self.max_tokens = max_tokens
         """What this adapter was told to ask for. `None` is an instruction and

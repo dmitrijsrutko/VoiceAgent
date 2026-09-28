@@ -234,8 +234,12 @@ class Record:
             self.note(notes)
 
     def note(self, text: str) -> None:
-        """Something the page never saw: a mic expiry, a turn that died."""
+        """Something the page never saw: a mic expiry, a turn that died.
+
+        Flushed at once: a conversation whose teardown never finishes would
+        otherwise lose every note after its last message."""
         self._write(f"\n`{text}`\n")
+        self.flush()
 
     def said(self, text: str, how: str = "typed") -> None:
         """Input the browser never echoes back, so `Channel` cannot see it."""

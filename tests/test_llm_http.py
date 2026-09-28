@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 
 from voice_agent.conversation import Message
-from voice_agent.errors import ProviderError
+from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.llm import create_llm
 from voice_agent.llm.anthropic_provider import AnthropicLLM
 from voice_agent.llm.base import LLM, Effort, Usage
@@ -292,6 +292,26 @@ async def test_an_effort_the_caller_names_is_the_one_sent() -> None:
         await reply(openai_compatible(provider.port, effort="max"))
 
     assert provider.requests[0]["reasoning_effort"] == "max"
+
+
+async def test_thinking_off_is_the_switch_not_an_effort() -> None:
+    """DeepSeek's fastest option: thinking disabled outright, and no
+    `reasoning_effort` beside it, which would ask for thinking again."""
+    async with Provider() as provider:
+        await reply(openai_compatible(provider.port, effort="off"))
+
+    assert provider.requests[0]["thinking"] == {"type": "disabled"}
+    assert "reasoning_effort" not in provider.requests[0]
+
+
+def test_thinking_off_is_refused_where_there_is_no_switch() -> None:
+    with pytest.raises(ConfigError, match="no way to switch thinking off"):
+        openai_compatible(1, OPENAI, effort="off")
+
+
+def test_no_claude_option_may_switch_thinking_off() -> None:
+    with pytest.raises(ConfigError, match="no Claude option switches thinking off"):
+        AnthropicLLM("m", effort="off")
 
 
 async def test_a_provider_that_has_no_such_parameter_is_not_sent_it() -> None:

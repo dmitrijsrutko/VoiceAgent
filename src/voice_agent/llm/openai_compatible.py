@@ -18,7 +18,7 @@ from openai.types.shared_params.reasoning_effort import ReasoningEffort
 
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
-from voice_agent.errors import ProviderError
+from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
 from voice_agent.llm.http import http_client, record_call
 
@@ -35,6 +35,9 @@ class OpenAICompatibleSpec:
     default_effort: Effort | None = None
     """What this engine asks for when a caller names no effort, or `None` when it
     has no such parameter to set — which is not the same as `low`."""
+    thinking_off: dict[str, object] | None = None
+    """The request body that switches thinking off, for effort `off`; `None`
+    where the provider has no such switch."""
 
 
 OPENAI = OpenAICompatibleSpec(
@@ -59,6 +62,8 @@ DEEPSEEK = OpenAICompatibleSpec(
     # step up from. The chain of thought arrives as `reasoning_content`, which
     # `stream` never yields: it is not something to say out loud.
     default_effort="low",
+    # Not an effort level: the separate switch, sent beside no `reasoning_effort`.
+    thinking_off={"thinking": {"type": "disabled"}},
 )
 
 
@@ -95,7 +100,14 @@ class OpenAICompatibleLLM:
         """What this adapter was told to ask for. `None` is an instruction and
         not a default: it means send nothing, which is what an engine with no
         effort to set resolves to."""
-        self._reasoning_effort: ReasoningEffort | Omit = omit if effort is None else effort
+        self._extra_body: dict[str, object] | None = None
+        self._reasoning_effort: ReasoningEffort | Omit = omit
+        if effort == "off":
+            if spec.thinking_off is None:
+                raise ConfigError(f"{spec.provider} has no way to switch thinking off")
+            self._extra_body = spec.thinking_off
+        elif effort is not None:
+            self._reasoning_effort = effort
         self._client = client or AsyncOpenAI(
             api_key=require_env(spec.api_key_env),
             base_url=spec.base_url,
@@ -123,6 +135,7 @@ class OpenAICompatibleLLM:
                 # one extra final chunk carries the counts and has no choices.
                 stream_options={"include_usage": True},
                 reasoning_effort=self._reasoning_effort,
+                extra_body=self._extra_body,
             )
             if usage is not None:
                 call.fill(usage)

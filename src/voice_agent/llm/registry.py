@@ -89,27 +89,25 @@ class Choice:
 
 CHOICES: tuple[Choice, ...] = (
     Choice("haiku-4-5", "anthropic", "claude-haiku-4-5", "Haiku 4.5", hint="fastest"),
-    Choice("sonnet-5", "anthropic", "claude-sonnet-5", "Sonnet 5", hint="balanced"),
-    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Opus 5.5", hint="smartest"),
-    Choice("deepseek-low", "deepseek", "deepseek-flash", "V4.1 Flash", "low", "fastest"),
-    Choice(
-        "deepseek-high", "deepseek", "deepseek-flash", "V4.1 Flash", "high", "balanced thinking"
-    ),
-    Choice("deepseek-max", "deepseek", "deepseek-flash", "V4.1 Flash", "max", "deepest thinking"),
+    Choice("sonnet-5", "anthropic", "claude-sonnet-5", "Sonnet 5", "low", "balanced"),
+    Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Opus 5.5", "medium", "smartest"),
+    Choice("deepseek-off", "deepseek", "deepseek-flash", "V4.1 Flash", "off", "fastest"),
+    Choice("deepseek-low", "deepseek", "deepseek-flash", "V4.1 Flash", "low", "balanced"),
+    Choice("deepseek-high", "deepseek", "deepseek-flash", "V4.1 Flash", "high", "smartest"),
 )
 """The menu, fastest first: `offered()` falls back to the first, which should be
-the cheapest. The page draws each vendor's row the other way, strongest first.
+the cheapest. The page draws each vendor's row in this order too, so fastest is
+on the left and smartest on the right, in the same three words for every vendor.
 
-One headline idea: the page offers models, not providers. Every Anthropic choice
-is a different model and sets no effort of its own, so all three run at the
-engine's `DEFAULT_EFFORT` — Anthropic's effort is not what distinguishes its
-tiers. Every DeepSeek choice is the same model at a different effort, because
-that is what distinguishes its levels, and each names one.
+One rule makes the columns comparable across vendors: **fastest** does not think
+(DeepSeek switched off; Haiku 4.5 has no thinking), **balanced** thinks the least
+it can (`low` on both), **smartest** thinks as its vendor sets by default
+(DeepSeek `high`; Opus 5.5 `medium`). Claude's tiers are different models;
+DeepSeek's are one model at different efforts, because that is what it offers.
 
 Haiku 4.5 is the reason a choice may not set an effort rather than set `None`
 to mean "none": it is the model that rejects the parameter, and only the adapter
-can discover that, by asking. `Choice.effort` is therefore `None` for all three
-Anthropic options and the adapter drops what it cannot use.
+can discover that, by asking. Its `Choice.effort` is `None`.
 
 A title names the model **without its vendor**, because the page groups the
 options under the vendor's own name — "Claude" over three, "DeepSeek" over three.
@@ -117,9 +115,9 @@ Repeating it in every option made each one wide enough that a group wrapped,
 which is the one thing the grouping exists to avoid.
 """
 
-DEFAULT_CHOICE = "deepseek-max"
-"""What a conversation runs unless it picks another. Not the fastest to first
-token (that is Haiku 4.5): the one the page should start on."""
+DEFAULT_CHOICE = "deepseek-off"
+"""What a conversation runs unless it picks another: the fastest of the top row,
+so the page's default is its leftmost option, as in every other group."""
 
 BY_NAME: dict[str, Choice] = {choice.name: choice for choice in CHOICES}
 

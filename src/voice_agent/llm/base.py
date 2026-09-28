@@ -7,7 +7,7 @@ from typing import Literal, Protocol
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 
-Effort = Literal["low", "medium", "high", "max"]
+Effort = Literal["low", "medium", "high", "max", "off"]
 """How hard a provider is asked to think before it answers, where it can be.
 
 Narrower than either vendor's own vocabulary on purpose. DeepSeek maps
@@ -15,7 +15,9 @@ Narrower than either vendor's own vocabulary on purpose. DeepSeek maps
 so of the seven values it accepts only three mean anything different — and
 Anthropic takes all three of these among its five. They are therefore the levels
 a DeepSeek option can honestly offer. `medium` is Anthropic's alone (Opus 5.5's own
-default, which the judge asks for); DeepSeek would read it as `high`. An adapter
+default, which the judge asks for); DeepSeek would read it as `high`. `off` is
+DeepSeek's alone: thinking switched off, not merely shortened — no Claude option
+may ask for it (Haiku has no thinking to switch off; Opus 5.5 refuses). An adapter
 translates this into whatever its own SDK wants; a vendor's type never crosses
 this boundary.
 

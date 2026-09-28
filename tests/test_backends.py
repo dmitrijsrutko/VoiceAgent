@@ -44,13 +44,13 @@ def test_different_models_are_different_instances(monkeypatch: pytest.MonkeyPatc
 def test_one_model_at_two_efforts_is_two_instances(monkeypatch: pytest.MonkeyPatch) -> None:
     """Effort is per conversation now, and the pool keys on the option rather
     than on the model, so the same model at two efforts is two adapters with two
-    connections. One shared between `low` and `max` would answer at whichever
+    connections. One shared between `low` and `high` would answer at whichever
     of the two happened to be built first."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "sk-test")
     pool = offered()
 
-    assert pool.engine("deepseek-low") is not pool.engine("deepseek-max")
-    assert pool.engine("deepseek-low").model == pool.engine("deepseek-max").model
+    assert pool.engine("deepseek-low") is not pool.engine("deepseek-high")
+    assert pool.engine("deepseek-low").model == pool.engine("deepseek-high").model
 
 
 def test_recognizers_are_shared_too(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -115,7 +115,7 @@ def test_each_option_builds_its_own_provider_and_model(
         assert built[choice.name].model == choice.model
 
     assert built["haiku-4-5"].model == "claude-haiku-4-5"
-    assert built["deepseek-max"].model == "deepseek-flash"
+    assert built["deepseek-high"].model == "deepseek-flash"
 
 
 def test_the_menu_offers_only_what_holds_a_key(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,13 +136,13 @@ def test_the_menu_offers_only_what_holds_a_key(monkeypatch: pytest.MonkeyPatch) 
     )
 
 
-def test_the_default_is_v4_1_flash_max(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_the_default_is_v4_1_flash_with_thinking_off(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in ("DEEPSEEK_API_KEY", "ANTHROPIC_API_KEY"):
         monkeypatch.setenv(name, "sk-test")
 
     pool = Backends("assemblyai")
 
-    assert pool.default_engine == DEFAULT_CHOICE == "deepseek-max"
+    assert pool.default_engine == DEFAULT_CHOICE == "deepseek-off"
     assert pool.menu.index(CHOICES[0]) == 0, "the menu keeps its order"
 
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
@@ -161,7 +161,7 @@ def test_an_option_that_cannot_be_run_is_not_offered(monkeypatch: pytest.MonkeyP
 
     chosen, _, _, _ = pool.choose(conversation, {"llm": "opus-5-5"})
 
-    assert chosen == "deepseek-max"
+    assert chosen == "deepseek-off"
 
     kept, _, _, _ = pool.choose(Conversation(id="u"), {"llm": "deepseek-low"})
     assert kept == "deepseek-low"
@@ -252,24 +252,24 @@ def voiced() -> Backends:
     return Backends("assemblyai", voice_provider="elevenlabs")
 
 
-def test_the_voice_menu_offers_both_models_with_multilingual_by_default() -> None:
+def test_the_voice_menu_offers_both_models_fastest_first_and_by_default() -> None:
     pool = voiced()
     tts = pool.choices("x", "none", voice=pool.default_voice)["tts"]
 
-    assert [o["model"] for o in tts] == ["eleven_multilingual_v2", "eleven_flash_v2_5"]
-    assert [o["name"] for o in tts if o["default"]] == ["multilingual-v2"]
+    assert [o["model"] for o in tts] == ["eleven_flash_v2_5", "eleven_multilingual_v2"]
+    assert [o["name"] for o in tts if o["default"]] == ["flash-v2.5"]
 
 
 def test_a_voice_model_is_picked_pinned_and_unknown_names_fall_back() -> None:
     pool = voiced()
     conversation = Conversation(id="v")
 
-    *_, first = pool.choose(conversation, {"tts": "flash-v2.5"})
-    *_, again = pool.choose(conversation, {"tts": "multilingual-v2"})
+    *_, first = pool.choose(conversation, {"tts": "multilingual-v2"})
+    *_, again = pool.choose(conversation, {"tts": "flash-v2.5"})
     *_, unknown = pool.choose(Conversation(id="w"), {"tts": "eleven_turbo_v2_5"})
 
-    assert (first, again) == ("flash-v2.5", "flash-v2.5"), "a reconnect keeps its voice"
-    assert unknown == "multilingual-v2"
+    assert (first, again) == ("multilingual-v2", "multilingual-v2"), "a reconnect keeps its voice"
+    assert unknown == "flash-v2.5"
 
 
 def test_silent_offers_no_voice_and_builds_none() -> None:

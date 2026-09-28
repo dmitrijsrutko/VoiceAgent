@@ -69,13 +69,13 @@ function choose(group, title, options, describe, { single = false, byProvider = 
       `${o.default ? " checked" : ""}><span>${describe(o)}</span></label>`).join("") + `</div>`;
   let body = radios(ordered);
   if (byProvider) {
-    // The default's provider first, and each provider's models strongest first:
-    // the menu is fastest first, so each row is drawn reversed, and the two rows
-    // line up column for column (Opus / Sonnet / Haiku over max / high / low).
+    // The default's provider first, and each provider's models in menu order,
+    // fastest on the left: the two rows line up column for column (off / low /
+    // high over Haiku / Sonnet / Opus), fastest · balanced · smartest.
     const names = [...new Set(ordered.map((o) => o.provider))];
     body = `<div class="rows">` + names.map((p) =>
       `<div class="row"><b>${escape(PROVIDERS[p] ?? p)}</b>` +
-      `${radios(options.filter((o) => o.provider === p).reverse())}</div>`).join("") + `</div>`;
+      `${radios(options.filter((o) => o.provider === p))}</div>`).join("") + `</div>`;
   }
   const el = document.createElement("div");
   el.className = "pick";
@@ -111,7 +111,8 @@ export function showStart(known) {
   }
 
   // Shown only while a judged role is picked (or is the only one there is).
-  const judges = choose("judge", "Judge", known.choices?.judge ?? [], (o) => escape(o.title));
+  const judges = choose("judge", "Judge", known.choices?.judge ?? [],
+    (o) => `${escape(o.title)} <small>${escape(o.hint ?? "")}</small>`);
   if (judges) {
     const role = () => picked("role") || roles.find((o) => o.default)?.name;
     const judged = () => roles.find((o) => o.name === role())?.judged ?? false;

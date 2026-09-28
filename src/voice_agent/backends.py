@@ -176,7 +176,13 @@ class Backends:
             ],
             "stt": [{**describe(name), "default": name == ears} for name in self.listeners],
             "judge": [
-                {"name": c.name, "title": c.title, "provider": c.provider, "default": not n}
+                {
+                    "name": c.name,
+                    "title": c.title,
+                    "hint": c.hint,
+                    "provider": c.provider,
+                    "default": not n,
+                }
                 for n, c in enumerate(self.judges)
             ],
             "tts": [

@@ -90,3 +90,12 @@ def test_the_record_names_only_an_unusual_end(reason: str | None, shown: str | N
     report = reply_report("Yes.", 1, 10, timing.now(), Usage(finish_reason=reason))
 
     assert report["finish"] == shown
+
+
+async def test_falling_behind_is_logged_as_it_happens(caplog: pytest.LogCaptureFixture) -> None:
+    """Not only in `audio_end`: a reply whose audio never closes took its
+    lateness with it, and the stutter the user heard left no trace."""
+    await spoken(stall=0.7)
+
+    assert caplog.text.count("synthesis falling behind playback") == 1
+    assert "'Dost'" in caplog.text
