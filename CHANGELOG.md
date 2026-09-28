@@ -14,6 +14,26 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Tweak — Two switches: stats and thoughts
+
+The single **details** switch showed two different things: what each part of
+the pipeline cost, and what the agent considered saying. Someone following the
+inner voice had to wade through timings, and someone reading timings had the
+thinking in the way. They are now two independent checkboxes, both off by
+default.
+
+**What changed**
+- `index.html`, `ui.js`, `app.js`: **stats** shows the notes under bubbles, the
+  heard-its-own-voice lines and the floor strip. **thoughts** shows the
+  inner voice (💭 and the 🤫 decline counter) and the silence clock's verdicts.
+  Thought lines keep their own timing and token tail.
+- Each switch is remembered per browser under its own key. The old `details`
+  key is ignored, so everyone starts with both off.
+
+**Verification** — `uv run verify` (779 passed, node tests included); a local
+server serves both switches and the new scripts. Toggling in a browser: not yet
+observed.
+
 ## Chapter 28 — The judge: a devil's-advocate round ends with a verdict
 
 The devil's advocate argued, and nothing ever said how the user did. A DA conversation

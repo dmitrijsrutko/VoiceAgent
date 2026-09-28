@@ -52,7 +52,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **13 — The clock, retuned.** Considers speaking at 5, 15 and 28 s of silence, and knows its own delays.
 - **14 — Off localhost.** A public instance on Fly.io, next to the vendors, with spend caps that are off unless configured.
 - **15 — The vendors become a choice.** The start screen picks engine and ears per conversation; backends are shared and kept warm.
-- **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch, and comments cut to their constraints.
+- **Simplification.** Warming removed, the server and client split into smaller parts, telemetry behind a **details** switch (now **stats** and **thoughts**), and comments cut to their constraints.
 - **16 — Ears that hear pauses.** A voice detector on the server shows who holds the floor, ~0.75 s before AssemblyAI commits (~1.6 s before Scribe).
 - **17 — The inner voice.** Pick a role on the start screen (none by default, a devil's advocate, or a thinking partner, each a card in `prompts/roles/`), and a fast model thinks alongside you, shown on the page but not spoken.
 - **Refactor.** Whole conversations replay on virtual time against golden transcripts (`tests/tapes/`); every turn-taking decision runs on one inbox (`Session`, `events.py`); one clock, one settings path, prompts as data; OpenAI's voice dropped.

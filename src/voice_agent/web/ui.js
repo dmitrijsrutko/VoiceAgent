@@ -9,7 +9,8 @@ export const meta = document.getElementById("meta");
 export const status = document.getElementById("status");
 export const timer = document.getElementById("timer");
 export const mute = document.getElementById("mute");
-export const details = document.getElementById("details");
+export const stats = document.getElementById("stats");
+export const thoughts = document.getElementById("thoughts");
 export const floor = document.getElementById("floor");
 export const listen = document.getElementById("listen");
 export const endButton = document.getElementById("end");
@@ -48,7 +49,7 @@ export function add(text, cls) {
 }
 
 // A line under a bubble. Telemetry unless said otherwise, which the page hides
-// until "details" is on. Appended inside `stick`: it is the last thing in a
+// until "stats" is on. Appended inside `stick`: it is the last thing in a
 // turn, and a note that does not scroll is a note nobody sees.
 export function note(el, text, cls = "telemetry") {
   const tag = document.createElement("span");

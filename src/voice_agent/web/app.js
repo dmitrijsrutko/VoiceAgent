@@ -17,8 +17,8 @@ import {
   truncatedLine, unpromptedLine,
 } from "./telemetry.js";
 import {
-  add, begin, details, endButton, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
-  pinLast, setEnabled, start, status, stick, timer, wrap,
+  add, begin, endButton, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
+  pinLast, setEnabled, start, stats, status, stick, thoughts, timer, wrap,
 } from "./ui.js";
 
 const key = location.pathname.split("/").pop();
@@ -383,7 +383,7 @@ const handlers = {
     if (live) { stick(() => live.remove()); releaseLive(); }
   },
 
-  initiative(msg) { add(initiativeLine(msg), "note think telemetry"); },
+  initiative(msg) { add(initiativeLine(msg), "note think thought"); },
 
   floor(msg) { recordFloor(floorEvents, msg, performance.now()); },
 
@@ -398,14 +398,14 @@ const handlers = {
   // worth saying, or it would bury the conversation.
   thought(msg) {
     if (msg.decision === "nothing" || msg.decision === "unchanged") {
-      if (!quiet) quiet = { el: add("", "note think telemetry"), count: 0 };
+      if (!quiet) quiet = { el: add("", "note think thought"), count: 0 };
       quiet.count += 1;
       const line = quietLine(quiet.count, msg);
       stick(() => { quiet.el.textContent = line; });
       return;
     }
     quiet = null;
-    add(thoughtLine(msg), "note think telemetry");
+    add(thoughtLine(msg), "note think thought");
   },
 
   listening(msg) {
@@ -602,15 +602,21 @@ if (served.ended) {
   showStart(served);
 }
 
-// Telemetry under every bubble, for whoever wants to see what each part cost.
-// Remembered per browser; storage may be unavailable, and that only forgets it.
-function showDetails(on) {
-  document.body.classList.toggle("details", on);
-  try { localStorage.setItem("details", on ? "1" : ""); } catch {}
+// Two switches, off by default: "stats" shows what each part cost (the notes
+// under bubbles, the floor strip), "thoughts" what the agent considered saying.
+// Each is remembered per browser; storage may be unavailable, and that only
+// forgets it.
+function bindSwitch(box, name) {
+  const show = (on) => {
+    document.body.classList.toggle(name, on);
+    try { localStorage.setItem(name, on ? "1" : ""); } catch {}
+  };
+  try { box.checked = localStorage.getItem(name) === "1"; } catch {}
+  show(box.checked);
+  box.onchange = () => show(box.checked);
 }
-try { details.checked = localStorage.getItem("details") === "1"; } catch {}
-showDetails(details.checked);
-details.onchange = () => showDetails(details.checked);
+bindSwitch(stats, "stats");
+bindSwitch(thoughts, "thoughts");
 
 form.onsubmit = (event) => {
   event.preventDefault();
@@ -634,5 +640,5 @@ form.onsubmit = (event) => {
 // The strip moves with time, not only with events: a pause grows while nothing
 // arrives. Painted only while it can be seen.
 setInterval(() => {
-  if (floorEvents.length && details.checked) paintFloor(floor, floorEvents, performance.now());
+  if (floorEvents.length && stats.checked) paintFloor(floor, floorEvents, performance.now());
 }, 100);
