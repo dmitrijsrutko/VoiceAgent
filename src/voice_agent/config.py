@@ -66,6 +66,9 @@ class Settings:
     session_budget: float | None
     mints_per_ip: int | None
     max_stored: int | None
+    admin_key: str | None = None
+    """The owner's key to `/admin`; unset, the page does not exist. It also
+    keys the visitor hash in the records, so rotating it starts new visitors."""
 
 
 def load_settings() -> Settings:
@@ -91,11 +94,28 @@ def load_settings() -> Settings:
         session_budget=_positive_float("VOICE_AGENT_SESSION_BUDGET"),
         mints_per_ip=_positive_int("VOICE_AGENT_MINTS_PER_IP"),
         max_stored=_positive_int("VOICE_AGENT_MAX_STORED"),
+        admin_key=_admin_key(os.environ.get("VOICE_AGENT_ADMIN_KEY", "")),
     )
 
 
 def _optional_float(raw: str | None) -> float | None:
     return float(raw) if raw else None
+
+
+MIN_ADMIN_KEY_CHARS = 24
+"""A wrong key is logged, not rate-limited, so the key's length is the whole
+defence against guessing. `secrets.token_urlsafe(32)` gives 43."""
+
+
+def _admin_key(raw: str) -> str | None:
+    key = raw.strip()
+    if key and len(key) < MIN_ADMIN_KEY_CHARS:
+        raise ConfigError(
+            f"VOICE_AGENT_ADMIN_KEY must be at least {MIN_ADMIN_KEY_CHARS} characters, "
+            f"got {len(key)}: generate one with "
+            '`python -c "import secrets; print(secrets.token_urlsafe(32))"`.'
+        )
+    return key or None
 
 
 def _positive_int(name: str) -> int | None:

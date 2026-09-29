@@ -14,6 +14,40 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 29 — The admin page: one private look at the server, its spend and every session
+
+The owner could see how the public instance was used only by `fly ssh` and
+reading `/data/sessions/*.md` by hand. Nothing added up usage: LLM tokens were
+counted per reply, and TTS characters and microphone seconds not at all.
+Balances lived in vendor consoles. `/c/{key}` links died on every restart even
+though the records survived. `/admin` puts all of it on one page, behind a key.
+
+**What changed**
+- `admin.py` (new): `/admin?key=…` checks `VOICE_AGENT_ADMIN_KEY` in constant time, sets an HttpOnly, SameSite=Strict cookie holding an HMAC of the key (never the key), and redirects so the key leaves the address bar. `/admin`, `/admin/api/stats` and `/admin/sessions/{file}` answer 404 without it, and so does every route when no key is set. The record view escapes everything and accepts only `[\w-]+.md` names in the sessions directory.
+- `ledger.py` (new): parses each record into a row: settings, client, visitor, duration, turns, tokens, TTS chars, mic seconds, verdict and score, topic. It sums the rows over four windows (since this process started, 24 h, 7 d, all) and breaks them down by model, ears, voice, judge, role and browser. Results are cached per file by mtime and size.
+- `quotas.py` (new): ElevenLabs `/v1/user/subscription` and DeepSeek `/user/balance`, 5 s timeout, cached 60 s. A vendor that fails is a row saying why. Anthropic and AssemblyAI get console links.
+- `record.py`: every connection now ends with one line: `` `totals · ended_at · connected_s · replies · you · prompt/cached/output_tokens · tts_chars · mic_s` ``. The header carries `visitor <hash>`: `HMAC-SHA256(admin key, client address)[:12]`. `server.py` counts inbound mic bytes into it and computes the hash at connect. `Agent` knows its wall-clock start and `FLY_IMAGE_REF`.
+- `web/admin.html`, `web/admin.js` (new): health, usage tiles with a window switch, quota cards, breakdown tables, and a filterable session table. The breakdown has one table per start-screen group (Role, Reasoning, Ears, Voice, Judge). Each table lists every option the start screen offers (`Backends.choices`, the call that builds that screen), in its order and named the same way, with zero when unused. Below those come any values the records hold that are no longer offered, such as `deepseek-max`, deaf or silent sessions, or not recorded. There are at most three tables to a row, wide enough not to scroll. Each table sorts on its own, the same way as the sessions table. A third click on a column restores the start screen's order. Offered options always stay above the older values. Every column sorts: the first click on a column puts newest, longest or biggest first, or A to Z for text, and a second click reverses it. Blank values sort last in both directions, and the choice is remembered. A count beside the filter reads "12 of 206 sessions" as you type. Each row links to `/c/{key}` while the conversation is in memory, else to its record.
+
+**Design decisions**
+- **The records are the source of truth**, not in-memory counters. Counters reset on every deploy, and "since the deploy" is simply the rows started after the process did. The cost is a parser that has to follow the record format. It reads older records too, summing their per-reply notes; they have no mic seconds and no visitor.
+- **Totals per connection, summed by the reader.** A reload is a new `Record`, so a resumed conversation has several `totals` lines. The judge's tokens stay on its own usage line, because the ruling is written after the close.
+- **Hashed, not stored, addresses**, keyed by the admin key. That is enough to count unique and returning visitors across deploys; rotating the key starts them over. Without a key no visitor field is written. Pseudonymous, not anonymous: whoever holds the key can hash every IPv4 address and read one back.
+- **Counts, not money.** A price table would go stale silently; the vendor balances are the money view.
+- **Topic without an LLM:** the judge's "stated" position if judged, else the first thing the user said, clipped to 140 characters. Free and instant, and crude on an unjudged conversation that opens with small talk.
+- **404, not 401**, so the page is not advertised. Wrong keys are logged, not rate-limited, so a key under 24 characters stops the server instead.
+- **The key lives in `.env`** (gitignored and dockerignored), and Fly gets the same value as a secret, piped from `.env` (`docs/DEPLOY.md`). Rejected: generating it at deploy time and echoing it, which leaves it in the terminal and has no local copy to sign in with.
+- **The conversation's own page only once it has ended.** Before that `/c/{key}` opens on the start screen, and starting there joins the visitor's conversation, so an in-progress row links to its record, which is written as it happens.
+
+**Latency impact** — not measured. Recording adds a few additions per frame and one line per connection. The admin page reads and parses records in a worker thread, off the loop that conversations share. The first load after a deploy parses every record, and later loads re-read only changed files.
+
+**Deliberately not done** — replaying a dead session in the real review UI (needs its frames persisted); $ estimates; Anthropic Admin API and AssemblyAI balances; LLM summaries; charts over time; deleting records from the page.
+
+**Verification** — `uv run verify` passes (tests in `test_ledger.py`, `test_quotas.py`, `test_admin.py`, and node tests in `tests/web/admin.test.mjs` for sorting, the count and stored-sort validation). Headless Chrome, driven through DevTools over 36 local records:
+- Sessions sorted by time went 7m 13s first and reversed to 0s first. Filtering on "deepseek" read "6 of 36 sessions", and the count survived a re-sort.
+- The breakdown showed five tables, three to a row, with none clipped.
+- Reasoning sorted by sessions, reversed, then returned to menu order on the third click, and Ears was untouched throughout. Real run on a local server with a key and the 35 existing records: one typed DeepSeek turn. The new record got `visitor ff11da1945bc` and a `totals` line (3344 prompt tokens, 3200 cached, 12 out, 184 TTS chars). The auth flow went: no cookie 404, wrong key 404, key 303 then cookie, then 200. Real balance reads came back: ElevenLabs 52.2k of 64.9k characters used; DeepSeek 8.60 USD. Headless Chrome drew the whole page with the right numbers. A traversal attempt was a 404, and the record view rendered a judged round's `LOSE 44/56` escaped. Not yet run on Fly.
+
 ## Tweak — Sonnet 5.5
 
 Claude Sonnet 5.5 replaces Sonnet 5 as the current Sonnet at the same price, so

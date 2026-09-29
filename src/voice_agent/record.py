@@ -15,9 +15,12 @@ import contextlib
 import json
 import logging
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+from voice_agent import timing
 
 logger = logging.getLogger(__name__)
 
@@ -172,6 +175,51 @@ def review(verdict: Mapping[str, Any]) -> str:
     return "\n\n".join(part for part in parts if part.strip())
 
 
+@dataclass
+class Totals:
+    """What one connection spent, written as one `totals` line when it closes.
+
+    Per connection, not per conversation: a reload is a new `Record`, so a
+    conversation resumed twice has three lines, and `ledger` adds them up.
+    The judge is not in here — its ruling is written after the close, with its
+    own usage line."""
+
+    voiced: bool
+    mic_rate: int
+    since: float
+    replies: int = 0
+    you: int = 0
+    prompt_tokens: int = 0
+    cached_tokens: int = 0
+    output_tokens: int = 0
+    tts_chars: int = 0
+    mic_bytes: int = 0
+
+    def count(self, kind: str, payload: Mapping[str, Any]) -> None:
+        if kind == "reply_end":
+            self.replies += 1
+            for key in ("prompt_tokens", "cached_tokens", "output_tokens"):
+                value = payload.get(key)
+                if isinstance(value, int):
+                    setattr(self, key, getattr(self, key) + value)
+        elif kind == "transcript":
+            self.you += 1
+        if kind in ("reply_end", "greeting") and self.voiced:
+            # What was sent to be spoken, which is what synthesis bills: a
+            # reply cut off by barge-in was still synthesised ahead of playback.
+            self.tts_chars += len(str(payload.get("text", "")))
+
+    def line(self) -> str:
+        mic_s = self.mic_bytes / (self.mic_rate * 2) if self.mic_rate else 0.0
+        return (
+            f"totals · ended_at {datetime.now():%H:%M:%S} · "
+            f"connected_s {timing.now() - self.since:.0f} · replies {self.replies} · "
+            f"you {self.you} · prompt_tokens {self.prompt_tokens} · "
+            f"cached_tokens {self.cached_tokens} · output_tokens {self.output_tokens} · "
+            f"tts_chars {self.tts_chars} · mic_s {mic_s:.0f}"
+        )
+
+
 class Record:
     """One conversation's file, appended to as the conversation happens.
 
@@ -180,10 +228,12 @@ class Record:
     on without it.
     """
 
-    def __init__(self, path: Path, prompt_id: str = "", trace: str = "") -> None:
+    def __init__(self, path: Path, prompt_id: str = "", trace: str = "", visitor: str = "") -> None:
         self._path = path
         self._prompt_id = prompt_id
         self._trace = trace
+        self._visitor = visitor
+        self._totals: Totals | None = None
         self._file: Any = None
         self._audio_frames = 0
         self._broken = False
@@ -243,12 +293,19 @@ class Record:
 
     def said(self, text: str, how: str = "typed") -> None:
         """Input the browser never echoes back, so `Channel` cannot see it."""
+        if self._totals is not None:
+            self._totals.you += 1
         self.block(f"you ({how})", text)
         self.flush()
 
     def audio(self, size: int) -> None:
         """A binary frame went out. Counted, never kept."""
         self._audio_frames += 1
+
+    def heard(self, size: int) -> None:
+        """A binary frame of microphone audio came in. Counted, never kept."""
+        if self._totals is not None:
+            self._totals.mic_bytes += size
 
     def frame(self, payload: Mapping[str, Any]) -> None:
         kind = str(payload.get("type", ""))
@@ -267,6 +324,8 @@ class Record:
         if kind == "transcript" and not payload.get("final"):
             return  # a partial the recognizer is still rewriting
 
+        if self._totals is not None:
+            self._totals.count(kind, payload)
         if kind in SPEAKERS:
             text = str(payload.get("text", ""))
             # Reset here as well as on `audio_end`: a reply whose audio never
@@ -320,6 +379,14 @@ class Record:
         file — a second header would read as a second conversation.
         """
         settings = self._settings(payload)
+        if self._visitor:
+            settings += f" · visitor {self._visitor}"
+        ears = payload.get("ears") or {}
+        self._totals = Totals(
+            voiced=bool(payload.get("voice")),
+            mic_rate=int(ears.get("sample_rate") or 0),
+            since=timing.now(),
+        )
         if self._path.exists() and self._path.stat().st_size:
             self._write(f"\n## {self._clock()} — reconnected\n{settings}\n")
             return
@@ -366,6 +433,9 @@ class Record:
                 self._broken = True
 
     def close(self) -> None:
+        if self._totals is not None:
+            self.note(self._totals.line())
+            self._totals = None
         if self._onsets:
             self.note(
                 f"floor: the user was heard starting to speak {self._onsets} times, "

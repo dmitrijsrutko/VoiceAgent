@@ -25,7 +25,7 @@ import math
 import os
 import re
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
@@ -36,7 +36,7 @@ from fastapi.staticfiles import StaticFiles
 from starlette.responses import Response
 from starlette.types import Scope
 
-from voice_agent import judge, roles, timing, trace, vad
+from voice_agent import admin, judge, roles, timing, trace, vad
 from voice_agent.backends import Backends
 from voice_agent.channel import Channel
 from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_settings
@@ -208,7 +208,9 @@ def ladder_for(delays: Sequence[float]) -> tuple[Rung, ...]:
     )
 
 
-def record_for(directory: Path | None, conversation: Conversation, prompt: str) -> Record | None:
+def record_for(
+    directory: Path | None, conversation: Conversation, prompt: str, visitor: str = ""
+) -> Record | None:
     """One file per conversation, named to sort by time, and reopened on resume.
     Kept on the conversation, which lives exactly as long as its link does."""
     if directory is None:
@@ -221,6 +223,7 @@ def record_for(directory: Path | None, conversation: Conversation, prompt: str) 
         conversation.record,
         prompt_id=f"system_prompt.md@{sha256(prompt.encode()).hexdigest()[:7]}",
         trace=running.path.name if running is not None else "",
+        visitor=visitor,
     )
 
 
@@ -246,6 +249,10 @@ class Agent:
     """How many rulings may run at once: `MAX_LIVE`, or no cap without one."""
     ready: bool = False
     """The engines are connected; `/healthz` waits on it."""
+    started_at: datetime = field(default_factory=datetime.now)
+    """Wall clock, for `/admin`'s "since this deploy": every deploy is a new process."""
+    image: str = field(default_factory=lambda: os.environ.get("FLY_IMAGE_REF", ""))
+    """Which build is running, on Fly; blank elsewhere."""
 
     def facts(
         self,
@@ -373,6 +380,8 @@ def create_app(
         if not agent.ready:
             return Response("warming", status_code=503, media_type="text/plain")
         return Response("ok", media_type="text/plain")
+
+    admin.routes(app, agent)
 
     @app.get("/")
     async def new_conversation(request: Request) -> Response:
@@ -508,7 +517,13 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
         greeting=opening,
         role=role.when_speaking if role is not None else "",
     )
-    recording = record_for(agent.record_dir, conversation, system_prompt)
+    address = client_address(websocket.headers, websocket.client.host if websocket.client else None)
+    recording = record_for(
+        agent.record_dir,
+        conversation,
+        system_prompt,
+        visitor=admin.visitor(agent.settings.admin_key, address),
+    )
     if judge_name is not None and conversation.timeline is None:
         conversation.timeline = Timeline()
     channel = Channel(websocket, recording, conversation.timeline, conversation.frames)
@@ -580,6 +595,8 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
                 why = f"page disconnected (code {message.get('code')})"
                 break
             if (frame := message.get("bytes")) is not None:
+                if recording is not None:
+                    recording.heard(len(frame))
                 if session.mic is not None:
                     session.mic.feed(frame)
             elif (raw := message.get("text")) is not None:

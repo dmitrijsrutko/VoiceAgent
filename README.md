@@ -68,6 +68,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **27 — The voice is a choice.** The start screen offers two ElevenLabs voice models on the same streaming socket: Flash v2.5 (fastest, the default since the start-screen reorder) and Multilingual v2 (most expressive). The pick travels as `?tts=` and is pinned per conversation; deprecated models (Turbo, v1) are refused. Measured first audio: 857 ms against 378 ms.
 - **28 — The judge.** The devil's advocate spars with wit and a little bite, and each conversation with it is a round: six minutes at most, an **⏹ End** button, and then a judge (DeepSeek V4.1 Flash at high effort by default, or Claude Opus 5.5 at medium) reads the timed transcript and rules. It gives win or lose, a split such as 40/60, the reasoning, a ten-point scorecard with quotes, the best and weakest moments, how to improve, a rematch brief, and a nickname and badge. It is drawn as a card under the transcript. `--judge RECORD` rules on a saved conversation offline.
 - **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
+- **29 — The admin page.** `/admin`, behind `VOICE_AGENT_ADMIN_KEY`, shows health, usage totals (since the deploy, 24 h, 7 days, all), ElevenLabs and DeepSeek balances, per-model/ears/voice/judge/role breakdowns, and every recorded session with its topic, score, visitor hash and a link to the live conversation or its record. All of it is read back from the session records. Each record now ends every connection with a `totals` line and carries a hashed visitor, never the address.
 
 ## Requirements
 
@@ -128,6 +129,8 @@ src/voice_agent/
   greeting.py             the opening line, spoken like any other reply
   record.py, trace.py     the conversation as Markdown; the span tree as JSONL
   limits.py, sessions.py  the public caps; the in-memory conversation store
+  admin.py, ledger.py     `/admin` behind the owner's key; the session records read back and summed
+  quotas.py               ElevenLabs' and DeepSeek's balances, cached a minute
   llm/ stt/ tts/          one protocol each, the vendor adapters, and a registry
   web/                    the page: native ES modules, no build step
     app.js                the socket and one handler per server message
@@ -139,6 +142,7 @@ src/voice_agent/
     verdict.js            the judge's ruling as a card (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js
+    admin.html, admin.js  the owner's page
 docs/                     ROADMAP.md (research), DEPLOY.md (runbook), history.md (Chapters 0–15),
                           vendor/ (AssemblyAI.md, ElevenLabs.md + skills snapshot)
 tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the thinker replay's scripts;

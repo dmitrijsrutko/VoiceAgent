@@ -45,6 +45,20 @@ fly secrets set \
   DEEPSEEK_API_KEY=...     `# reasoning (chapter 1)`
 ```
 
+`VOICE_AGENT_ADMIN_KEY` turns on `/admin` (chapter 29); unset, every admin route
+is a 404. Open `https://<app>.fly.dev/admin?key=<key>` once and the key is
+traded for a cookie. It also keys the visitor hash in the records, so rotating
+it makes every returning visitor look new.
+
+The key lives in your local `.env` (gitignored, and kept out of the image by
+`.dockerignore`), which is where you read it from to sign in. Fly never sees
+`.env`, so copy the value across. Piped, so it never appears on a command line
+or in shell history:
+
+```bash
+grep '^VOICE_AGENT_ADMIN_KEY=' .env | fly secrets import
+```
+
 **Which keys are set decides what visitors can pick.** The start screen offers
 the models named in `llm/registry.py`, and only those whose provider holds a key
 here — so adding `DEEPSEEK_API_KEY` puts the three DeepSeek tiers on the start

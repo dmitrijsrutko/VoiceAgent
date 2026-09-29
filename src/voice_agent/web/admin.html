@@ -1,0 +1,93 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>voice-agent admin</title>
+<style>
+:root {
+  --bg: #f7f7f5; --card: #fff; --ink: #1a1a1a; --muted: #6b6b6b; --line: #e3e3df;
+  --good: #1f7a4d; --bad: #b3261e; --warn: #9a6700; --accent: #2f5bd3;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #111; --card: #1b1b1b; --ink: #e8e8e8; --muted: #9a9a9a; --line: #2e2e2e;
+    --good: #5cc28e; --bad: #f08a80; --warn: #e0b64f; --accent: #8aa8ff; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; padding: 16px; background: var(--bg); color: var(--ink);
+  font: 14px/1.45 system-ui, -apple-system, sans-serif; }
+main { max-width: 1280px; margin: 0 auto; }
+h1 { font-size: 18px; margin: 0 0 4px; }
+h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+  margin: 24px 0 8px; font-weight: 600; }
+.sub { color: var(--muted); font-size: 12px; }
+.row { display: flex; flex-wrap: wrap; gap: 8px; }
+.tile { background: var(--card); border: 1px solid var(--line); border-radius: 8px;
+  padding: 10px 12px; min-width: 132px; flex: 1 1 132px; }
+.tile .label { color: var(--muted); font-size: 12px; }
+.tile .value { font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.tile .hint { color: var(--muted); font-size: 12px; }
+.good { color: var(--good); } .bad { color: var(--bad); } .warn { color: var(--warn); }
+.switch button { font: inherit; border: 1px solid var(--line); background: var(--card); color: var(--ink);
+  padding: 4px 10px; border-radius: 6px; cursor: pointer; }
+.switch button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); font-weight: 600; }
+.scroll { overflow-x: auto; background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+table { border-collapse: collapse; width: 100%; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--line); vertical-align: top;
+  white-space: nowrap; }
+th { color: var(--muted); font-weight: 500; font-size: 12px; }
+td.topic { white-space: normal; min-width: 220px; max-width: 360px; }
+td.num, th.num { text-align: right; }
+tr:last-child td { border-bottom: 0; }
+/* At most three to a row, fewer on a narrow screen; each wide enough that
+   nothing inside needs scrolling. */
+.breakdowns { display: grid; gap: 8px; align-items: start;
+  grid-template-columns: repeat(auto-fill, minmax(max(300px, calc((100% - 16px) / 3)), 1fr)); }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 8px; }
+table.breakdown th, table.breakdown td { padding: 6px 8px; }
+table.breakdown td.option, table.breakdown th.option { white-space: normal; width: 100%; }
+table.breakdown th.option { color: var(--ink); font-weight: 600; font-size: 13px; }
+tr.zero td { color: var(--muted); }
+tr.retired td.option { font-style: italic; }
+tr.first-retired td { border-top: 2px solid var(--line); }
+input[type=search] { font: inherit; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: var(--ink); width: min(360px, 100%); }
+a { color: var(--accent); }
+.tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; }
+button.sort { font: inherit; color: inherit; background: none; border: 0; padding: 0; cursor: pointer; }
+th[aria-sort="ascending"] button.sort, th[aria-sort="descending"] button.sort { color: var(--accent); }
+.error { color: var(--bad); }
+</style>
+</head>
+<body>
+<main>
+  <h1>voice-agent · admin</h1>
+  <div class="sub" id="asof">loading…</div>
+
+  <h2>Health</h2>
+  <div class="row" id="health"></div>
+
+  <h2>Usage</h2>
+  <div class="switch row" id="windows" role="group" aria-label="Period">
+    <button data-window="deploy">since deploy</button>
+    <button data-window="day">24 h</button>
+    <button data-window="week">7 days</button>
+    <button data-window="all">all records</button>
+  </div>
+  <div class="row" id="usage" style="margin-top:8px"></div>
+
+  <h2>Vendor quotas</h2>
+  <div class="row" id="quotas"></div>
+
+  <h2>Breakdown</h2>
+  <div class="breakdowns" id="breakdowns"></div>
+
+  <h2>Sessions</h2>
+  <p class="tools"><input type="search" id="filter" placeholder="filter: model, role, topic, visitor…">
+    <span class="sub" id="count" aria-live="polite"></span></p>
+  <div class="scroll"><table id="sessions"></table></div>
+</main>
+<script type="module" src="/static/admin.js"></script>
+</body>
+</html>
