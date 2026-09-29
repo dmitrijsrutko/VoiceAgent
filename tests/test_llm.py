@@ -83,7 +83,7 @@ def test_registry_builds_each_provider(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_model_can_be_overridden(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
-    assert AnthropicLLM("claude-sonnet-5").model == "claude-sonnet-5"
+    assert AnthropicLLM("claude-sonnet-5-5").model == "claude-sonnet-5-5"
 
 
 def test_unknown_provider_names_the_ones_that_exist() -> None:

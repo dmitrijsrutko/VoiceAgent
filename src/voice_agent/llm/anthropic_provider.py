@@ -32,7 +32,7 @@ DEFAULT_MODEL = "claude-opus-5-5"
 MODELS: tuple[str, ...] = (
     "claude-fable-5-1",
     "claude-opus-5-5",
-    "claude-sonnet-5",
+    "claude-sonnet-5-5",
     "claude-haiku-4-5",
 )
 """Every model this provider serves. `registry.check_model` holds a configured
@@ -40,9 +40,10 @@ model to this list, which is what stops a Claude name reaching another vendor.
 
 The list is the truth rather than a guess about how models are named, and a
 vendor's next model is added here. That is the cost of refusing a wrong pair
-instead of discovering it on a conversation's first turn. Two other spellings
-resolve and are deliberately absent: `claude-opus-5` is the *previous* Opus, and
-`claude-haiku-4-5-20251001` is the dated form of the alias already listed."""
+instead of discovering it on a conversation's first turn. Three other spellings
+resolve and are deliberately absent: `claude-opus-5` and `claude-sonnet-5` are
+the *previous* Opus and Sonnet, and `claude-haiku-4-5-20251001` is the dated
+form of the alias already listed."""
 
 DEFAULT_EFFORT: Effort = "low"
 """What this engine asks for when a caller names no effort. It lives here with

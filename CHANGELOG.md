@@ -14,6 +14,19 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Tweak — Sonnet 5.5
+
+Claude Sonnet 5.5 replaces Sonnet 5 as the current Sonnet at the same price, so
+the balanced Claude option now runs it: `?llm=sonnet-5-5`, `claude-sonnet-5-5`.
+`claude-sonnet-5` leaves `MODELS`, as `claude-opus-5` did before it.
+
+- **Effort `low` is kept, not re-measured.** The API default is `high` on both
+  models, but Sonnet 5.5 recalibrates the levels, so `low` is not the same
+  amount of thinking it was on Sonnet 5. Chapter 21's Sonnet latency numbers
+  describe the old model until they are measured again.
+- None of Sonnet 5.5's breaking changes reach this adapter: it never sends
+  `thinking`, `tool_choice` or `temperature`, and it already refuses `off`.
+
 ## Tweak — Two switches: stats and thoughts
 
 The single **details** switch showed two different things: what each part of

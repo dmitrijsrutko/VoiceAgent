@@ -89,7 +89,7 @@ class Choice:
 
 CHOICES: tuple[Choice, ...] = (
     Choice("haiku-4-5", "anthropic", "claude-haiku-4-5", "Haiku 4.5", hint="fastest"),
-    Choice("sonnet-5", "anthropic", "claude-sonnet-5", "Sonnet 5", "low", "balanced"),
+    Choice("sonnet-5-5", "anthropic", "claude-sonnet-5-5", "Sonnet 5.5", "low", "balanced"),
     Choice("opus-5-5", "anthropic", "claude-opus-5-5", "Opus 5.5", "medium", "smartest"),
     Choice("deepseek-off", "deepseek", "deepseek-flash", "V4.1 Flash", "off", "fastest"),
     Choice("deepseek-low", "deepseek", "deepseek-flash", "V4.1 Flash", "low", "balanced"),

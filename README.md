@@ -67,6 +67,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and ElevenLabs Scribe; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
 - **27 — The voice is a choice.** The start screen offers two ElevenLabs voice models on the same streaming socket: Flash v2.5 (fastest, the default since the start-screen reorder) and Multilingual v2 (most expressive). The pick travels as `?tts=` and is pinned per conversation; deprecated models (Turbo, v1) are refused. Measured first audio: 857 ms against 378 ms.
 - **28 — The judge.** The devil's advocate spars with wit and a little bite, and each conversation with it is a round: six minutes at most, an **⏹ End** button, and then a judge (DeepSeek V4.1 Flash at high effort by default, or Claude Opus 5.5 at medium) reads the timed transcript and rules. It gives win or lose, a split such as 40/60, the reasoning, a ten-point scorecard with quotes, the best and weakest moments, how to improve, a rematch brief, and a nickname and badge. It is drawn as a card under the transcript. `--judge RECORD` rules on a saved conversation offline.
+- **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
 
 ## Requirements
 

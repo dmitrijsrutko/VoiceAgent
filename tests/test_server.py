@@ -1035,7 +1035,7 @@ def test_the_page_offers_only_models_this_deployment_has_keys_for(
 
     assert [o["name"] for o in choices["llm"]] == [
         "haiku-4-5",
-        "sonnet-5",
+        "sonnet-5-5",
         "opus-5-5",
         "deepseek-off",
         "deepseek-low",
