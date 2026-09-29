@@ -15,6 +15,7 @@ import httpx2
 from openai import AsyncOpenAI, DefaultAsyncHttpxClient, Omit, OpenAIError, omit
 from openai.types.chat import ChatCompletionMessageParam
 from openai.types.shared_params.reasoning_effort import ReasoningEffort
+from openai.types.shared_params.response_format_json_object import ResponseFormatJSONObject
 
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
@@ -92,6 +93,7 @@ class OpenAICompatibleLLM:
         effort: Effort | None = None,
         client: AsyncOpenAI | None = None,
         max_tokens: int = MAX_OUTPUT_TOKENS,
+        json_output: bool = False,
     ) -> None:
         self.provider = spec.provider
         self.model = model or spec.default_model
@@ -100,6 +102,11 @@ class OpenAICompatibleLLM:
         """What this adapter was told to ask for. `None` is an instruction and
         not a default: it means send nothing, which is what an engine with no
         effort to set resolves to."""
+        # JSON mode: the reply is guaranteed to parse. The prompt must still say
+        # "json" and show the shape, and DeepSeek may return empty content.
+        self._response_format: ResponseFormatJSONObject | Omit = (
+            {"type": "json_object"} if json_output else omit
+        )
         self._extra_body: dict[str, object] | None = None
         self._reasoning_effort: ReasoningEffort | Omit = omit
         if effort == "off":
@@ -135,6 +142,7 @@ class OpenAICompatibleLLM:
                 # one extra final chunk carries the counts and has no choices.
                 stream_options={"include_usage": True},
                 reasoning_effort=self._reasoning_effort,
+                response_format=self._response_format,
                 extra_body=self._extra_body,
             )
             if usage is not None:

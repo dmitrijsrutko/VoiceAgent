@@ -416,11 +416,21 @@ class Record:
             body = "No contest: too little was said to rule on."
         else:
             body = f"The judge failed: {ruling.get('error', '')}"
+            if reply := ruling.get("reply"):
+                # Tildes, not backticks: a reply may contain a backtick fence.
+                body += f"\n\n~~~~json\n{reply}\n~~~~"
         usage = ruling.get("usage") or {}
         self.block(
             f"judge ({judge.get('name')})",
             body,
-            attributes({"model": judge.get("model"), "ms": ruling.get("ms"), **usage}),
+            attributes(
+                {
+                    "model": judge.get("model"),
+                    "attempts": ruling.get("attempts"),
+                    "ms": ruling.get("ms"),
+                    **usage,
+                }
+            ),
         )
         self.note(attributes(ruling.get("stats") or {}))
         self.flush()

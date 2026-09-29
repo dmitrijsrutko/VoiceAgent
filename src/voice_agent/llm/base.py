@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from typing import Literal, Protocol
 
 from voice_agent.conversation import Message
-from voice_agent.errors import ProviderError
+from voice_agent.errors import SilentReplyError
 
 Effort = Literal["low", "medium", "high", "max", "off"]
 """How hard a provider is asked to think before it answers, where it can be.
@@ -107,7 +107,7 @@ def refuse_silent_reply(
     why = [f"finish_reason {usage.finish_reason}"] if usage.finish_reason else []
     if usage.reasoning_chars:
         why.append(f"{usage.reasoning_chars} reasoning chars")
-    raise ProviderError(
+    raise SilentReplyError(
         f"{provider} sent no text for {model}{at} "
         f"after reporting {usage.output_tokens} output tokens"
         + (f" ({', '.join(why)})" if why else "")

@@ -17,7 +17,7 @@ from typing import Any
 
 from voice_agent import prompts, timing
 from voice_agent.conversation import Message
-from voice_agent.errors import ConfigError
+from voice_agent.errors import ConfigError, SilentReplyError
 from voice_agent.llm import LLM, create_llm
 from voice_agent.llm.base import Usage
 from voice_agent.llm.registry import Choice, available
@@ -43,6 +43,17 @@ BY_NAME = {choice.name: choice for choice in JUDGES}
 MAX_TOKENS = 32_000
 """Room for a max-effort chain of thought and a long JSON verdict after it. The
 conversation's 8 192 is sized for a spoken reply and would cut the verdict off."""
+
+ATTEMPTS = 2
+"""A reply that does not parse is asked for once more: the slip is random (an
+unescaped quote in a 6 KB verdict), so the same request usually succeeds."""
+
+CUT_OFF = ("length", "max_tokens")
+"""How OpenAI-style and Anthropic streams say `max_tokens` ended them. Asking
+again would be cut off the same way, so such a reply is not retried."""
+
+KEPT_REPLY = 20_000
+"""How much of a reply that never parsed goes into the record, to see what broke."""
 
 MIN_TURNS = 2
 MIN_WORDS = 30
@@ -71,7 +82,11 @@ def offered() -> tuple[Choice, ...]:
 
 def build(name: str) -> LLM:
     choice = BY_NAME[name]
-    return Traced(create_llm(choice.provider, choice.model, choice.effort, max_tokens=MAX_TOKENS))
+    return Traced(
+        create_llm(
+            choice.provider, choice.model, choice.effort, max_tokens=MAX_TOKENS, json_output=True
+        )
+    )
 
 
 def clock(seconds: float) -> str:
@@ -181,29 +196,50 @@ async def rule(llm: LLM, name: str, turns: list[Turn]) -> dict[str, Any]:
     measured = ruling["stats"]
     if too_short(turns):
         return {**ruling, "status": "no_contest"}
-    usage = Usage()
     started = timing.now()
-    reply: list[str] = []
-    try:
-        async for fragment in llm.stream(
-            prompts.load("judge"), [Message("user", render(turns, measured))], usage
-        ):
-            reply.append(fragment)
-        verdict = parse("".join(reply))
-    except Exception as exc:  # any failure is reported on the page, never raised
-        logger.warning("the judge failed: %r", exc)
+    request = [Message("user", render(turns, measured))]
+    spent = {"prompt_tokens": 0, "output_tokens": 0}
+    for attempt in range(1, ATTEMPTS + 1):
+        reply = ""
+        usage = Usage()  # an adapter sets it rather than adding to it: one per call
+        try:
+            async for fragment in llm.stream(prompts.load("judge"), request, usage):
+                reply += fragment
+            if usage.finish_reason in CUT_OFF:
+                raise RuntimeError(f"the verdict was cut off at {MAX_TOKENS} tokens")
+            verdict = parse(reply)
+        # A reply that does not parse (JSONDecodeError included) or came back
+        # empty is a random slip: the same request usually succeeds.
+        except (ValueError, SilentReplyError) as exc:
+            logger.warning("the judge's reply %d was unusable: %r", attempt, exc)
+            if attempt < ATTEMPTS and usage.finish_reason not in CUT_OFF:
+                continue
+            return failed(ruling, exc, started, reply)
+        except Exception as exc:  # any other failure is reported on the page, never raised
+            logger.warning("the judge failed: %r", exc)
+            return failed(ruling, exc, started, reply)
+        finally:
+            spent["prompt_tokens"] += usage.prompt_tokens
+            spent["output_tokens"] += usage.output_tokens
         return {
             **ruling,
-            "status": "failed",
-            "error": str(exc)[:200],
+            "status": "done",
+            "verdict": verdict,
+            "attempts": attempt,
             "ms": round((timing.now() - started) * 1000),
+            "usage": spent,
         }
+    raise AssertionError("unreachable: the last attempt returns")
+
+
+def failed(ruling: dict[str, Any], exc: Exception, started: float, reply: str) -> dict[str, Any]:
+    """A ruling that says why the judge failed, and what it said if it said anything."""
     return {
         **ruling,
-        "status": "done",
-        "verdict": verdict,
+        "status": "failed",
+        "error": str(exc)[:200],
         "ms": round((timing.now() - started) * 1000),
-        "usage": {"prompt_tokens": usage.prompt_tokens, "output_tokens": usage.output_tokens},
+        **({"reply": reply[:KEPT_REPLY]} if reply else {}),
     }
 
 

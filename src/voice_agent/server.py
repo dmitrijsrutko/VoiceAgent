@@ -168,7 +168,8 @@ async def adjudicate(agent: "Agent", conversation: Conversation, name: str) -> N
             ruling = judge.unavailable(name, turns, exc)
         else:
             ruling = await judge.rule(engine, name, turns)
-    conversation.verdict = ruling
+    # A reply that never parsed is for the record, not the page.
+    conversation.verdict = {key: value for key, value in ruling.items() if key != "reply"}
     if conversation.record is not None and agent.record_dir is not None:
         record = Record(conversation.record)
         record.ruling(ruling)

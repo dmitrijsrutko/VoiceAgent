@@ -294,6 +294,21 @@ async def test_an_effort_the_caller_names_is_the_one_sent() -> None:
     assert provider.requests[0]["reasoning_effort"] == "max"
 
 
+async def test_json_mode_is_sent_only_when_asked_for(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with Provider() as provider:
+        monkeypatch.setattr(
+            "voice_agent.llm.registry.DEEPSEEK",
+            dataclasses.replace(
+                DEEPSEEK, api_key_env="LOCAL_API_KEY", base_url=f"http://127.0.0.1:{provider.port}"
+            ),
+        )
+        await reply(create_llm("deepseek", json_output=True))
+        await reply(create_llm("deepseek"))
+
+    assert provider.requests[0]["response_format"] == {"type": "json_object"}
+    assert "response_format" not in provider.requests[1]
+
+
 async def test_thinking_off_is_the_switch_not_an_effort() -> None:
     """DeepSeek's fastest option: thinking disabled outright, and no
     `reasoning_effort` beside it, which would ask for thinking again."""

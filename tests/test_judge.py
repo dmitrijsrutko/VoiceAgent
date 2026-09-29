@@ -1,12 +1,16 @@
 """The judge: what it is shown, how its reply is read, and when it is not asked."""
 
 import json
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
 
 from tests.conftest import FakeLLM
 from voice_agent import judge
+from voice_agent.conversation import Message
+from voice_agent.errors import SilentReplyError
+from voice_agent.llm.base import Usage
 from voice_agent.timeline import Turn, stats
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -92,6 +96,82 @@ async def test_a_round_is_ruled_on() -> None:
 async def test_a_judge_that_fails_says_so_rather_than_raising() -> None:
     ruling = await judge.rule(FakeLLM(["I would rather not."]), "opus-5-5", ROUND)
     assert ruling["status"] == "failed" and "no JSON object" in ruling["error"]
+
+
+async def test_a_reply_that_does_not_parse_is_asked_for_again() -> None:
+    replies = ['{"headline": "cut "mid" quote"}', VERDICT]
+    llm = FakeLLM(replies)
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+    assert ruling["status"] == "done" and ruling["attempts"] == 2
+    assert len(llm.seen) == 2 and llm.seen[0] == llm.seen[1]
+    # Both calls are billed: FakeLLM counts two tokens a word.
+    words = sum(len([w for w in r.split(" ") if w]) for r in replies)
+    assert ruling["usage"]["output_tokens"] == 2 * words
+    assert "reply" not in ruling
+
+
+async def test_a_judge_that_never_parses_keeps_its_last_reply() -> None:
+    broken = '{"headline": "cut "mid" quote"}'
+    llm = FakeLLM([broken])
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+    assert len(llm.seen) == judge.ATTEMPTS
+    assert ruling["status"] == "failed" and "delimiter" in ruling["error"]
+    assert ruling["reply"].strip() == broken
+
+
+async def test_a_provider_failure_is_not_asked_for_again() -> None:
+    llm = FakeLLM(fail=True)
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+    assert len(llm.seen) == 1
+    assert ruling["status"] == "failed" and "reply" not in ruling
+
+
+def test_the_judge_asks_for_json_where_the_vendor_can_promise_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
+    inner = judge.build("deepseek-high")._inner  # type: ignore[attr-defined]
+    assert inner._response_format == {"type": "json_object"}
+    judge.build("opus-5-5")  # no JSON mode there; the retry covers it
+
+
+class Scripted(FakeLLM):
+    """Each call plays the next step: a reply and why the stream ended, or an
+    exception, the way an adapter reports it."""
+
+    def __init__(self, steps: Sequence[tuple[str, str] | Exception]) -> None:
+        super().__init__()
+        self.steps = list(steps)
+
+    async def stream(
+        self, system: str, messages: Sequence[Message], usage: Usage | None = None
+    ) -> AsyncIterator[str]:
+        self.seen.append(list(messages))
+        step = self.steps[len(self.seen) - 1]
+        if usage is not None:
+            usage.output_tokens = 10
+        if isinstance(step, Exception):
+            raise step
+        text, finish = step
+        if usage is not None:
+            usage.finish_reason = finish
+        yield text
+
+
+async def test_an_empty_json_reply_is_asked_for_again() -> None:
+    llm = Scripted([SilentReplyError("deepseek sent no text"), (VERDICT, "stop")])
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+    assert ruling["status"] == "done" and ruling["attempts"] == 2
+    assert ruling["usage"]["output_tokens"] == 20
+
+
+async def test_a_verdict_cut_off_at_max_tokens_is_not_asked_for_again() -> None:
+    llm = Scripted([(VERDICT[:40], "length"), (VERDICT, "stop")])
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+    assert len(llm.seen) == 1
+    assert ruling["status"] == "failed" and "cut off" in ruling["error"]
+    assert ruling["reply"] == VERDICT[:40]
 
 
 async def test_too_little_said_is_no_contest_and_no_call() -> None:

@@ -35,9 +35,9 @@ class Engine:
     default_effort: Effort | None
     """What this engine asks for when a caller names no effort — which may be
     `None`, meaning it has no such parameter to set. Not the same as `low`."""
-    build: Callable[[str | None, Effort | None, int], LLM]
-    """`(model, effort, max_tokens)` already resolved by `create_llm`: an adapter is handed
-    an instruction, never a policy."""
+    build: Callable[[str | None, Effort | None, int, bool], LLM]
+    """`(model, effort, max_tokens, json_output)` already resolved by `create_llm`: an
+    adapter is handed an instruction, never a policy."""
 
 
 ENGINES: dict[str, Engine] = {
@@ -46,21 +46,23 @@ ENGINES: dict[str, Engine] = {
         DEEPSEEK.default_model,
         DEEPSEEK.models,
         DEEPSEEK.default_effort,
-        lambda m, e, t: OpenAICompatibleLLM(DEEPSEEK, m, e, max_tokens=t),
+        lambda m, e, t, j: OpenAICompatibleLLM(DEEPSEEK, m, e, max_tokens=t, json_output=j),
     ),
     "openai": Engine(
         OPENAI.api_key_env,
         OPENAI.default_model,
         OPENAI.models,
         OPENAI.default_effort,
-        lambda m, e, t: OpenAICompatibleLLM(OPENAI, m, e, max_tokens=t),
+        lambda m, e, t, j: OpenAICompatibleLLM(OPENAI, m, e, max_tokens=t, json_output=j),
     ),
     "anthropic": Engine(
         ANTHROPIC_API_KEY,
         DEFAULT_MODEL,
         MODELS,
         DEFAULT_EFFORT,
-        lambda m, e, t: AnthropicLLM(m, e, max_tokens=t),
+        # No structured-output format sent (`output_config.format` would need the
+        # ruling's schema): a caller that asks relies on its prompt and retry.
+        lambda m, e, t, j: AnthropicLLM(m, e, max_tokens=t),
     ),
 }
 
@@ -175,6 +177,7 @@ def create_llm(
     model: str | None = None,
     effort: Effort | None = None,
     max_tokens: int = MAX_OUTPUT_TOKENS,
+    json_output: bool = False,
 ) -> LLM:
     """Build one engine, resolving `None` to the engine's own defaults.
 
@@ -189,4 +192,5 @@ def create_llm(
         known = ", ".join(sorted(ENGINES))
         raise ConfigError(f"unknown provider {provider!r}; expected one of: {known}") from None
     check_model(provider, model)
-    return engine.build(model, engine.default_effort if effort is None else effort, max_tokens)
+    effort = engine.default_effort if effort is None else effort
+    return engine.build(model, effort, max_tokens, json_output)

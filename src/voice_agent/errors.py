@@ -17,5 +17,10 @@ class ProviderError(VoiceAgentError):
     """
 
 
+class SilentReplyError(ProviderError):
+    """The provider billed for a reply and sent no text: a model that only
+    thought, or a JSON mode that came back empty. Worth asking again."""
+
+
 class SessionNotFoundError(VoiceAgentError):
     """The requested conversation key is not in the in-memory store."""
