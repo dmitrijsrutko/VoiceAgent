@@ -164,6 +164,43 @@ def test_reconnecting_to_the_link_resumes_the_same_conversation(client: TestClie
     assert ready["ended"] is False
 
 
+def test_a_reload_gets_what_the_page_was_shown_notes_included(client: TestClient) -> None:
+    """Bare history would redraw the bubbles without their timings or thoughts,
+    leaving "stats" and "thoughts" nothing to show."""
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "remember me"})
+        drain(socket)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        ready = socket.receive_json()
+
+    kinds = [f["type"] for f in ready["frames"]]
+    assert kinds[0] == "said" and ready["frames"][0]["text"] == "remember me"
+    end = next(f for f in ready["frames"] if f["type"] == "reply_end")
+    assert end["text"] == "Sure thing. " and "ttft_ms" in end
+    assert not {"ready", "delta", "marks", "floor"} & set(kinds)
+
+
+def test_an_ended_page_carries_its_frames(client: TestClient) -> None:
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "remember me"})
+        drain(socket)
+        socket.send_json({"type": "user_message", "text": "Bye!"})
+        drain(socket)
+
+    served = served_facts(client.get(f"/c/{key}").text)
+    assert served["ended"] is True
+    frames = served["frames"]
+    assert isinstance(frames, list)
+    assert any(f["type"] == "reply_end" and "ttft_ms" in f for f in frames)
+
+
 def test_exit_ends_the_conversation_and_it_stays_ended(
     client: TestClient, store: SessionStore, llm: FakeLLM
 ) -> None:

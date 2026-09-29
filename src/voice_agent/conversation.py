@@ -60,6 +60,10 @@ class Conversation:
     collected mid-call."""
     verdict: dict[str, Any] | None = None
     """The judge's ruling, once there is one; a reload shows it again."""
+    frames: list[dict[str, Any]] = field(default_factory=list)
+    """What was sent to the page, in order (`channel.shown`), plus typed turns
+    — kept even once the socket has gone, like the history: a reload redraws
+    it with its notes and thoughts, not bare messages."""
 
     @property
     def context(self) -> list[Message]:

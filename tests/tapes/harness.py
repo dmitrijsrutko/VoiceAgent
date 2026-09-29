@@ -274,6 +274,9 @@ class Browser:
         self.timeline: Timeline | None = None
         """Tapped as `Channel` taps it, so the goldens show what a judge reads."""
 
+    def typed(self, text: str) -> None:
+        """`Channel` keeps typed turns for a reload; a tape never reloads."""
+
     # Server -> page.
 
     async def send_json(self, payload: dict[str, object]) -> None:

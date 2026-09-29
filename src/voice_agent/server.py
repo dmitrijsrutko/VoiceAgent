@@ -415,6 +415,7 @@ def create_app(
             known |= {
                 "ended": True,
                 "history": serialize(conversation.messages),
+                "frames": conversation.frames,
                 "judge": named_judge(conversation.judge),
             }
         return HTMLResponse(with_facts(PAGE_PATH.read_text(encoding="utf-8"), known))
@@ -510,7 +511,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
     recording = record_for(agent.record_dir, conversation, system_prompt)
     if judge_name is not None and conversation.timeline is None:
         conversation.timeline = Timeline()
-    channel = Channel(websocket, recording, conversation.timeline)
+    channel = Channel(websocket, recording, conversation.timeline, conversation.frames)
     session = Session(
         channel,
         conversation,
@@ -540,6 +541,7 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
             # Named when this round will be judged: the page waits for a ruling.
             "judge": named_judge(judge_name),
             "history": serialize(conversation.messages),
+            "frames": list(conversation.frames),
             "ended": conversation.ended,
         }
     )
@@ -701,6 +703,7 @@ async def handle_text(
         # a committed `transcript` frame and is recorded there.
         if record is not None:
             record.said(text)
+        channel.typed(text)
         if channel.timeline is not None:
             channel.timeline.typed(text)
         session.post(Typed(text))

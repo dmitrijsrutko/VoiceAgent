@@ -13,9 +13,9 @@ import {
 import { progress, renderRuling } from "./verdict.js";
 import { chosenEars, servedFacts, showStart, stackQuery } from "./start.js";
 import {
-  audioLine, committedLine, gapsLine, initiativeLine, quietLine, replyLines, thoughtLine,
-  truncatedLine, unpromptedLine,
+  audioLine, committedLine, gapsLine, initiativeLine, quietLine, thoughtLine, truncatedLine,
 } from "./telemetry.js";
+import { declined, endLines, review } from "./review.js";
 import {
   add, begin, endButton, floor, form, input, listen, meta, mute, note, paintListening as paint, paintText,
   pinLast, setEnabled, start, stats, status, stick, thoughts, timer, wrap,
@@ -285,7 +285,7 @@ const handlers = {
     // Pressing start was saying "ready"; not again after a refused microphone,
     // which would put a second prompt over the greeting.
     if (msg.ears && !micRefused) beginListening();
-    replay(msg.history);
+    replay(msg.history, msg.frames);
     if (msg.ended) {
       add("This conversation has ended.", "note");
       setEnabled(false);
@@ -325,16 +325,8 @@ const handlers = {
     quiet = null;
     if (!bubble) return;
     const done = endBubble();
-    if (msg.interrupted) {
-      if (!done.textContent) done.remove();
-      else if (!cut) note(done, "✋ interrupted before it was spoken");
-    } else if (msg.initiative) {
-      note(done, unpromptedLine(msg));
-    } else if (msg.resumed) {
-      note(done, "↩ picked up where it was cut off: whatever cut in said nothing more");
-    } else {
-      for (const line of replyLines(msg)) note(done, line);
-    }
+    if (msg.interrupted && !done.textContent) { done.remove(); return; }
+    for (const line of endLines(msg, Boolean(cut))) note(done, line);
   },
 
   interrupt(msg) {
@@ -397,7 +389,7 @@ const handlers = {
   // One line per thought; declines update a single line until something is
   // worth saying, or it would bury the conversation.
   thought(msg) {
-    if (msg.decision === "nothing" || msg.decision === "unchanged") {
+    if (declined(msg)) {
       if (!quiet) quiet = { el: add("", "note think thought"), count: 0 };
       quiet.count += 1;
       const line = quietLine(quiet.count, msg);
@@ -583,8 +575,18 @@ begin.onclick = async () => {
   connect();
 };
 
-function replay(history) {
-  for (const m of history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
+// What was said before this page opened. Redrawn from the kept frames, notes
+// and thoughts included; bare history only from a server that sent none.
+function replay(history, frames) {
+  if (!frames) {
+    for (const m of history) add(m.content, "msg " + (m.role === "user" ? "user" : "agent"));
+    return;
+  }
+  for (const entry of review(frames)) {
+    const el = add(entry.text, entry.cls);
+    if (entry.shown != null) paintText(el, entry.text, entry.shown);
+    for (const n of entry.notes) note(el, n.text, n.cls);
+  }
 }
 
 // An ended conversation opens as its record — transcript, then ruling — with
@@ -594,7 +596,7 @@ setEnabled(false);
 if (served.ended) {
   start.remove();
   judge = served.judge;
-  replay(served.history ?? []);
+  replay(served.history ?? [], served.frames);
   add("This conversation has ended.", "note");
   endConversation("ended");
   awaitRuling();

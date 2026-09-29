@@ -132,6 +132,7 @@ src/voice_agent/
     app.js                the socket and one handler per server message
     start.js              the start screen
     telemetry.js          the lines under each bubble (tested in node)
+    review.js             an ended or reloaded conversation redrawn from its kept frames (tested in node)
     floor.js              the floor strip (tested in node)
     timer.js, client.js   the countdown; the browser family reported (tested in node)
     verdict.js            the judge's ruling as a card (tested in node)

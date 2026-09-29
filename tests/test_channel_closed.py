@@ -55,3 +55,40 @@ async def test_a_protocol_mistake_on_a_live_socket_is_still_raised() -> None:
     with pytest.raises(RuntimeError):
         await channel.send_json({"type": "ready"})
     assert not channel.closed
+
+
+class OpenSocket:
+    async def send_json(self, payload: dict[str, object]) -> None:
+        pass
+
+
+async def test_the_channel_keeps_what_a_reload_redraws() -> None:
+    frames: list[dict[str, object]] = []
+    channel = Channel(OpenSocket(), frames=frames)  # type: ignore[arg-type]
+
+    await channel.send_json({"type": "ready", "history": []})
+    await channel.send_json({"type": "transcript", "text": "hel", "final": False})
+    await channel.send_json({"type": "transcript", "text": "hello", "final": True})
+    await channel.send_json({"type": "delta", "text": "Hi"})
+    await channel.send_json({"type": "reply_end", "text": "Hi", "ttft_ms": 300})
+    await channel.send_json({"type": "thought", "decision": "nothing"})
+    channel.typed("and you?")
+
+    assert [(f["type"], f.get("text")) for f in frames] == [
+        ("transcript", "hello"),
+        ("reply_end", "Hi"),
+        ("thought", None),
+        ("said", "and you?"),
+    ]
+
+
+async def test_a_gone_socket_still_keeps_the_reply_for_the_next_load() -> None:
+    """The reply joins the history before its `reply_end` is sent: dropping the
+    frame with the write would leave a reload without it."""
+    frames: list[dict[str, object]] = []
+    channel = Channel(GoneSocket(WebSocketDisconnect(code=1006)), frames=frames)  # type: ignore[arg-type]
+
+    await channel.send_json({"type": "reply_end", "interrupted": True, "text": "half a"})
+
+    assert channel.closed
+    assert frames == [{"type": "reply_end", "interrupted": True, "text": "half a"}]

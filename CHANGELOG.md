@@ -34,6 +34,9 @@ default.
 server serves both switches and the new scripts. Toggling in a browser: not yet
 observed.
 
+**Fixes**
+- The switches did nothing on an ended (or reloaded) conversation: it was redrawn from bare `{role, content}` history, so no notes or thoughts existed. `Channel` now keeps the frames it sends on the `Conversation`, even to a socket that has gone, since a reply joins the history before its `reply_end` (plus typed turns); the page and `ready` serve them, and `web/review.js` redraws them with the live handlers' own line builders. Verified: headless Chrome on an ended local round drew 4 stats notes and the 🤫 line.
+
 ## Chapter 28 — The judge: a devil's-advocate round ends with a verdict
 
 The devil's advocate argued, and nothing ever said how the user did. A DA conversation
