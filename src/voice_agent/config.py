@@ -172,7 +172,8 @@ def with_languages(prompt: str, languages: tuple[str, ...]) -> str:
     if not languages:
         return prompt
     hearing = prompts.rules()["Hearing"]
-    return f"{prompt}\n\n{hearing.format(languages=', '.join(languages))}"
+    filled = hearing.format(languages=", ".join(languages), unheard=prompts.load("unheard"))
+    return f"{prompt}\n\n{filled}"
 
 
 def with_initiative(prompt: str, delays: tuple[float, ...]) -> str:

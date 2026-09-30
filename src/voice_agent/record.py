@@ -433,6 +433,7 @@ class Record:
                 {
                     "model": judge.get("model"),
                     "attempts": ruling.get("attempts"),
+                    "repaired": ruling.get("repaired"),
                     "ms": ruling.get("ms"),
                     **usage,
                 }

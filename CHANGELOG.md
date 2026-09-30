@@ -14,6 +14,68 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Fix — A verdict that slips on one brace is repaired; the judge leaves JSON mode
+
+A 6-minute round (09-30 09:03) ended "No verdict": both attempts returned the
+whole ~6 KB verdict with one structural slip — a brace closing the object early
+("Extra data"), then a stray empty key ("Expecting ':'").
+
+| DeepSeek judge replies            | broken JSON |
+|-----------------------------------|-------------|
+| live, before JSON mode            | 3 of 22     |
+| live, with `json_object` (v65–68) | 5 of 9      |
+| replayed 09:03, JSON mode on      | 1 of 5      |
+| replayed 09:03, JSON mode off     | 0 of 5      |
+
+- **Repair before asking again.** `judge.parse` repairs a reply that does not
+  parse (`json_repair`) and holds the result to the same checks; the ruling and
+  the record say `repaired yes`. All 4 broken replies in that day's traces came
+  back whole — 13 sections, 10 cards — losing at most the field at the slip
+  (one `missed_angle`, one fallacy's `why`). Both 09:03 replies repair, so that
+  round would have been ruled first time. A repair that is still not a verdict
+  fails as before, naming the original JSON error.
+- **JSON mode off for the judge.** It was turned on (v65) for one unescaped
+  quote; it did not make the verdict more reliable, and repair covers both
+  kinds of slip. `create_llm(json_output=...)` stays for a caller that wants it.
+- New dependency `json-repair` (MIT, pure Python, no dependencies of its own):
+  hand-written repair of a model's JSON is the kind of code that grows a case
+  per slip; this library already knows them.
+- Tests: the two broken replies from the owner's 08:18 and 08:22 rounds
+  (`tests/fixtures/judge_broken.json`) repair into full verdicts; the 09:03
+  empty-key slip, synthetic, is ruled first time and marked repaired.
+
+## Fix — A sentence the recognizer lost is asked for again; it hears the language sooner
+
+On an iPhone the user's first sentence vanished: the voice detector heard 5.4 s
+of speech, ElevenLabs gave one partial ("Chuck Norris。" — its language guess
+misfired) and committed nothing, and the empty commit was dropped without a
+word. They had to say it twice. The repeat, too, began as "Пизда.", "Чак Ноли."
+before the recognizer settled on Russian: every session guessed from scratch.
+
+- **Heard, but no words → the agent asks again.** An empty commit after at
+  least `UNHEARD_MIN_SECONDS` (1 s) of voice that began while the agent was not
+  audible becomes a user turn with the marker in `prompts/unheard.md`;
+  `rules.md` (Hearing) tells the model to say it did not catch that and ask
+  again, in the conversation's language. Shorter sounds are still dropped, and
+  so is anything over the agent's voice (its echo, loud on Chrome for iOS). The
+  judge counts the turn as 0 words (`Turn.unheard`); `with_think_times` now
+  copies every field, since it had silently dropped the new one. Tape `unheard`.
+- **A language hint.** Sessions ask for `include_language_detection`, and the
+  language of the last commit is the next session's `language_code`
+  (`ElevenLabsSTT.language`; one recognizer per conversation). The first session
+  still guesses. Checked live (3 sessions): the hint is taken, English is still
+  heard under a Russian hint, and — unlike the docs — only
+  `committed_transcript_with_timestamps` arrived, so either commit event is the
+  turn, once.
+- **The voice as sent is measured.** `voice.level` in the trace, per 250 ms of
+  audio at its offset, and `voice_dbfs_p5/p50/p95` over voiced windows on
+  `audio_end`. The page never changes volume and no playback gap was reported,
+  so the dips the user hears are likely the phone's voice processing ducking
+  output during double-talk; the next test shows whether they are in the audio.
+- Open: on Chrome for iOS the greeting was cut by its own echo (mic −27 to −41
+  dBFS, loud enough for the detector; "Can you tell me the position you" shares
+  4 of 7 words with the greeting, under the 60% bar).
+
 ## Fix — Words with no voice behind them no longer cut the agent off
 
 On an iPhone (Safari, speaker) the agent was interrupted 12 times in six

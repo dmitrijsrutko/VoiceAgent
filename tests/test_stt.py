@@ -129,6 +129,49 @@ async def test_our_own_shutdown_is_not_reported_as_a_failure(
     assert peer.closed.is_set()  # we really did go through the closing path
 
 
+def commits(*events: tuple[str, str]) -> list[str]:
+    return [
+        json.dumps({"message_type": kind, "text": text, "language_code": "ru"})
+        for kind, text in events
+    ]
+
+
+async def test_the_detected_commit_alone_is_the_turn_and_sets_the_next_hint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Measured live: with language detection on, Scribe sent only the commit
+    with `language_code`. Listening for the plain one alone lost every turn."""
+    peer = RudePeer(commits(("committed_transcript_with_timestamps", "Привет.")))
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: peer)
+    monkeypatch.setattr(elevenlabs_stt, "FLUSH_GRACE_SECONDS", 0.01)
+    stt = ElevenLabsSTT(api_key="test")
+    assert "language_code" not in stt.url  # the first session guesses
+
+    transcripts = [t async for t in stt.stream(audio_of(1))]
+
+    assert [(t.text, t.is_final) for t in transcripts] == [("Привет.", True)]
+    assert stt.language == "ru"
+    assert "language_code=ru" in stt.url and "include_language_detection=true" in stt.url
+
+
+async def test_both_commit_events_are_one_turn(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The documented order: the plain commit, then the one with the language."""
+    peer = RudePeer(
+        commits(
+            ("committed_transcript", "Раз."),
+            ("committed_transcript_with_timestamps", "Раз."),
+            ("committed_transcript", "Два."),
+            ("committed_transcript_with_timestamps", "Два."),
+        )
+    )
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: peer)
+    monkeypatch.setattr(elevenlabs_stt, "FLUSH_GRACE_SECONDS", 0.01)
+
+    transcripts = [t async for t in ElevenLabsSTT(api_key="test").stream(audio_of(1))]
+
+    assert [t.text for t in transcripts] == ["Раз.", "Два."]
+
+
 async def test_a_real_error_payload_still_raises(endpoint: Endpoint) -> None:
     stt = await endpoint(failing)
 

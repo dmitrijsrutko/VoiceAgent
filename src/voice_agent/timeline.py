@@ -12,7 +12,7 @@ Times are seconds from the first thing recorded — the greeting — on
 
 import statistics
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 from voice_agent import timing
@@ -40,6 +40,9 @@ class Turn:
     typed: bool = False
     approximate: bool = False
     """Rebuilt from a record's one-second headings, not measured."""
+    unheard: bool = False
+    """User only: they spoke and the recognizer kept no words; `text` is the
+    marker the agent was given, not anything they said."""
 
     @property
     def end(self) -> float:
@@ -47,7 +50,7 @@ class Turn:
 
     @property
     def words(self) -> int:
-        return len(self.text.split())
+        return 0 if self.unheard else len(self.text.split())
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,7 +77,14 @@ class Timeline:
         if kind == "floor" and payload.get("state") == "speaking":
             self._add("onset", {"agent": bool(payload.get("agent"))})
         elif kind == "transcript" and payload.get("final") and str(payload.get("text", "")).strip():
-            self._add("said", {"text": payload["text"], "end_ms": payload.get("speech_end_ms")})
+            self._add(
+                "said",
+                {
+                    "text": payload["text"],
+                    "end_ms": payload.get("speech_end_ms"),
+                    "unheard": bool(payload.get("unheard")),
+                },
+            )
         elif kind == "echo_ignored" and payload.get("stage") == "final":
             # The agent's own voice, heard back and not answered: not the user's
             # turn. Only the commit it names (its text is cut at 160 characters).
@@ -134,7 +144,10 @@ class Timeline:
                 )
                 at = event.at if onset is None else onset
                 spoken = None if onset is None else max(0.0, stopped - onset)
-                turns.append(Turn("you", at, str(event.data["text"]), spoken=spoken))
+                unheard = bool(event.data.get("unheard"))
+                turns.append(
+                    Turn("you", at, str(event.data["text"]), spoken=spoken, unheard=unheard)
+                )
                 commit = event.at
         return with_think_times(sorted(turns, key=lambda t: t.at))
 
@@ -168,17 +181,10 @@ def with_think_times(turns: list[Turn]) -> list[Turn]:
         if turn.who == "advocate":
             last = turn
         elif last is not None and turn.think is None:
-            turn = Turn(
-                turn.who,
-                turn.at,
-                turn.text,
-                turn.spoken,
-                # A typed line that stops the agent is not talking over it; + 0.0
-                # turns a rounded -0.0 into 0.0.
-                round(max(0.0, turn.at - last.end) if turn.typed else turn.at - last.end, 1) + 0.0,
-                typed=turn.typed,
-                approximate=turn.approximate,
-            )
+            # A typed line that stops the agent is not talking over it; + 0.0
+            # turns a rounded -0.0 into 0.0.
+            gap = max(0.0, turn.at - last.end) if turn.typed else turn.at - last.end
+            turn = replace(turn, think=round(gap, 1) + 0.0)
         out.append(turn)
     return out
 

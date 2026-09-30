@@ -1,0 +1,35 @@
+  0.000  >   greeting text='Hi.'
+  0.150  >   audio_end seconds=0.18 first_audio_ms=150
+  0.190  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.390  <   playback off
+  1.056  >   floor state='speaking'
+  1.500  >   transcript text='Chuck Norris。'
+  3.712  >   floor state='micro_pause'
+  4.096  >   floor state='pause'
+  4.992  >   floor state='yielded'
+  5.000  >   transcript final=True text='(they spoke, but your hearing caught no words)'
+  5.000  llm ask '(they spoke, but your hearing caught no words)'
+  5.690  <   playback on
+  5.800  >   reply_end ttft_ms=500 text="Sorry, I didn't catch that. Could you say it again?"
+  5.800  >   audio_end seconds=3.06 first_audio_ms=650
+  6.240  >   floor state='speaking' agent=True
+  8.416  >   floor state='micro_pause' agent=True
+  8.770  <   playback off
+  8.800  >   floor state='pause'
+  8.800  >   mic_level
+  9.696  >   floor state='yielded'
+ 12.032  >   floor state='speaking'
+ 12.608  >   floor state='micro_pause'
+ 12.992  >   floor state='pause'
+ 13.888  >   floor state='yielded'
+
+assistant: Hi.
+     user: (they spoke, but your hearing caught no words)
+assistant: Sorry, I didn't catch that. Could you say it again?
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 0.2 s): "Hi."
+[00:01] YOU (answered after 0.7 s · spoke 3.9 s · 0 words): "(they spoke, but your hearing caught no words)"
+[00:06] ADVOCATE (spoke 3.1 s): "Sorry, I didn't catch that. Could you say it again?"

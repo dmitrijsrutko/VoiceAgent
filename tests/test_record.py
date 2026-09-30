@@ -395,6 +395,25 @@ def test_a_failed_ruling_keeps_the_reply_that_did_not_parse(tmp_path: Path) -> N
     assert '~~~~json\n{"headline": "cut "mid" quote"}\n~~~~' in text
 
 
+def test_a_repaired_verdict_says_so_in_the_record(tmp_path: Path) -> None:
+    record = Record(tmp_path / "c.md")
+    record.ruling(
+        {
+            "judge": {"name": "deepseek-high", "model": "deepseek-flash"},
+            "status": "done",
+            "verdict": {"split": {"you": 40, "advocate": 60}, "headline": "h", "reasoning": "r"},
+            "attempts": 1,
+            "repaired": True,
+            "ms": 900,
+        }
+    )
+    record.close()
+
+    assert "`model deepseek-flash · attempts 1 · repaired yes · ms 900`" in (
+        tmp_path / "c.md"
+    ).read_text(encoding="utf-8")
+
+
 def test_a_ruling_that_leaves_parts_out_is_written_without_them() -> None:
     from voice_agent.record import review
 

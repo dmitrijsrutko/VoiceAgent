@@ -80,3 +80,53 @@ class Level:
             "baseline_dbfs": round(statistics.median(self._quiet), 1) if self._quiet else None,
             "windows": len(ranked),
         }
+
+
+VOICED_DBFS = -60.0
+"""Windows quieter than this are the pauses between phrases, left out of a
+voice's spread: a dip in the voice itself is what the spread is for."""
+
+
+class Meter:
+    """dBFS per `WINDOW_SECONDS` of one stream of PCM, in *audio* time: a chunk
+    holding seconds of speech gives a level for every quarter of it."""
+
+    def __init__(self, sample_rate: int) -> None:
+        self._window = max(1, int(sample_rate * WINDOW_SECONDS))
+        self._rate = sample_rate
+        self._sum = 0.0
+        self._samples = 0
+        self._done = 0
+        """Windows closed so far: where the next one starts."""
+        self.levels: list[float] = []
+
+    def add(self, pcm: bytes) -> list[tuple[int, float]]:
+        """Take the next chunk; `(offset_ms, dbfs)` for every window it closes."""
+        samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2").astype(np.float64)
+        closed: list[tuple[int, float]] = []
+        start = 0
+        while start < samples.size:
+            take = min(self._window - self._samples, samples.size - start)
+            part = samples[start : start + take]
+            self._sum += float(np.dot(part, part))
+            self._samples += take
+            start += take
+            if self._samples == self._window:
+                level = round(dbfs(self._sum, self._samples), 1)
+                offset_ms = round(self._done * self._window * 1000 / self._rate)
+                closed.append((offset_ms, level))
+                self.levels.append(level)
+                self._done += 1
+                self._sum, self._samples = 0.0, 0
+        return closed
+
+    def spread(self) -> dict[str, float]:
+        """The voiced windows' low, middle and high; empty if none was voiced."""
+        voiced = sorted(level for level in self.levels if level >= VOICED_DBFS)
+        if not voiced:
+            return {}
+
+        def at(share: float) -> float:
+            return voiced[min(len(voiced) - 1, int(share * len(voiced)))]
+
+        return {"voice_dbfs_p5": at(0.05), "voice_dbfs_p50": at(0.5), "voice_dbfs_p95": at(0.95)}

@@ -15,6 +15,8 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import Any
 
+from json_repair import repair_json
+
 from voice_agent import prompts, timing
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError, SilentReplyError
@@ -81,12 +83,11 @@ def offered() -> tuple[Choice, ...]:
 
 
 def build(name: str) -> LLM:
+    # No JSON mode: on DeepSeek it broke the long verdict more often, not less.
+    # The prompt asks for JSON; `parse` repairs a slip, and a second ask covers
+    # what repair cannot.
     choice = BY_NAME[name]
-    return Traced(
-        create_llm(
-            choice.provider, choice.model, choice.effort, max_tokens=MAX_TOKENS, json_output=True
-        )
-    )
+    return Traced(create_llm(choice.provider, choice.model, choice.effort, max_tokens=MAX_TOKENS))
 
 
 def clock(seconds: float) -> str:
@@ -142,16 +143,24 @@ def parse(text: str) -> dict[str, Any]:
     start, end = text.find("{"), text.rfind("}")
     if start < 0 or end <= start:
         raise ValueError("no JSON object in the reply")
-    raw = json.loads(text[start : end + 1])
+    body = text[start : end + 1]
+    repaired = ""
+    try:
+        raw = json.loads(body)
+    except json.JSONDecodeError as exc:
+        # A long verdict slips on one brace or one key; repaired, the rest is
+        # intact. The checks below still decide whether it is a verdict.
+        raw = repair_json(body, return_objects=True, skip_json_loads=True)
+        repaired = f" (repaired after: {exc})"
     if not isinstance(raw, dict):
-        raise ValueError("the reply is not a JSON object")
+        raise ValueError(f"the reply is not a JSON object{repaired}")
     for key in ("split", "headline", "reasoning"):
         if not raw.get(key):
-            raise ValueError(f"the verdict has no {key!r}")
+            raise ValueError(f"the verdict has no {key!r}{repaired}")
     split = raw["split"]
     you = split.get("you") if isinstance(split, dict) else None
     if isinstance(you, bool) or not isinstance(you, int | float):
-        raise ValueError("the split has no number for 'you'")
+        raise ValueError(f"the split has no number for 'you'{repaired}")
     you = min(99, max(1, round(you)))
     if you == 50:  # not allowed; the named outcome breaks the tie
         you = 51 if str(raw.get("outcome", "")).lower() == "win" else 49
@@ -208,6 +217,7 @@ async def rule(llm: LLM, name: str, turns: list[Turn]) -> dict[str, Any]:
             if usage.finish_reason in CUT_OFF:
                 raise RuntimeError(f"the verdict was cut off at {MAX_TOKENS} tokens")
             verdict = parse(reply)
+            repaired = not clean(reply)
         # A reply that does not parse (JSONDecodeError included) or came back
         # empty is a random slip: the same request usually succeeds.
         except (ValueError, SilentReplyError) as exc:
@@ -226,10 +236,21 @@ async def rule(llm: LLM, name: str, turns: list[Turn]) -> dict[str, Any]:
             "status": "done",
             "verdict": verdict,
             "attempts": attempt,
+            **({"repaired": True} if repaired else {}),
             "ms": round((timing.now() - started) * 1000),
             "usage": spent,
         }
     raise AssertionError("unreachable: the last attempt returns")
+
+
+def clean(text: str) -> bool:
+    """Whether a reply's JSON parsed as written, needing no repair."""
+    start, end = text.find("{"), text.rfind("}")
+    try:
+        json.loads(text[start : end + 1])
+    except ValueError:
+        return False
+    return True
 
 
 def failed(ruling: dict[str, Any], exc: Exception, started: float, reply: str) -> dict[str, Any]:
@@ -294,9 +315,15 @@ def from_record(text: str) -> list[Turn]:
                 turns.append(Turn("you", at, body, typed=True, approximate=True))
                 continue
             stop_ms = note(notes, "final", "speech_end_ms") or 0.0
-            spoken = round(len(body.split()) / WORDS_PER_SECOND, 1)
+            unheard = "unheard yes" in notes
+            voiced_ms = note(notes, "final", "voiced_ms")
+            spoken = (
+                round(voiced_ms / 1000, 1)
+                if unheard and voiced_ms is not None
+                else round(len(body.split()) / WORDS_PER_SECOND, 1)
+            )
             start = max(0.0, at - stop_ms / 1000 - spoken)
-            turns.append(Turn("you", start, body, spoken=spoken, approximate=True))
+            turns.append(Turn("you", start, body, spoken=spoken, approximate=True, unheard=unheard))
     return with_think_times(sorted(turns, key=lambda t: t.at))
 
 

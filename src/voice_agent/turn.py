@@ -12,18 +12,19 @@ import logging
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field, fields
 
-from voice_agent import timing
+from voice_agent import timing, trace
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation, Message
 from voice_agent.decline import guard
 from voice_agent.errors import SilentReplyError, VoiceAgentError
 from voice_agent.heard import Spoken
+from voice_agent.level import Meter
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
 from voice_agent.streams import closing
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
-from voice_agent.tts.base import pcm_seconds
+from voice_agent.tts.base import SAMPLE_RATE, pcm_seconds
 
 logger = logging.getLogger(__name__)
 
@@ -288,6 +289,9 @@ class Speech:
         finished playing: a pause the listener heard, not one in the voice."""
         self._late_after = ""
         self._audio_ended = False
+        self._meter = Meter(SAMPLE_RATE)
+        """The level of the voice as sent, so a dip heard on the phone can be
+        told from one in the audio itself."""
         self._task = asyncio.create_task(self._run())
 
     def say(self, fragment: str) -> None:
@@ -356,6 +360,8 @@ class Speech:
                     await self._channel.send_bytes(chunk.pcm)
                     self._sent += len(chunk.pcm)
                     self._chunks += 1
+                    for offset_ms, level in self._meter.add(chunk.pcm):
+                        trace.event("voice.level", {"offset_ms": offset_ms, "dbfs": level})
         except VoiceAgentError as exc:
             # The reply itself is fine; only its voice failed. Degrade to text
             # rather than discarding a good answer — losing the words is a far
@@ -397,6 +403,7 @@ class Speech:
                 or self._first_sent_at < self._text_ended_at,
                 "late_ms": self._late_ms,
                 "late_after": self._late_after,
+                **self._meter.spread(),
             }
         )
         if self._late_ms >= FELL_BEHIND_MS:

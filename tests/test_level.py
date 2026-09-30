@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from voice_agent.level import FLOOR_DBFS, WINDOW_SECONDS, Level, dbfs
+from voice_agent.level import FLOOR_DBFS, WINDOW_SECONDS, Level, Meter, dbfs
 
 RATE = 16000
 FRAME = 512  # samples: what the page sends, one VAD window
@@ -78,3 +78,33 @@ def test_a_window_never_mixes_the_voice_with_the_quiet() -> None:
 
     assert quiet == pytest.approx(-63.0, abs=0.5)
     assert level.voice_ended() is None
+
+
+def test_the_voice_sent_is_measured_in_audio_time_across_chunks() -> None:
+    """A synthesizer's chunk can hold seconds of speech: every quarter of it
+    gets a level, at its offset in the audio, not when the chunk arrived."""
+    out = 24000
+    t = np.arange(int(out * 0.6)) / out
+    loud = (0.5 * 32767 * np.sin(2 * math.pi * 220 * t)).astype("<i2").tobytes()
+    meter = Meter(out)
+
+    closed = meter.add(loud) + meter.add(b"\x00\x00" * int(out * 0.4))
+
+    assert [offset for offset, _ in closed] == [0, 250, 500, 750]
+    assert closed[0][1] == pytest.approx(-9.0, abs=0.5)
+    assert closed[3][1] == FLOOR_DBFS  # a pause
+
+
+def test_a_voice_s_spread_leaves_out_its_pauses() -> None:
+    meter = Meter(RATE)
+    for amplitude in (0.5, 0.5, 0.05, 0.0):
+        meter.add(
+            tone(amplitude, int(RATE * WINDOW_SECONDS))
+            if amplitude
+            else b"\x00\x00" * int(RATE * WINDOW_SECONDS)
+        )
+    spread = meter.spread()
+
+    assert spread["voice_dbfs_p5"] == pytest.approx(-29.0, abs=0.5)  # the dip, not the pause
+    assert spread["voice_dbfs_p95"] == pytest.approx(-9.0, abs=0.5)
+    assert Meter(RATE).spread() == {}

@@ -162,6 +162,9 @@ before closing the socket."""
 
 PARTIAL = "partial_transcript"
 COMMITTED = "committed_transcript"
+COMMITTED_DETECTED = "committed_transcript_with_timestamps"
+"""The commit again, with `language_code`, when language detection is on.
+Measured: it can be the only commit sent, so either one is the turn — once."""
 
 
 def explain(payload: dict[str, object]) -> str:
@@ -188,6 +191,11 @@ class ElevenLabsSTT:
         self.languages = LANGUAGES
         self.silence_seconds = silence_seconds or DEFAULT_SILENCE_SECONDS
         self._api_key = api_key or require_env("ELEVENLABS_API_KEY")
+        self.language: str | None = None
+        """The language the last commit was detected in, sent as the next
+        session's hint. One recognizer serves one conversation, so a session
+        after the first need not guess from scratch; a hint does not stop it
+        hearing another language."""
 
     @property
     def url(self) -> str:
@@ -196,6 +204,8 @@ class ElevenLabsSTT:
                 "model_id": self.model,
                 "commit_strategy": "vad",
                 "vad_silence_threshold_secs": self.silence_seconds,
+                "include_language_detection": "true",
+                **({"language_code": self.language} if self.language else {}),
             }
         )
 
@@ -234,6 +244,9 @@ class ElevenLabsSTT:
                 self.url, additional_headers={"xi-api-key": self._api_key}
             ) as socket:
                 task = asyncio.create_task(pump(socket))
+                # Which of the two commit events already gave this segment's
+                # turn, and its text: the other one, if it comes, is the same.
+                answered: tuple[str, str] | None = None
                 try:
                     async for raw in socket:
                         payload = json.loads(raw)
@@ -242,9 +255,16 @@ class ElevenLabsSTT:
                             text = str(payload.get("text", ""))
                             trace.event("stt.partial", {"text": text})
                             yield Transcript(text=text, is_final=False)
-                        elif kind == COMMITTED:
+                        elif kind in (COMMITTED, COMMITTED_DETECTED):
                             text = str(payload.get("text", ""))
-                            trace.event("stt.committed", {"text": text})
+                            language = payload.get("language_code")
+                            if kind == COMMITTED_DETECTED and isinstance(language, str) and text:
+                                self.language = language
+                            if answered is not None and answered[0] != kind and answered[1] == text:
+                                answered = None  # the pair's second half
+                                continue
+                            answered = (kind, text)
+                            trace.event("stt.committed", {"text": text, "language": language})
                             yield Transcript(text=text, is_final=True)
                         elif isinstance(kind, str) and "error" in kind:
                             raise ProviderError(explain(payload))

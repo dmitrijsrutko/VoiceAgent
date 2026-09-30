@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+from openai import omit
 
 from tests.conftest import FakeLLM, Scripted
 from voice_agent import judge
@@ -123,14 +124,12 @@ async def test_a_provider_failure_is_not_asked_for_again() -> None:
     assert ruling["status"] == "failed" and "reply" not in ruling
 
 
-def test_the_judge_asks_for_json_where_the_vendor_can_promise_it(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_the_judge_does_not_use_deepseek_json_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Measured: with `response_format: json_object` the verdict's JSON broke 5
+    times in 9 live and 1 in 5 replayed; without it, 3 in 22 and 0 in 5."""
     monkeypatch.setenv("DEEPSEEK_API_KEY", "test")
-    monkeypatch.setenv("ANTHROPIC_API_KEY", "test")
     inner = judge.build("deepseek-high")._inner  # type: ignore[attr-defined]
-    assert inner._response_format == {"type": "json_object"}
-    judge.build("opus-5-5")  # no JSON mode there; the retry covers it
+    assert inner._response_format is omit
 
 
 async def test_an_empty_json_reply_is_asked_for_again() -> None:
@@ -200,3 +199,55 @@ def test_a_judge_that_cannot_be_built_is_a_failed_ruling() -> None:
     assert ruling["status"] == "failed" and "ANTHROPIC_API_KEY" in ruling["error"]
     assert ruling["judge"]["model"] == "claude-opus-5-5"
     assert ruling["stats"]["your_turns"] == 2
+
+
+def test_a_turn_the_recognizer_lost_counts_no_words_when_judged_again() -> None:
+    """The marker is what the agent was told, not what the user said."""
+    record = """# Conversation x
+
+## 08:55:32 — agent (greeting)
+
+`at 08:55:32.834`
+
+Hi. What's your claim?
+
+`audio_end: seconds 3 · first_audio_ms 800`
+
+## 08:55:50 — you (spoken)
+
+`at 08:55:50.063`
+
+(they spoke, but your hearing caught no words)
+
+`final yes · unheard yes · voiced_ms 5400`
+"""
+    turns = judge.from_record(record)
+    you = next(t for t in turns if t.who == "you")
+
+    assert you.unheard and you.words == 0
+    assert you.spoken == 5.4
+
+
+BROKEN = json.loads((Path(__file__).parent / "fixtures" / "judge_broken.json").read_text("utf-8"))
+
+
+@pytest.mark.parametrize("case", BROKEN, ids=[c["source"] for c in BROKEN])
+def test_a_verdict_that_slipped_on_one_brace_is_repaired(case: dict[str, str]) -> None:
+    """Live replies from DeepSeek in JSON mode that closed the object early
+    ("Extra data"): repaired, every section and all ten cards are there."""
+    verdict = judge.parse(case["reply"])
+
+    assert verdict["split"]["you"] + verdict["split"]["advocate"] == 100
+    assert len(verdict["scorecard"]) == 10
+    assert {"position", "moments", "improve", "rematch", "fun"} <= verdict.keys()
+    assert not judge.clean(case["reply"])
+
+
+async def test_a_repaired_verdict_is_ruled_on_first_time_and_says_so() -> None:
+    """The shape of the 09:03 slip: a stray empty key inside a fallacy."""
+    slipped = VERDICT[:-1] + ', "fallacies": [{"at": "05:18", "name": "circular", ""}]}'
+    llm = FakeLLM([slipped])
+    ruling = await judge.rule(llm, "deepseek-high", ROUND)
+
+    assert (ruling["status"], ruling["attempts"], ruling["repaired"]) == ("done", 1, True)
+    assert len(llm.seen) == 1

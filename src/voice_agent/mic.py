@@ -7,7 +7,7 @@ import logging
 from collections.abc import AsyncIterator, Callable, Iterator
 from datetime import datetime
 
-from voice_agent import timing, trace
+from voice_agent import prompts, timing, trace
 from voice_agent.channel import Channel
 from voice_agent.errors import VoiceAgentError
 from voice_agent.events import Final, FloorChanged, MicEvent, NewSession, Partial
@@ -55,6 +55,11 @@ def human_seconds(value: float) -> str:
         return f"{minutes} minute{'s' if minutes != 1 else ''}"
     return f"{value:.0f}s"
 
+
+UNHEARD_MIN_SECONDS = 1.0
+"""Voice heard for this long, then an empty commit: the recognizer lost what
+was said, and the user is asked to repeat it rather than left unanswered. A
+cough or a click is shorter."""
 
 Heard = tuple[bytes, float, bool]
 """A frame for the VAD and the level: its audio, when it arrived, and whether
@@ -114,6 +119,10 @@ class Mic:
         last stopped."""
         self._agent_was = False
         """Whether the last frame measured arrived during the agent's voice."""
+        self._voiced = 0.0
+        """Seconds of voice the detector heard in this utterance, counting only
+        speech that began while the agent was not audible: its echo is not them."""
+        self._voice_from: float | None = None
         self._measuring = True
         """Off for the rest of a listening session once measuring has failed."""
         self._heard: asyncio.Queue[Heard | None] | None = None
@@ -243,7 +252,12 @@ class Mic:
             # not when the recognizer's first words could have come from.
             if self._began_at is None and self._first_words_ms is None:
                 self._began_at = began
-        elif change.state == "micro_pause":
+            if "playback" not in self._holds:
+                self._voice_from = began
+        elif self._voice_from is not None:
+            self._voiced += began - self._voice_from
+            self._voice_from = None
+        if change.state == "micro_pause":
             self._stopped_at = began
         elif change.state == "yielded" and self._first_words_ms is None:
             # Speech that never became words (a cough, the agent's own echo):
@@ -413,7 +427,13 @@ class Mic:
     def _utterance_over(self) -> None:
         """The current utterance is over, or never was: start measuring afresh."""
         self._began_at = self._first_words_ms = None
+        self._voiced, self._voice_from = 0.0, None
         self.partial = ""
+
+    def _voiced_seconds(self) -> float:
+        """Voice heard in this utterance so far, a stretch still going included."""
+        going = timing.now() - self._voice_from if self._voice_from is not None else 0.0
+        return self._voiced + going
 
     def _speech_end_ms(self) -> int | None:
         """How long ago the user stopped, by the VAD. `None` while they are still
@@ -464,6 +484,26 @@ class Mic:
                 continue
 
             if not transcript.text.strip():
+                voiced = self._voiced_seconds()
+                if voiced >= UNHEARD_MIN_SECONDS and "playback" not in self._holds:
+                    # They spoke and the recognizer kept none of it: a turn that
+                    # says so, so the agent asks again instead of saying nothing.
+                    unheard = prompts.load("unheard")
+                    await self._channel.send_json(
+                        {
+                            "type": "transcript",
+                            "text": unheard,
+                            "final": True,
+                            "unheard": True,
+                            "voiced_ms": round(voiced * 1000),
+                        }
+                    )
+                    self._utterance_over()
+                    self._agreement.reset()
+                    self._drawn = False
+                    heard_at = timing.now()
+                    self._post(Final(unheard))
+                    continue
                 # An empty commit (a flush, or noise): nothing to report, but the
                 # partials already drawn came to nothing.
                 heard_at = timing.now()
