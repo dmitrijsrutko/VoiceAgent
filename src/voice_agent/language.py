@@ -17,6 +17,10 @@ stays an answer. So the memory is **two-tier**:
 - the second time it is *pinned* as `language_code` — worth a strong prior,
   because it has now been seen twice.
 
+Both recognizers take the same two tiers in their own spelling: AssemblyAI gets
+one `language_codes` list, where a single element is its monolingual session and
+the bias is soft rather than a hard pin.
+
 `record` closes the loop that matters: a commit contradicting the pin we sent
 *demotes* the pin back to a candidate instead of being read as confirmation, and
 a language heard during a session we did not guide at all is taken at face

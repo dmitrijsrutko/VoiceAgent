@@ -110,6 +110,20 @@ def test_the_header_names_the_voice_model_and_option(tmp_path: Path) -> None:
     assert "voice fake-voice fake-voice-model (flash-v2.5) fake-voice-1" in header, header
 
 
+def test_the_header_names_the_recognizer_model_too(tmp_path: Path) -> None:
+    """Chapter 32: `ears assemblyai` cannot say which model heard the words, and
+    a vendor ships new ones under the same name — the same gap the voice line
+    closed in Chapter 31."""
+    client = app_for(tmp_path, SessionStore())
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}?stt=assemblyai") as socket:
+        receive(socket)
+
+    header = recorded(tmp_path).splitlines()[1]
+    assert "ears fake-ears fake-ears-1" in header, header
+
+
 def test_the_header_says_so_when_a_setting_is_absent(tmp_path: Path) -> None:
     """Absent is written down, not left out: a missing field cannot tell
     "switched off" from "never logged"."""

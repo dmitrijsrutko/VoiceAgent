@@ -361,11 +361,12 @@ class Record:
         if payload.get("choice"):
             model += f" ({payload['choice']})"
         judge = payload.get("judge") or {}
+        heard = " ".join(str(v) for v in (ears.get("provider"), ears.get("model")) if v)
         return " · ".join(
             (
                 f"role {role.get('slug') or role.get('name')}" if role else "role none",
                 f"llm {model}",
-                f"ears {ears.get('provider')}" if ears else "ears deaf",
+                f"ears {heard}" if heard else "ears deaf",
                 (
                     f"voice {voice.get('provider')} {voice.get('model')} "
                     f"({voice.get('choice')}) {voice.get('voice')}"

@@ -61,7 +61,8 @@ class STT(Protocol):
     @property
     def languages(self) -> tuple[str, ...]:
         """Which languages this backend can transcribe, in the vendor's own
-        code convention — AssemblyAI answers in two-letter codes, ElevenLabs in
+        code convention — AssemblyAI answers in two-letter codes (and three for
+        the two languages that have no two-letter one), ElevenLabs in
         three-letter ones, and normalising them by hand would invent facts.
 
         On the protocol because it is not a detail of one vendor: a recognizer

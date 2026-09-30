@@ -171,6 +171,8 @@ def main() -> None:
     title = f" {tts_registry.BY_NAME[spoken].title}" if spoken else ""
     voice = f"{args.tts}{title} {sex}" if args.tts != "none" else "silent"
     ears = args.stt if args.stt != "none" else "deaf"
+    if (chosen_ears := stt_registry.EARS.get(args.stt)) is not None:
+        ears = f"{args.stt} {chosen_ears.model}"
     try:
         app = create_app(settings=settings)
     except ConfigError as exc:
@@ -191,9 +193,9 @@ def main() -> None:
         from voice_agent.stt.assemblyai_stt import LANGUAGES
 
         print(
-            f"   ears speak {len(LANGUAGES)} languages ({' '.join(LANGUAGES)}). "
-            "Anything else is transcribed as nonsense rather than refused — "
-            "use --stt elevenlabs for it."
+            f"   it hears {len(LANGUAGES)} languages ({' '.join(LANGUAGES)}): "
+            "anything else comes back as confident nonsense rather than an "
+            "error — Scribe has the rest of the world."
         )
     uvicorn.run(app, host=args.host, port=args.port, log_level="warning")
 

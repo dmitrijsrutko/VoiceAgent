@@ -4,6 +4,39 @@ You are helping a developer integrate AssemblyAI's Speech-to-Text API into their
 
 This is a public API. The developer creates their own key at [assemblyai.com/dashboard/api-keys](https://www.assemblyai.com/dashboard/api-keys).
 
+**Universal-3.6 Pro Realtime — the streaming flagship (checked 2026-09-30).** The
+`universal-3-5-pro` statements below still hold for a model the vendor still sells,
+but 3.6 Pro is the flagship now. What changed:
+
+- `speech_model=universal-3-6-pro` on the **same** `wss://…/v3/ws` endpoint, with
+  no new parameters and the same latency; it is also the default when
+  `speech_model` is omitted. `Begin` echoes it back under
+  `configuration.model` — the one place the service confirms what it accepted.
+- **32 languages**, code-switching natively mid-sentence:
+  `af ar yue ca da nl en et fi fr gl de he hi it ja ko mr no nn fa pt ro ru es sv tr ur vi xh zu zh`.
+  3.5 Pro covers 18 of those. Vendor sources disagree on the arithmetic (the
+  release post: 18 + 14; the model page: 19 + 13) — the table and the service's
+  own validation both list the 32 above, and that is the authority.
+- `language_codes` steers: repeated query parameters
+  (`language_codes=en&language_codes=ru`), a single element for a monolingual
+  session, and it is a **soft** bias — Russian audio sent with
+  `language_codes=en` still came back Russian, correct, at confidence 1.0. A
+  comma-joined value is *not* a list: it is refused as one invalid code with
+  **3006**, as is any code outside the 32 (the error enumerates them, plus
+  `multi`). Update it mid-stream with `UpdateConfiguration`.
+- `language_detection=true` adds `language_code` and `language_confidence` to
+  `Turn` events. Reporting only — it does not change transcription.
+- Endpointing is entity-aware: the model holds a turn open when the transcript
+  looks like a number, code, email or address in progress (end-of-turn precision
+  74.1% → 77.9% at held recall, unchanged 537 ms median). `min_turn_silence`
+  still clamps to 50–10000 ms; the 1536 ms `max_turn_silence` default is stated
+  for 3.5 Pro in the reference, and 3.6 is not given one of its own.
+- `voice_focus` (`near-field`/`far-field`) suppresses *other talkers*; it is off
+  by default and is not a noise suppressor for the model's benefit.
+- The API reference still labels `mode`, `prompt`, `interruption_delay` and
+  `previous_context_n_turns` "Universal-3.5 Pro Streaming only" — do not assume
+  they are honoured on 3.6 without checking a live session.
+
 **Official documentation.** Two ways to wire your coding agent up to live docs (both recommended — they layer):
 
 1. **Project instructions** (every prompt): add to `CLAUDE.md`, `.cursorrules`, `AGENTS.md`, or equivalent:

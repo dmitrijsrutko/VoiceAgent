@@ -285,6 +285,7 @@ class Agent:
             "ears": (
                 {
                     "provider": listener.provider,
+                    "model": listener.model,
                     "sample_rate": listener.sample_rate,
                     "languages": list(listener.languages),
                 }

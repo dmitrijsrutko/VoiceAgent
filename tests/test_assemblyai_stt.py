@@ -16,12 +16,12 @@ import websockets
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.frames import Close
 
-from voice_agent import vad
+from voice_agent import trace, vad
 from voice_agent.config import load_settings
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.stt import assemblyai_stt, create_stt
 from voice_agent.stt.assemblyai_stt import AssemblyAISTT, explain
-from voice_agent.stt.base import batched
+from voice_agent.stt.base import LanguageHint, batched
 
 
 async def audio_of(chunks: int) -> AsyncIterator[bytes]:
@@ -30,16 +30,18 @@ async def audio_of(chunks: int) -> AsyncIterator[bytes]:
         yield b"\x00\x01" * 1600
 
 
-def turn(order: int, text: str, end: bool, formatted: bool = False) -> str:
-    return json.dumps(
-        {
-            "type": "Turn",
-            "turn_order": order,
-            "transcript": text,
-            "end_of_turn": end,
-            "turn_is_formatted": formatted,
-        }
-    )
+def turn(order: int, text: str, end: bool, formatted: bool = False, language: str = "") -> str:
+    payload = {
+        "type": "Turn",
+        "turn_order": order,
+        "transcript": text,
+        "end_of_turn": end,
+        "turn_is_formatted": formatted,
+    }
+    if language:
+        payload["language_code"] = language
+        payload["language_confidence"] = 0.99
+    return json.dumps(payload)
 
 
 class Recorder:
@@ -50,8 +52,14 @@ class Recorder:
         self.binary: list[bytes] = []
         self.text: list[str] = []
         self.tail = tail if tail is not None else [turn(0, "all of it", end=True)]
+        self.url = ""
+        """What the adapter asked for, query string included: the session's
+        parameters are the request, and the fake server is the only place they
+        can be observed as sent."""
 
     async def __call__(self, connection: ServerConnection) -> None:
+        request = connection.request
+        self.url = request.path if request is not None else ""
         await connection.send(json.dumps({"type": "Begin", "id": "t", "expires_at": 0}))
         heard = 0
         async for raw in connection:
@@ -176,8 +184,126 @@ def test_the_model_is_the_singular_streaming_string() -> None:
     is the most common way to get this API wrong."""
     url = AssemblyAISTT(api_key="test").url
 
-    assert "speech_model=universal-3-5-pro" in url
+    assert "speech_model=universal-3-6-pro" in url
     assert "speech_models" not in url
+
+
+def test_the_session_asks_for_the_language_it_hears() -> None:
+    """Reporting only — it is what makes a wrong hint correctable, and without
+    it a turn carries nothing to correct it with (measured 2026-09-30)."""
+    assert "language_detection=true" in AssemblyAISTT(api_key="test").url
+
+
+def test_a_language_hint_goes_out_as_repeated_codes() -> None:
+    """`language_codes` is the vendor's steering list, and its own validation
+    parses it as repeated query parameters. A comma-joined value is *not*
+    ignored: the service reads "en,es" as one invalid code and closes the
+    session with 3006, which is also why a hint is filtered to the codes this
+    model accepts before it reaches a URL."""
+    pinned = AssemblyAISTT(api_key="test").session_url(LanguageHint(pin="ru"))
+    narrowed = AssemblyAISTT(api_key="test").session_url(LanguageHint(candidates=("ru", "en")))
+
+    assert "language_codes=ru" in pinned
+    assert "language_codes=ru&language_codes=en" in narrowed
+    assert "language_codes=en%2Ces" not in narrowed
+
+
+def test_a_hint_carrying_a_language_this_model_never_hears_is_dropped() -> None:
+    """The hint is written by a conversation, not by this adapter, so a code
+    from another recognizer's convention (Scribe's `rus`) must not reach the
+    URL: the service answers an invalid code with 3006 and the session never
+    starts, where an unfiltered-out hint would have cost only a weaker bias."""
+    url = AssemblyAISTT(api_key="test").session_url(LanguageHint(pin="rus", candidates=("ru",)))
+
+    assert "language_codes=ru" in url
+    assert "rus" not in url
+
+
+def test_a_pin_and_its_candidates_are_one_list_without_repeats() -> None:
+    """The vendor has one parameter for both tiers: a single element is its
+    monolingual session, a longer list still code-switches. The pin is also a
+    candidate, and sending it twice would be one code sent twice."""
+    url = AssemblyAISTT(api_key="test").session_url(LanguageHint(pin="ru", candidates=("ru", "en")))
+
+    assert url.count("language_codes=") == 2
+    assert "language_codes=ru&language_codes=en" in url
+
+
+async def test_the_language_comes_back_on_the_commit(endpoint: Endpoint) -> None:
+    """A turn's language is what corrects a wrong hint, so it rides with the
+    commit — `Transcript.language`, which `language.py` reads."""
+    recorder = Recorder(tail=[turn(0, "привет", end=True, language="ru")])
+    stt = await endpoint(recorder)
+
+    finals = [t async for t in stt.stream(audio_of(1)) if t.is_final]
+
+    assert [(t.text, t.language) for t in finals] == [("привет", "ru")]
+
+
+async def test_a_language_held_from_a_session_we_did_not_guide(endpoint: Endpoint) -> None:
+    """The hint is an argument to the session, not state on the adapter: this is
+    the leak that made one conversation's language open the next one's first
+    sentence, so a session opened without one carries no language either."""
+    recorder = Recorder()
+    stt = await endpoint(recorder)
+
+    await anext(stt.stream(audio_of(1)))
+
+    assert "language_codes" not in recorder.url
+
+
+async def test_the_hint_reaches_the_session_that_is_opened(endpoint: Endpoint) -> None:
+    """`stream` takes the hint and the URL is built from it: the microphone asks
+    the conversation afresh for every listening session, so this argument is the
+    only path a language has into a recognizer session."""
+    recorder = Recorder()
+    stt = await endpoint(recorder)
+
+    async for _ in stt.stream(audio_of(1), LanguageHint(pin="ru", candidates=("ru", "en"))):
+        pass
+
+    assert "language_codes=ru&language_codes=en" in recorder.url
+
+
+async def test_the_trace_names_the_model_and_the_hint(
+    endpoint: Endpoint, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """What makes a misdetection explainable afterwards: which model heard it,
+    and what it was told to expect. The turn-silence bounds are not echoed by
+    the service (`Begin` omits them), so the trace is where they are pinned."""
+    seen: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        trace,
+        "event",
+        lambda kind, fields=None: seen.append((kind, dict(fields or {}))),
+    )
+    stt = await endpoint(Recorder(tail=[turn(0, "привет", end=True, language="ru")]))
+
+    async for _ in stt.stream(audio_of(1), LanguageHint(pin="ru", candidates=("ru", "en"))):
+        pass
+
+    events = dict(seen)
+    assert events["stt.session"] == {
+        "provider": "assemblyai",
+        "model": "universal-3-6-pro",
+        "sample_rate": 16000,
+        "max_turn_silence_ms": 1500,
+        "language": "ru",
+        "candidates": ["ru", "en"],
+    }
+    assert events["stt.committed"] == {"text": "привет", "language": "ru"}
+
+
+async def test_an_empty_commit_still_carries_its_language(endpoint: Endpoint) -> None:
+    """A language heard over an utterance the model could not write down is
+    exactly the evidence that the hint in force was wrong. Dropping it because
+    the text was empty threw that away on the other recognizer, live."""
+    recorder = Recorder(tail=[turn(0, "", end=True, language="ru")])
+    stt = await endpoint(recorder)
+
+    finals = [t async for t in stt.stream(audio_of(1)) if t.is_final]
+
+    assert [(t.text, t.language) for t in finals] == [("", "ru")]
 
 
 def test_the_pause_reaches_the_url_in_milliseconds() -> None:
@@ -296,22 +422,28 @@ async def test_the_recognizer_is_sent_chunks_this_endpoint_will_accept() -> None
     assert len(chunks) == 3
 
 
-def test_russian_is_not_among_the_languages_this_backend_hears() -> None:
-    """The fact that cost an evening, pinned.
+def test_the_languages_are_the_thirty_two_the_service_accepts() -> None:
+    """The set that cost an evening, and then stopped being true.
 
-    Spoken Russian is not refused by this backend — it comes back as confident
-    nonsense ("Раскажем не pravalo вывnutriny produkt kitaia"), and the agent
-    answers it. If this list ever grows to include `ru`, that is a real change
-    worth noticing rather than absorbing silently.
+    Spoken Russian used to come back as confident nonsense ("Раскажем не pravalo
+    вывnutriny produkt kitaia") because it was not among the eighteen this model
+    heard. 3.6 Pro hears it, so the list is pinned by membership as well as
+    count: `ru`, `ko` and the two codes the vendor spells in 639-3 are the ones
+    a careless edit would drop, and the service itself refuses any code outside
+    this set with 3006 rather than ignoring it.
     """
-    assert "ru" not in assemblyai_stt.LANGUAGES
-    assert len(assemblyai_stt.LANGUAGES) == 18
+    assert len(assemblyai_stt.LANGUAGES) == 32
+    assert len(set(assemblyai_stt.LANGUAGES)) == 32, "a code appears twice"
+    assert {"ru", "ko", "yue", "nn", "af", "zh"} <= set(assemblyai_stt.LANGUAGES)
     assert AssemblyAISTT(api_key="test").languages == assemblyai_stt.LANGUAGES
 
 
 def test_scribe_hears_what_this_backend_cannot() -> None:
-    """The documented escape hatch has to actually be one."""
+    """The documented escape hatch has to actually be one. Russian is no longer
+    the example — Thai is: it is in Scribe's published hundred and in none of
+    this model's thirty-two."""
     from voice_agent.stt import elevenlabs_stt
 
-    assert "rus" in elevenlabs_stt.LANGUAGES
+    assert "tha" in elevenlabs_stt.LANGUAGES
+    assert "th" not in assemblyai_stt.LANGUAGES
     assert len(elevenlabs_stt.LANGUAGES) > len(assemblyai_stt.LANGUAGES)

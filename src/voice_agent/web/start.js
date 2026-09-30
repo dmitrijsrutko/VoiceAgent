@@ -12,13 +12,16 @@ export function servedFacts() {
   }
 }
 
-const LABELS = {
-  stt: { assemblyai: "AssemblyAI", elevenlabs: "ElevenLabs Scribe" },
+// The vendor a model belongs to. Not a claim about what runs: the options
+// themselves, and their titles, come from the server.
+const PROVIDERS = {
+  anthropic: "Claude",
+  assemblyai: "AssemblyAI",
+  deepseek: "DeepSeek",
+  openai: "OpenAI",
+  elevenlabs: "ElevenLabs",
 };
-// Display names for the provider a model belongs to. Not a claim about what
-// runs: the options themselves, and their titles, come from the server.
-const PROVIDERS = { anthropic: "Claude", deepseek: "DeepSeek", openai: "OpenAI", elevenlabs: "ElevenLabs" };
-const label = (group, name) => LABELS[group][name] ?? name;
+const vendor = (o) => PROVIDERS[o.provider] ?? o.provider;
 
 // Role cards are text somebody wrote — soon, anybody — and this page builds
 // HTML from strings, so what a card says is escaped on the way in.
@@ -100,13 +103,17 @@ export function showStart(known) {
   choose("llm", "Reasoning", known.choices?.llm ?? [],
     (o) => `${escape(o.title)} <small>${escape(o.hint)}</small>`, { byProvider: true });
   // In the server's order, whichever is the default: the page keeps its layout.
+  // The ears are named like a model rather than only a vendor, because the two
+  // vendors' models differ in what they hear; the count is read off the list the
+  // prompt is built from, so the badge cannot drift from it.
   choose("stt", "Ears", known.choices?.stt ?? [],
-    (o) => `${label("stt", o.name)} <small>${o.languages.length} languages</small>`,
+    (o) => `${escape(vendor(o))} ${escape(o.title)} ` +
+      `<small>${o.languages.length} languages · ${escape(o.hint)}</small>`,
     { asServed: true });
   // Like the models, the voice options are titled by the server.
   if (known.voice) {
     choose("tts", "Voice", known.choices?.tts ?? [],
-      (o) => `${escape(PROVIDERS[o.provider] ?? o.provider)} ${escape(o.title)} <small>${escape(o.hint)}</small>`,
+      (o) => `${escape(vendor(o))} ${escape(o.title)} <small>${escape(o.hint)}</small>`,
       { single: true });
   }
 

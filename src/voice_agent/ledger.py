@@ -92,8 +92,14 @@ def settings(row: SessionSummary, line: str) -> None:
             # The menu option is in brackets; without one, the model is the name.
             chosen = BRACKETED.search(value)
             setattr(row, key, chosen.group(1) if chosen else value.split()[0])
-        elif key in ("role", "ears", "judge", "visitor"):
+        elif key in ("role", "judge", "visitor"):
             setattr(row, key, value)
+        elif key == "ears":
+            # The record names the model after the recognizer (`ears assemblyai
+            # universal-3-6-pro`), and the breakdown keys on the recognizer, so
+            # a session from before the model was recorded and one from after it
+            # are the same row rather than one of them "no longer offered".
+            row.ears = value.split()[0]
         elif "/" in key and not row.llm:  # older records name the model unlabelled
             chosen = BRACKETED.search(value)
             row.llm = chosen.group(1) if chosen else key
@@ -311,8 +317,10 @@ PROVIDERS = {
     "openai": "OpenAI",
     "elevenlabs": "ElevenLabs",
 }
-EARS = {"assemblyai": "AssemblyAI", "elevenlabs": "ElevenLabs Scribe"}
-"""Display names as `web/start.js` words them (its `PROVIDERS` and `LABELS`)."""
+EARS = {"assemblyai": "AssemblyAI", "elevenlabs": "ElevenLabs"}
+"""Recognizer vendor names, as `web/start.js` words them (its `PROVIDERS`). The
+model comes from the menu itself — the page names both, so a record says which
+recognizer ran rather than only whose it was."""
 
 NOT_OFFERED = {
     "none": "none — plain assistant, not on the start screen",
@@ -332,7 +340,11 @@ def label(group: str, option: dict[str, Any]) -> str:
         hint = option.get("hint")
         return f"{vendor} {option.get('title')}" + (f" · {hint}" if hint else "")
     if group == "stt":
-        return EARS.get(name, name)
+        # Without a title (an older menu, or a fixture), the vendor alone — which
+        # is what this returned before the models were named.
+        vendor = EARS.get(name, name)
+        title = option.get("title")
+        return f"{vendor} {title}" if title else vendor
     if group == "tts":
         return f"{vendor} {option.get('title')}"
     return str(option.get("title") or name)

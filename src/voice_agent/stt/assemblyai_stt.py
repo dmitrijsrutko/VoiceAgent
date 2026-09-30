@@ -1,10 +1,14 @@
-"""AssemblyAI Universal-Streaming speech recognition, over the v3 WebSocket.
+"""AssemblyAI Universal-3.6 Pro speech recognition, over the v3 WebSocket.
 
 A raw WebSocket rather than the SDK: the protocol is four message types, less
 code than bridging the SDK's callbacks into an async iterator.
 
 Endpointing is the service's. `--vad-silence` maps onto its turn-silence
 *window* (milliseconds), so the flag means the same on both recognizers.
+
+The conversation's language reaches this recognizer as `language_codes` (the
+vendor's steering list), and comes back on each final turn as `language_code`
+— the same two-tier hint Scribe gets, in this vendor's own spelling.
 
 Two things here are cost control rather than correctness:
 
@@ -29,37 +33,65 @@ from voice_agent.stt.base import LanguageHint, Transcript, batched
 
 ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
 
-DEFAULT_MODEL = "universal-3-5-pro"
+DEFAULT_MODEL = "universal-3-6-pro"
 """Singular `speech_model`, a *string*. The pre-recorded API takes a plural
 `speech_models` **array** and treats it as an ordered fallback list; streaming
 takes neither. Passing the array shape here is the most common way to get this
-endpoint wrong."""
+endpoint wrong.
+
+The release is called Universal-3.6 Pro Realtime and the streaming docs call the
+same string Universal-3.6 Pro Streaming (`universal-3-6-pro`, checked
+2026-09-30). `universal-3-5-pro` still works at the vendor; this project simply
+stopped offering it."""
 
 LANGUAGES = (
-    "en",
-    "es",
-    "fr",
-    "de",
-    "it",
-    "pt",
-    "tr",
-    "nl",
-    "sv",
-    "no",
-    "da",
-    "fi",
-    "hi",
-    "vi",
+    "af",
     "ar",
+    "yue",
+    "ca",
+    "da",
+    "nl",
+    "en",
+    "et",
+    "fi",
+    "fr",
+    "gl",
+    "de",
     "he",
+    "hi",
+    "it",
     "ja",
+    "ko",
+    "mr",
+    "no",
+    "nn",
+    "fa",
+    "pt",
+    "ro",
+    "ru",
+    "es",
+    "sv",
+    "tr",
+    "ur",
+    "vi",
+    "xh",
+    "zu",
     "zh",
 )
-"""The 18 languages `universal-3-5-pro` transcribes, as ISO 639-1 codes.
+"""The 32 languages `universal-3-6-pro` hears, as ISO 639-1 codes.
 
-Anything else is not refused but transcribed as confident nonsense, and
-`language_codes` is silently ignored. Use `--stt elevenlabs` for other
-languages; `whisper-rt` covers more but emits no partials at all."""
+`yue` (Cantonese) and `nn` (Norwegian Nynorsk) have no 639-1 code, so the
+vendor's own table spells those two in 639-3, as do the codes the service
+accepts; the note in `stt/base.py` is about not inventing a mapping, not about
+the alphabet. Two independent vendor sources carry this set — the multilingual
+docs table and the service's own `language_codes` validation error — and they
+agree code for code (checked 2026-09-30). `universal-3-5-pro` heard 18 of them.
+
+Anything else is not refused but transcribed as confident nonsense — and unlike
+an unknown *query parameter*, which the service ignores, an unknown code in
+`language_codes` closes the session with 3006 (measured 2026-09-30), which is
+why a hint is filtered against this tuple. Use `--stt elevenlabs` for the rest
+of the world; its recognizer covers these 32 and 68 more."""
 
 SAMPLE_RATE = 16000
 """What we ask for; the page opens its microphone at this rate, so nothing resamples."""
@@ -140,23 +172,51 @@ class AssemblyAISTT:
 
     @property
     def url(self) -> str:
-        return f"{ENDPOINT}?" + urlencode(
-            {
-                "speech_model": self.model,
-                "sample_rate": self.sample_rate,
-                "encoding": ENCODING,
-                "min_turn_silence": self.min_turn_silence_ms,
-                "max_turn_silence": self.max_turn_silence_ms,
-            }
-        )
+        """The session with no language known, as a fresh conversation opens it."""
+        return self.session_url()
+
+    def session_url(self, language: LanguageHint | None = None) -> str:
+        """One recognizer session's URL.
+
+        **The hint is an argument, never state.** This adapter is a process-wide
+        singleton (`Backends.ears`), and a `language` attribute on it leaked one
+        conversation's language into the next conversation's first sentence.
+
+        `language_codes` is the vendor's steering list — its "single-element
+        list" is a monolingual session, a longer one still code-switches but is
+        biased. The codes go out as **repeated query parameters**: that is the
+        shape the service's own validation parses, and a comma-joined value is
+        refused as one invalid code (3006, measured 2026-09-30). Same date, the
+        same probe: the bias is soft — Russian audio sent with
+        `language_codes=en` came back Russian, correct and at confidence 1.0 —
+        so a wrong entry here steers rather than replaces what is heard.
+        """
+        wanted: list[str] = []
+        if language is not None:
+            for code in (language.pin, *language.candidates):
+                if code and code in LANGUAGES and code not in wanted:
+                    wanted.append(code)
+        query: dict[str, object] = {
+            "speech_model": self.model,
+            "sample_rate": self.sample_rate,
+            "encoding": ENCODING,
+            "min_turn_silence": self.min_turn_silence_ms,
+            "max_turn_silence": self.max_turn_silence_ms,
+            # Reporting only: it does not change how the model transcribes, and
+            # without it a turn carries no language to correct a wrong hint with.
+            "language_detection": "true",
+        }
+        if wanted:
+            query["language_codes"] = wanted
+        return f"{ENDPOINT}?" + urlencode(query, doseq=True)
 
     async def stream(
         self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
     ) -> AsyncIterator[Transcript]:
-        """`language` is accepted and ignored: these ears pin one of eighteen
-        languages or code-switch natively, and the service reports no language
-        on a turn, so there is nothing to hint and nothing to learn. The ears
-        keep the protocol's shape, not every recognizer's features."""
+        """`language` steers this session, and what the model hears comes back on
+        each final turn. One session per hint, as on the other recognizer: the
+        microphone asks the conversation afresh for every listening session, so
+        nothing needs updating mid-stream."""
         # Set before closing the socket ourselves: an orderly shutdown is not a failure.
         closing = asyncio.Event()
 
@@ -174,14 +234,18 @@ class AssemblyAISTT:
             "stt.session",
             {
                 "provider": self.provider,
+                "model": self.model,
                 "sample_rate": self.sample_rate,
                 "max_turn_silence_ms": self.max_turn_silence_ms,
+                # What was actually sent, so a live failure names its own hint.
+                "language": language.pin if language else None,
+                "candidates": list(language.candidates) if language else [],
             },
         )
         try:
             async with websockets.connect(
                 # The raw key, no `Bearer` (only the Voice Agent API wants one).
-                self.url,
+                self.session_url(language),
                 additional_headers={"Authorization": self._api_key},
             ) as socket:
                 task = asyncio.create_task(pump(socket))
@@ -227,6 +291,8 @@ class AssemblyAISTT:
                 continue  # SpeechStarted and friends: nothing downstream acts on them
 
             text = str(payload.get("transcript", ""))
+            detected = payload.get("language_code")
+            heard = detected if isinstance(detected, str) else None
             if not payload.get("end_of_turn"):
                 trace.event("stt.partial", {"text": text})
                 yield Transcript(text=text, is_final=False)
@@ -239,5 +305,9 @@ class AssemblyAISTT:
                 if order in finalized:
                     continue
                 finalized.add(order)
-            trace.event("stt.committed", {"text": text})
-            yield Transcript(text=text, is_final=True)
+            trace.event("stt.committed", {"text": text, "language": heard})
+            # The language rides even when the text is empty: a language heard
+            # over an utterance the model could not write down is exactly the
+            # evidence that the hint in force was wrong, so dropping it would
+            # throw away the one report worth having.
+            yield Transcript(text=text, is_final=True, language=heard)

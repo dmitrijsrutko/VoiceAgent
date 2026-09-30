@@ -169,7 +169,10 @@ MENU = {
             "provider": "deepseek",
         },
     ],
-    "stt": [{"name": "assemblyai"}, {"name": "elevenlabs"}],
+    "stt": [
+        {"name": "assemblyai", "title": "Universal-3.6 Pro Realtime"},
+        {"name": "elevenlabs", "title": "Scribe v2 Realtime"},
+    ],
     "tts": [{"name": "flash-v2.5", "title": "Flash v2.5", "provider": "elevenlabs"}],
     "judge": [
         {"name": "deepseek-high", "title": "DeepSeek V4.1 Flash"},
@@ -198,8 +201,8 @@ def test_the_breakdown_is_the_start_screen_with_zeros_for_what_nobody_picked(
         ("deepseek-high", 0),
     ], "deepseek-high was never picked, and is listed anyway"
     assert [r["label"] for r in by_title["Ears"]] == [
-        "AssemblyAI",
-        "ElevenLabs Scribe",
+        "AssemblyAI Universal-3.6 Pro Realtime",
+        "ElevenLabs Scribe v2 Realtime",
         "none — typing only",
     ]
     assert by_title["Ears"][1]["sessions"] == 0
@@ -210,6 +213,26 @@ def test_the_breakdown_is_the_start_screen_with_zeros_for_what_nobody_picked(
     assert [(r["name"], r["sessions"]) for r in judges] == [("deepseek-high", 1), ("opus", 0)], (
         "an unjudged session is no judge's, so it is not a row"
     )
+
+
+def test_a_record_naming_the_model_still_bins_by_its_recognizer(tmp_path: Path) -> None:
+    """Chapter 32 writes the model after the recognizer (`ears assemblyai
+    universal-3-6-pro`). The breakdown keys on the recognizer, so a session
+    recorded before the model was written down and one recorded after it are one
+    row — not one row and one "no longer offered"."""
+    write(tmp_path, "2026-09-28-100000-abc.md", MEASURED)
+    write(
+        tmp_path,
+        "2026-09-30-120000-late.md",
+        MEASURED.replace("ears assemblyai", "ears assemblyai universal-3-6-pro"),
+    )
+    sections = ledger.breakdown(ledger.aggregate(ledger.read(tmp_path)), MENU)
+    ears = {s["title"]: s["rows"] for s in sections}["Ears"]
+
+    assert [(r["name"], r["sessions"], r["offered"]) for r in ears] == [
+        ("assemblyai", 2, True),
+        ("elevenlabs", 0, True),
+    ]
 
 
 def test_a_retired_option_follows_the_offered_ones_only_when_used() -> None:

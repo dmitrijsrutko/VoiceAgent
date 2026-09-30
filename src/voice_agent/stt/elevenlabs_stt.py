@@ -1,4 +1,7 @@
-"""ElevenLabs Scribe realtime speech recognition.
+"""ElevenLabs Scribe v2 Realtime speech recognition.
+
+`scribe_v2_realtime`, which is not the batch model `scribe_v2`: the vendor names
+the live one Realtime, and this is the socket that serves it.
 
 Reached over a raw WebSocket rather than through the SDK: the SDK ships the
 *types* for this endpoint (`PartialTranscriptPayload`, `CommittedTranscriptPayload`)
@@ -131,15 +134,19 @@ LANGUAGES = (
     "xho",
     "zul",
 )
-"""The languages Scribe transcribes, as ISO 639-3 codes.
+"""The languages `scribe_v2_realtime` transcribes, as ISO 639-3 codes.
 
 Three-letter, where AssemblyAI's are two-letter. Left in each vendor's own
 convention rather than normalised: mapping 639-3 to 639-1 by hand across a
 hundred entries is a way to invent a fact, and only one backend is listening at
 a time so the two lists never have to line up.
 
-This is the reason `--stt elevenlabs` is the answer for Russian (`rus`, here;
-absent from AssemblyAI's eighteen) and for most of the world besides."""
+The vendor advertises "90+ languages" and publishes this list, which is exactly
+100 codes — the badge counts the list, so 100 is the number this project stands
+behind (checked 2026-09-30, entry for entry against the docs page).
+
+This is still the wider recognizer by far: the other one hears 32 languages, and
+Russian (`rus`) and Thai (`tha`) are among the sixty-eight only this one has."""
 
 DEFAULT_SILENCE_SECONDS = 1.5
 """How long a pause means "I'm done" — Scribe's own default.

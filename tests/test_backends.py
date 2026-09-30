@@ -201,16 +201,32 @@ def test_ears_can_be_described_without_a_key(monkeypatch: pytest.MonkeyPatch) ->
         monkeypatch.delenv(name, raising=False)
 
     assert stt_available() == ()
-    assert len(describe("assemblyai")["languages"]) == 18  # type: ignore[arg-type]
+    assert len(describe("assemblyai")["languages"]) == 32  # type: ignore[arg-type]
     assert len(describe("elevenlabs")["languages"]) == 100  # type: ignore[arg-type]
 
 
+def test_each_pair_of_ears_is_described_by_its_model() -> None:
+    """Chapter 32: a vendor's name is not a model. Both what the option is
+    called and which model id it will run come from the same description the
+    page draws — so the badge and the socket cannot disagree."""
+    heard = describe("assemblyai")
+    scribe = describe("elevenlabs")
+
+    assert heard["title"] == "Universal-3.6 Pro Realtime"
+    assert heard["model"] == "universal-3-6-pro"
+    assert heard["provider"] == "assemblyai"
+    assert scribe["title"] == "Scribe v2 Realtime"
+    assert scribe["model"] == "scribe_v2_realtime"
+    assert all(isinstance(o["hint"], str) and o["hint"] for o in (heard, scribe))
+
+
 def test_the_recognizers_differ_in_the_way_chapter_12_cared_about() -> None:
-    """The fact worth showing at the moment of choosing: Scribe hears Russian
-    and AssemblyAI does not, and a language it lacks becomes confident nonsense
-    rather than an error."""
-    assert "ru" not in EARS["assemblyai"].languages
-    assert "rus" in EARS["elevenlabs"].languages
+    """The fact worth showing at the moment of choosing: Scribe's hundred reach
+    past AssemblyAI's thirty-two — Thai is the new example, since Russian is now
+    in both — and a language it lacks becomes confident nonsense rather than an
+    error."""
+    assert "th" not in EARS["assemblyai"].languages
+    assert "tha" in EARS["elevenlabs"].languages
 
 
 def test_the_recognizer_is_shared_but_the_language_is_not(

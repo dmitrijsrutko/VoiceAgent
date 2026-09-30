@@ -1132,14 +1132,16 @@ def test_ears_configured_off_stay_off_even_with_recognizer_keys(
 def test_the_page_says_what_each_recognizer_hears_without_holding_its_key(
     llm: FakeLLM, tts: FakeTTS, stt: FakeSTT, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Chapter 12's lesson, at the moment of choosing rather than mid-sentence."""
+    """Chapter 12's lesson, at the moment of choosing rather than mid-sentence:
+    Scribe's hundred reach past AssemblyAI's thirty-two."""
     client = stacked(llm, tts, stt, monkeypatch)
     choices = served_facts(client.get(f"/c/{start(client)}").text)["choices"]
     assert isinstance(choices, dict)
     heard = {o["name"]: o["languages"] for o in choices["stt"]}
 
-    assert "ru" not in heard["assemblyai"]
-    assert "rus" in heard["elevenlabs"]
+    assert "th" not in heard["assemblyai"]
+    assert "tha" in heard["elevenlabs"]
+    assert "ru" in heard["assemblyai"], "the new model hears Russian"
 
 
 def test_the_query_string_chooses_the_stack(

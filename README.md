@@ -48,7 +48,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **9 — The clock.** The agent may speak into a silence, and usually decides not to.
 - **10 — The record.** Each conversation is written to a Markdown file as it happens. No audio is stored.
 - **11 — The trace.** A JSONL span tree of every provider call, for programs to read.
-- **12 — A second pair of ears.** AssemblyAI (default, 18 languages) or ElevenLabs Scribe (100 languages).
+- **12 — A second pair of ears.** A second recognizer behind the same interface; today that is AssemblyAI (default, **32 languages**) and ElevenLabs **Scribe v2 Realtime** (100).
 - **13 — The clock, retuned.** Considers speaking at 5, 15 and 28 s of silence, and knows its own delays.
 - **14 — Off localhost.** A public instance on Fly.io, next to the vendors, with spend caps that are off unless configured.
 - **15 — The vendors become a choice.** The start screen picks engine and ears per conversation; backends are shared and kept warm.
@@ -64,7 +64,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **23 — Two lines, not four.** The six models are grouped by vendor, one line each, and a title no longer repeats its vendor's name — saying it six times was what pushed a group past the column and split it across two lines.
 - **24 — Which option ran.** A session record names the menu option (`deepseek-flash (deepseek-max)`), not only the provider and model. Three DeepSeek tiers share both, so the record could not say which one a slow session used.
 - **25 — Thirty minutes.** The deployed instance allows a 30-minute conversation instead of 6, which is also the spend ceiling for one address since every turn is charged for the whole history.
-- **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and ElevenLabs Scribe; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
+- **26 — A start screen for phones.** The start screen opens on Devil's advocate, DeepSeek V4.1 Flash — max and AssemblyAI; "None" is no longer a role on offer. Every picker is a grid of equal cells, so the page fits a 375 px phone and the two model rows line up. The session record's first line, and one Fly log line per connect, name the role, model, ears and voice.
 - **27 — The voice is a choice.** The start screen offers two ElevenLabs voice models on the same streaming socket: Flash v2.5 (fastest, the default since the start-screen reorder) and Multilingual v2 (most expressive). The pick travels as `?tts=` and is pinned per conversation; deprecated models (Turbo, v1) are refused. Measured first audio: 857 ms against 378 ms.
 - **28 — The judge.** The devil's advocate spars with wit and a little bite, and each conversation with it is a round: six minutes at most, an **⏹ End** button, and then a judge (DeepSeek V4.1 Flash at high effort by default, or Claude Opus 5.5 at medium) reads the timed transcript and rules. It gives win or lose, a split such as 40/60, the reasoning, a ten-point scorecard with quotes, the best and weakest moments, how to improve, a rematch brief, and a nickname and badge. It is drawn as a card under the transcript. `--judge RECORD` rules on a saved conversation offline.
 - **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
@@ -72,6 +72,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **30 — Millisecond observability, no audio.** The trace now holds every control message to and from the page (`page.out`, `page.in`) and the microphone's level every 250 ms while the agent speaks (`mic.level`). Each record block gets an `at HH:MM:SS.mmm` note, and each agent voice gets a `mic_level` note: the level during it against the quiet baseline, which is echo as a number. `scripts/echo_eval.py` uses both.
 - **31 — Eleven v4 Turbo, on the dialogue socket.** Multilingual v2 is gone; **v4 Turbo** is the default voice (the start screen's leftmost, "most emotive, realtime") and **Flash v2.5** stays beside it as "legacy, fastest". v4 cannot be spoken on the TTS socket — the vendor excludes v3 and v4 from it — so this is a second adapter behind the same `TTS` protocol: the voice registered in the first message, `inputs` frames, `close_socket`, snake_case alignment, every chunk timed. Nothing above `TTS` changed. Measured, it is not faster to first audio (195 ms against 134 ms on the same sentence) and streams 2–4× more, smaller chunks; the identical opening line runs 10.1–10.3 s against Flash's 7.8–9.3 s.
 - **Fixes from live iPhone sessions.** Words with no voice behind them no longer cut the agent off, and a sentence the recognizer loses (voice heard, no words committed) is asked for again instead of dropped. The language a conversation is being spoken in is remembered **per conversation** — a language hint used to live on the recognizer, which is one instance shared by the whole server, so it reached the next conversation's first sentence — and is sent as a narrowed set first, a pin only once the same language has been heard twice.
+- **32 — Universal-3.6 Pro: thirty-two languages, and the ears get a name.** AssemblyAI's flagship streaming model replaces 3.5 Pro on the same socket, and the languages this project can hear go 18 → 32 (Russian among them). Every final turn now reports the language it was spoken in, so the conversation's two-tier language memory — until now Scribe's alone — steers AssemblyAI too, via `language_codes`. The start screen names both recognizers by **model** rather than by vendor: **AssemblyAI Universal-3.6 Pro Realtime · 32 languages** and **ElevenLabs Scribe v2 Realtime · 100 languages** (the vendor says "90+"; its published list is exactly 100, and the badge counts that list). Measured on the real endpoint, same audio: commit after the last audio frame 128–165 ms against 226–321 ms on 3.5 Pro.
 
 ## Requirements
 
@@ -83,9 +84,9 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 ```bash
 uv sync                                     # install, including dev tools
 cp .env.example .env                        # fill in only the keys you need
-uv run voice-agent                          # V4.1 Flash off + Scribe + v4 Turbo, on :8000
+uv run voice-agent                          # V4.1 Flash + AssemblyAI Universal-3.6 Pro + v4 Turbo, on :8000
                                             # the start screen picks model, ears and voice per conversation
-uv run voice-agent --stt assemblyai         # AssemblyAI pre-selected instead of Scribe
+uv run voice-agent --stt elevenlabs         # Scribe v2 Realtime pre-selected: 100 languages instead of 32
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
 uv run voice-agent --initiative off         # never speak first
 uv run voice-agent --role thinking_partner  # pre-select a role (visitors still choose; default devils_advocate)

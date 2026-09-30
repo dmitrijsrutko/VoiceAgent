@@ -14,6 +14,88 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 32 — Universal-3.6 Pro: thirty-two languages, and the ears get a name
+
+AssemblyAI's flagship streaming model is a drop-in: same socket, same parameters,
+same latency, and `universal-3-5-pro` → `universal-3-6-pro` is the whole migration
+the vendor asks for. What it changes here is breadth — 18 languages become 32,
+including Russian, which this project once gave up on mid-conversation — and
+reporting: every final turn now carries the language it was spoken in, so the
+two-tier language memory that Scribe alone has had since the 2026-09-30 fix steers
+this recognizer too. The visible change is smaller and overdue: the start screen
+named two *vendors* on the row where the voice row names two models.
+
+**What changed**
+- `stt/assemblyai_stt.py`: `universal-3-6-pro`, and `LANGUAGES` is the vendor's 32
+  codes. `session_url(language)` sends `language_detection=true` and the
+  conversation's hint as `language_codes`; a final turn's `language_code` becomes
+  `Transcript.language`, including on a turn whose text is empty. The trace names
+  the model and the hint the session ran with.
+- `stt/registry.py`: an `Ears` option carries `model`, `title` and `hint`, and
+  `describe()` hands them to the page — a choice is named by the server, as the
+  reasoning and voice menus already are.
+- `web/start.js`: the Ears group renders like the Voice group, vendor then model
+  then the count read off the language list itself. The page's own label map is
+  gone. `server.py`, `record.py`, `ledger.py`, `cli.py`: the record's first line
+  and the startup banner name the model (`ears assemblyai universal-3-6-pro`),
+  while the admin breakdown still bins by recognizer, so records from either side
+  of this chapter stay in one row.
+
+**Design decisions**
+- **Replaced, not kept beside.** Chapter 31 kept Flash v2.5 next to v4 Turbo, but
+  there the menu was already keyed by model. The ears are keyed by provider
+  (`?stt=assemblyai`), so a second AssemblyAI option would have made the key
+  model-level — registry, query string, records, ledger and six test files. One
+  line to add back when 3.5 is wanted.
+- **The badge counts the list.** 32 is not a hand-written number: it is
+  `len(LANGUAGES)`, the same tuple the system prompt is built from. For the other
+  vendor that is the point — ElevenLabs advertises "90+ languages" and publishes
+  exactly 100 codes, which is what its list holds and what the badge now says.
+- **`language_codes` is repeated query parameters, and filtered.** Measured
+  against the live service: repeated keys are parsed, a comma-joined value is
+  refused as one invalid code (3006), and so is any code outside the set. An
+  unfiltered hint — Scribe's `rus` — would therefore kill a session rather than
+  be ignored, which is why the URL drops what this model cannot hear. The bias is
+  soft: a wrong entry steers rather than replaces what is heard.
+- **Detection on, because a hint needs a correction.** The memory can only demote
+  a wrong pin if the recognizer reports what it heard; without
+  `language_detection` this was the one recognizer that could never learn.
+- The vendor's bookkeeping disagrees with itself (the release post says 18 + 14,
+  the model page 19 + 13). The 32-code table is the authority, and the service's
+  own validation lists the identical set — which is the check that settled it.
+
+**Latency impact** — measured on the real endpoint, one 8.6 s English line, same
+parameters, one turn: commit after the last audio frame **128–165 ms on 3.6 Pro**
+(five runs, median 163) against **226–321 ms on 3.5 Pro** (four runs, median 288);
+time to first partial is indistinguishable (932–940 against 929–1051 ms). In the
+pipeline, a live Russian turn measured `first_words_ms` 1056 and `endpoint_ms`
+1435. Single sentences on a laptop's network, not a benchmark.
+
+**Deliberately not done** — a `universal-3-5-pro` option (above). The endpointer
+untouched: the release says a window widened for entity capture can move back
+toward the default, but 1.5 s and the 0.8 floor were measured on the old model.
+`agent_context` and `previous_context_n_turns` — the agent's own last reply biasing
+the next user turn is a real accuracy feature of this release and deserves its own
+measurement. `mode`, `voice_focus`, `prompt` and mid-stream `UpdateConfiguration`
+— a session per hint already covers the last of those.
+
+**Verification** — `uv run verify`: 907 tests, 894 before. A live probe settled the
+three unknowns first (the model echoed in `Begin`, detection in `Turn`, and which
+`language_codes` spelling the service parses). Then a real conversation against the
+locally served agent, Russian synthesised and streamed at real time through the
+WebSocket the page uses: the transcript came back correct with `lang: "ru"`, the
+agent answered in Russian, the record's first line reads
+`ears assemblyai universal-3-6-pro`, and the trace shows the second listening
+session opened with `candidates: ['ru']` — the memory working on this recognizer
+for the first time. The start screen was also rendered at **375 px and 900 px**
+(Chrome, real device emulation): both options name their model, their count and
+their hint, and neither cell overflows. **Not exercised**: a spoken microphone
+session, so barge-in and echo are unverified on this model; and the hint's effect
+is not measurable on audio this unambiguous, which is the probe's soft-bias finding
+rather than a result.
+
+**Fixes** — none.
+
 ## Chapter 31 — Eleven v4 Turbo: the voice moves to the dialogue socket
 
 ElevenLabs' frontier model is the one built for agents, and the menu was offering

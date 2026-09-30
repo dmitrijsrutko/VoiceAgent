@@ -491,15 +491,16 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
     assert "=== p))" in start and ".reverse()" not in start, (
         "each vendor's row is no longer fastest first, as the menu is"
     )
-    assert "PROVIDERS[o.provider] ?? o.provider)} ${escape(o.title)}" in start, (
-        "a voice option no longer names its vendor"
+    assert "PROVIDERS[o.provider] ?? o.provider" in start, (
+        "the vendor map is gone, so an option would print a bare provider key"
     )
-    assert "escape(o.title)" in start, "the option label no longer comes from the server"
+    assert "escape(vendor(o))} ${escape(o.title)}" in start, (
+        "an option no longer names its vendor and its server-given title"
+    )
 
-    labels = re.search(r"const LABELS = \{(.*?)\n\};", start, re.DOTALL)
-    assert labels, "the label map is gone"
-    assert "llm" not in labels.group(1), "the page is naming models itself again"
-    assert "tts" not in labels.group(1), "the page is naming voice models itself again"
+    assert "const LABELS" not in start, (
+        "the page is naming models itself again — every option's title is the server's"
+    )
     assert 'choose("tts", "Voice", known.choices?.tts' in start, (
         "the voice options are not the server's"
     )
@@ -507,11 +508,27 @@ def test_the_model_options_are_named_by_the_server_not_the_page() -> None:
 
 def test_the_start_screen_counts_languages_rather_than_listing_them() -> None:
     """A hundred language codes took half a phone screen and told a visitor
-    little; each pair of ears says how many it hears on its own option."""
+    little; each pair of ears says how many it hears on its own option, read off
+    the list the prompt is built from so the badge cannot drift from it."""
     start = without_comments(source("start.js"))
 
     assert "languages.length} languages" in start, "the count on the Ears option is gone"
     assert "languages.join(" not in start, "the start screen lists every language again"
+
+
+def test_the_ears_are_named_by_their_model_like_the_voice_is() -> None:
+    """Chapter 32: two vendors are two models, and a model is what a visitor is
+    choosing between. The Ears option carries the vendor, the model's title and
+    that model's own grey line — all of it the server's (`stt.describe`), so the
+    page cannot advertise a recognizer that will not run."""
+    start = without_comments(source("start.js"))
+    ears = re.search(r'choose\("stt", "Ears".*?\);', start, re.S)
+
+    assert ears, "the Ears group is gone"
+    body = ears.group(0)
+    assert "escape(vendor(o))} ${escape(o.title)}" in body, "the ears name no model"
+    assert "languages.length} languages" in body, "the languages badge is gone"
+    assert "escape(o.hint)" in body, "the ears' grey line is not the server's"
 
 
 def test_the_start_screen_warns_about_no_particular_language() -> None:
