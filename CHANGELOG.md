@@ -14,6 +14,72 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 31 — Eleven v4 Turbo: the voice moves to the dialogue socket
+
+ElevenLabs' frontier model is the one built for agents, and the menu was offering
+a 2023-era lifelike model beside Flash. This replaces Multilingual v2 with
+**Eleven v4 Turbo**, now the default, and keeps Flash v2.5 as labelled-legacy. The
+shape of the change is the surprise: v4 cannot be spoken on the socket used here
+since Chapter 2 — the vendor states `/text-to-speech/{voice}/stream-input` carries
+**no** `eleven_v3` or `eleven_v4` model — so it is a second adapter behind the same
+`TTS` protocol. Nothing above `TTS` changed.
+
+**What changed**
+- `tts/elevenlabs_dialogue_tts.py` (new): over `/v1/text-to-dialogue/stream-input`
+  — the voice registered in the first message, fragments forwarded verbatim as
+  `{"inputs": […]}`, `close_socket` ending the reply, snake_case back (`is_final`,
+  `char_start_times_ms`) — plus the same trace span and `tts.spoken` event as its
+  sibling, so `tts_chars`, the admin breakdown and karaoke keep working unchanged.
+- `tts/registry.py`: `Option` gains a **builder per option**; the menu is `v4-turbo`
+  ("most emotive, realtime", default) and `flash-v2.5` ("legacy, fastest").
+  Multilingual v2 leaves it but **not** `DEPRECATED` — ElevenLabs still sells it.
+- `tts/elevenlabs_tts.py`: `describe` looks its hint up in `error` too, where the
+  dialogue socket names the reason; `backends.py` builds from the option's builder.
+
+**Design decisions**
+- A second adapter, not a URL tweak: one provider now speaks over two sockets, so
+  `BUILDERS[provider]` could no longer say which one a model needs. Rejected:
+  pointing the existing adapter at it (that would have changed Flash too), and the
+  dialogue HTTP endpoints, which take a whole text where this one streams.
+- `sync_alignment=true`, because the vendor sends timing only when asked: each
+  chunk then carries its own, timed from its own first sample — what `heard.py`
+  already offsets by. Those ends only roughly match the chunk (early pieces
+  overrun by ~180 ms, later ones fall short by ~150 ms), so a karaoke mark can lag.
+- No `flush`: the service decides where to cut (Chapter 7), and this socket's own
+  threshold (~40 characters, 8 words) is *lower* than the TTS socket's first 120.
+- The default is no longer the fastest option: v4 Turbo is the vendor's real-time
+  model *for agents*, and it is why the menu's "fastest first" comment is gone.
+
+**Latency impact** — measured, and not in v4 Turbo's favour. Same 146-character
+sentence, `pcm_24000`, text sent whole: 195 ms to first audio against Flash's
+134 ms; fed at the rate the reasoning engine writes (~400 characters a second):
+574 ms against 475 ms, and 189 ms against 77 ms after the last fragment — where
+the table's TTS row is ≤150 ms. Live, three runs each on the byte-identical
+opening line: **176–188 ms** against **218–306 ms**, an ordering that flips with
+the noise. It does stream finer — 20–21 chunks against 7–8 for that line, 8
+against 2 for a short reply — at 2094–2128 ms of synthesis for 10.1–10.3 s of
+audio against 505–583 ms for 7.85–9.33 s: the same words, longer. A typed reply
+measured `synthesis_first_byte_ms` 111 against 210 and `first_audio_ms` 1204
+against 944; the LLM dominates that, not the voice.
+
+**Deliberately not done** — `eleven_v4` (non-turbo) as a third option: one line on
+the same adapter when that slot is wanted back. A socket per conversation rather
+than per reply: the `voices` registration is inside the numbers above. A plan
+check at startup: `create_app` verifies the **key**, not the plan, so a plan
+without v4 Turbo fails at the first greeting rather than at boot.
+
+**Verification** — `uv run verify`: 894 tests, 877 before (15 new in `test_tts.py`,
+2 in `test_backends.py`). A live probe settled three unknowns first: this account
+may run `eleven_v4_turbo`, `pcm_24000` is accepted, `sync_alignment` returns
+chunk-relative timing. Then the real thing: the server served `v4-turbo` default
+with `flash-v2.5` beside it, and a conversation on **each** model spoke its opening
+line and a typed reply, records and traces naming the right model. Probed too, and
+shared with the old socket: 20 s of silence drops the connection (close 1008) — the
+worst first token in 125 recorded replies is 4.5 s, so nothing sends `keep_alive`.
+**Not exercised live**: a *spoken* conversation, so echo, the floor and barge-in
+are unverified on the dialogue socket. Naturalness is a human judgement:
+`ch31-v4-turbo.wav` and `ch31-flash-v2.5.wav` hold the opening lines.
+
 ## Fix — The language belongs to the conversation, and is pinned only once heard twice
 
 A sentence of Russian was decoded as Turkish letters — "Karandaz oğğl, lütshe

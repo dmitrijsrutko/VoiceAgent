@@ -343,7 +343,7 @@ def test_the_reply_is_spoken_as_a_stream_of_binary_frames(client: TestClient, tt
             "provider": "fake-voice",
             "voice": "fake-voice-1",
             "model": "fake-voice-model",
-            "choice": "flash-v2.5",
+            "choice": "v4-turbo",
             "sample_rate": 24000,
         }
 

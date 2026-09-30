@@ -4,6 +4,7 @@ import json
 import time
 from collections.abc import AsyncIterator, Awaitable, Callable
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from elevenlabs.core import ApiError
@@ -13,7 +14,7 @@ from websockets.http11 import Response
 
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.streams import closing
-from voice_agent.tts import create_tts, elevenlabs_tts
+from voice_agent.tts import create_tts, elevenlabs_dialogue_tts, elevenlabs_tts
 from voice_agent.tts import registry as tts_registry
 from voice_agent.tts.base import (
     SAMPLE_RATE,
@@ -22,6 +23,10 @@ from voice_agent.tts.base import (
     once,
     pcm_seconds,
     whole_samples,
+)
+from voice_agent.tts.elevenlabs_dialogue_tts import (
+    ElevenLabsDialogueTTS,
+    dialogue_alignment,
 )
 from voice_agent.tts.elevenlabs_tts import (
     CHUNK_LENGTH_SCHEDULE,
@@ -96,10 +101,10 @@ def test_defaults_are_the_low_latency_ones(monkeypatch: pytest.MonkeyPatch) -> N
 def test_the_registry_passes_the_model_through(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
 
-    speaker = create_tts("elevenlabs", None, "eleven_multilingual_v2")
+    speaker = create_tts("elevenlabs", None, "eleven_flash_v2")
 
     assert isinstance(speaker, ElevenLabsTTS)
-    assert "model_id=eleven_multilingual_v2" in speaker.url
+    assert "model_id=eleven_flash_v2" in speaker.url
 
 
 @pytest.mark.parametrize("model", sorted(tts_registry.DEPRECATED))
@@ -272,6 +277,9 @@ async def send_audio(
 
 
 Serve = Callable[[Callable[[ServerConnection], Awaitable[None]]], Awaitable[ElevenLabsTTS]]
+
+Handler = Callable[[ServerConnection], Awaitable[None]]
+"""One local stand-in for a socket: what `serve()` is handed below."""
 
 
 @pytest.fixture
@@ -450,3 +458,308 @@ def test_malformed_timing_is_ignored_rather_than_trusted() -> None:
         is None
     )
     assert elevenlabs_tts.alignment({"chars": "ab"}) is None
+
+
+# --- Eleven v4 Turbo, over the Text to Dialogue socket -------------------------
+#
+# The vendor is explicit that `/text-to-speech/{voice}/stream-input` carries no
+# v4 model, so the same tests are owed the second protocol: a voice registered in
+# the first message, `inputs` frames, `close_socket`, snake_case on the way back.
+
+
+class DialogueInput:
+    """A stand-in for the dialogue socket: records every message, and answers
+    the closing `close_socket` with the canned parts — or, with `eager`, answers
+    each `inputs` frame as it arrives, as a service speaking while text streams."""
+
+    def __init__(self, parts: list[bytes] | None = None, eager: bool = False) -> None:
+        self.received: list[dict[str, Any]] = []
+        self.paths: list[str] = []
+        self.headers: list[str | None] = []
+        self.closed = asyncio.Event()
+        self.parts = parts
+        self.eager = eager
+
+    async def __call__(self, connection: ServerConnection) -> None:
+        assert connection.request is not None
+        self.paths.append(connection.request.path)
+        self.headers.append(connection.request.headers.get("xi-api-key"))
+        try:
+            async for raw in connection:
+                message = json.loads(raw)
+                self.received.append(message)
+                if message.get("close_socket"):
+                    for part in self.parts or []:
+                        await send_dialogue_audio(connection, part)
+                    await connection.send(json.dumps({"audio": None, "is_final": True}))
+                elif self.eager:
+                    for entry in message.get("inputs", []):
+                        await send_dialogue_audio(connection, entry["text"].encode())
+        finally:
+            self.closed.set()
+
+
+async def send_dialogue_audio(
+    connection: ServerConnection, data: bytes, alignment: dict[str, object] | None = None
+) -> None:
+    """Snake_case, as the dialogue socket sends it: `is_final`, not `isFinal`."""
+    payload = {
+        "audio": base64.b64encode(data).decode(),
+        "alignment": alignment,
+        "is_final_audio_for_turn": False,
+        "is_final": None,
+    }
+    await connection.send(json.dumps(payload))
+
+
+ServeDialogue = Callable[[Handler], Awaitable[ElevenLabsDialogueTTS]]
+
+
+@pytest.fixture
+async def dialogue_endpoint(monkeypatch: pytest.MonkeyPatch) -> ServeDialogue:
+    async def build(handler: Handler) -> ElevenLabsDialogueTTS:
+        server = await serve(handler, "127.0.0.1", 0)
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(elevenlabs_dialogue_tts, "ENDPOINT", f"ws://127.0.0.1:{port}")
+        return ElevenLabsDialogueTTS(api_key="test-key")
+
+    return build
+
+
+def test_the_dialogue_defaults_are_the_v4_ones(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    tts = ElevenLabsDialogueTTS()
+
+    assert tts.model == "eleven_v4_turbo"
+    assert tts.provider == "elevenlabs"
+
+
+def test_the_dialogue_url_asks_for_the_rate_the_browser_is_told_and_for_alignment() -> None:
+    """Without `sync_alignment` the socket sends no timing at all, and without
+    `pcm_24000` there is nothing to play without resampling."""
+    tts = ElevenLabsDialogueTTS(api_key="k")
+
+    assert "/v1/text-to-dialogue/stream-input?" in tts.url
+    assert "model_id=eleven_v4_turbo" in tts.url
+    assert "output_format=pcm_24000" in tts.url
+    assert "sync_alignment=true" in tts.url
+    assert f"/{DEFAULT_VOICE}/" not in tts.url, (
+        "the dialogue socket registers voices in the first message, not in the path"
+    )
+
+
+async def test_the_dialogue_registers_exactly_one_voice_and_the_key_in_a_header(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """v4 Turbo allows one voice per connection, so the reply's voice is the
+    session's; more would be refused at registration."""
+    service = DialogueInput(parts=[b"\x01\x02"])
+    tts = await dialogue_endpoint(service)
+
+    await collect(tts.stream(once("hello")))
+
+    assert service.received[0] == {"voices": [DEFAULT_VOICE]}
+    assert service.headers == ["test-key"]
+
+
+async def test_dialogue_tokens_are_forwarded_exactly_as_the_reasoning_engine_wrote_them(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    service = DialogueInput(parts=[b"\x01\x02"])
+    tts = await dialogue_endpoint(service)
+
+    await collect(tts.stream(tokens("R", "iga", " is", "", " the capital.")))
+
+    texts = [entry["text"] for m in service.received if "inputs" in m for entry in m["inputs"]]
+    assert texts == ["R", "iga", " is", " the capital."]
+    assert all(
+        entry["voice_id"] == DEFAULT_VOICE
+        for m in service.received
+        if "inputs" in m
+        for entry in m["inputs"]
+    )
+    assert service.received[-1] == {"close_socket": True}
+
+
+async def test_a_dialogue_reply_ends_with_close_socket_not_an_empty_text(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """An empty text is not this protocol's terminator; `close_socket` both
+    flushes the buffered tail and ends the stream."""
+    service = DialogueInput(parts=[b"\x01\x02"])
+    tts = await dialogue_endpoint(service)
+
+    await collect(tts.stream(once("hello")))
+
+    assert [list(m) for m in service.received] == [["voices"], ["inputs"], ["close_socket"]]
+
+
+async def test_a_blank_reply_is_spoken_as_nothing_and_is_not_an_error(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """The `TTS` contract, and the vendor's own answer to a textless close:
+    probed live 2026-09-30, `voices` then `close_socket` with no `inputs` at all
+    comes back as `is_final` and a clean close, so a reply with no words must
+    open no audio and raise nothing."""
+    service = DialogueInput()
+    tts = await dialogue_endpoint(service)
+
+    assert await collect(tts.stream(tokens())) == []
+    assert [list(m) for m in service.received] == [["voices"], ["close_socket"]]
+
+
+async def test_dialogue_audio_comes_back_in_whole_samples(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    service = DialogueInput(parts=[b"\x01\x02\x03", b"\x04"])
+    tts = await dialogue_endpoint(service)
+
+    out = await collect(tts.stream(once("hello")))
+
+    assert out == [b"\x01\x02", b"\x03\x04"]
+
+
+async def test_dialogue_audio_arrives_while_text_is_still_being_sent(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    service = DialogueInput(eager=True)
+    tts = await dialogue_endpoint(service)
+    heard_before_the_end: list[bytes] = []
+    finished = False
+
+    async def slow_text() -> AsyncIterator[str]:
+        nonlocal finished
+        yield "ab"
+        await asyncio.sleep(0.2)
+        yield "cd"
+        finished = True
+
+    async for chunk in tts.stream(slow_text()):
+        if not finished:
+            heard_before_the_end.append(chunk.pcm)
+
+    assert heard_before_the_end == [b"ab"]
+
+
+async def test_dialogue_alignment_is_read_from_its_snake_case_fields(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """Measured live: every dialogue chunk carries its own timing, snake_case,
+    from that chunk's first sample — which `heard.py` offsets by the audio sent
+    before it."""
+
+    async def timing(connection: ServerConnection) -> None:
+        async for raw in connection:
+            if json.loads(raw).get("close_socket"):
+                timed = {
+                    "chars": ["H", "i", " "],
+                    "char_start_times_ms": [0, 50, 120],
+                    "char_durations_ms": [50, 70, 30],
+                }
+                await send_dialogue_audio(connection, b"\x01\x02", timed)
+                await send_dialogue_audio(connection, b"\x03\x04")
+                await connection.send(json.dumps({"audio": None, "is_final": True}))
+
+    tts = await dialogue_endpoint(timing)
+    chunks = [chunk async for chunk in tts.stream(once("Hi "))]
+
+    assert chunks[0].alignment == Alignment("Hi ", (50.0, 120.0, 150.0))
+    assert chunks[1].alignment is None
+
+
+def test_malformed_dialogue_timing_is_ignored_rather_than_trusted() -> None:
+    assert dialogue_alignment(None) is None
+    assert (
+        dialogue_alignment({"chars": ["a"], "char_start_times_ms": [], "char_durations_ms": []})
+        is None
+    )
+    assert dialogue_alignment({"chars": "ab"}) is None
+
+
+async def test_a_dialogue_error_payload_is_a_provider_error(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """The dialogue socket's error frame carries a close code as `code`, not the
+    `stream-input` code string: the message is what must survive."""
+
+    async def refusing(connection: ServerConnection) -> None:
+        await connection.recv()
+        await connection.send(
+            json.dumps({"message": "quota gone", "error": "quota_exceeded", "code": 1008})
+        )
+        await connection.close()
+
+    tts = await dialogue_endpoint(refusing)
+
+    with pytest.raises(ProviderError, match="character quota"):
+        await collect(tts.stream(once("hello")))
+
+
+async def test_a_dialogue_socket_lost_mid_stream_is_a_provider_error(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    async def dropping(connection: ServerConnection) -> None:
+        await connection.recv()
+        await send_dialogue_audio(connection, b"\x01\x02")
+        connection.transport.abort()
+
+    tts = await dialogue_endpoint(dropping)
+
+    with pytest.raises(ProviderError, match="interrupted"):
+        await collect(tts.stream(tokens("hello", pace=0.1)))
+
+
+async def test_a_refused_dialogue_handshake_says_what_to_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def forbid(connection: ServerConnection, request: object) -> Response:
+        return Response(402, "Payment Required", Headers(), b"")
+
+    async def unused(connection: ServerConnection) -> None: ...
+
+    async with serve(unused, "127.0.0.1", 0, process_request=forbid) as server:
+        port = server.sockets[0].getsockname()[1]
+        monkeypatch.setattr(elevenlabs_dialogue_tts, "ENDPOINT", f"ws://127.0.0.1:{port}")
+        tts = ElevenLabsDialogueTTS(api_key="k")
+
+        with pytest.raises(ProviderError, match=r"402.*eleven_v4_turbo"):
+            await collect(tts.stream(once("hello")))
+
+
+async def test_a_dialogue_reader_that_stops_closes_the_socket(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """A cancelled turn stops reading between chunks; the socket and the text
+    still flowing into it must close with it."""
+    service = DialogueInput(eager=True)
+    tts = await dialogue_endpoint(service)
+
+    async def unfinished() -> AsyncIterator[str]:
+        yield "more "
+        await asyncio.sleep(2)
+
+    async with closing(tts.stream(unfinished())) as stream:
+        await anext(stream)
+        stopped = time.perf_counter()
+
+    assert time.perf_counter() - stopped < 0.5, "closing waited on text that never came"
+    async with asyncio.timeout(1):
+        await service.closed.wait()
+
+
+async def test_the_dialogue_end_of_stream_marks_the_final_message(
+    dialogue_endpoint: ServeDialogue,
+) -> None:
+    """`is_final` ends the read; a server that never sends it would leave the
+    reply's audio stream open after its last chunk."""
+
+    async def ends(connection: ServerConnection) -> None:
+        async for raw in connection:
+            if json.loads(raw).get("close_socket"):
+                await send_dialogue_audio(connection, b"\x01\x02")
+                await send_dialogue_audio(connection, b"\x03\x04")
+                await connection.send(json.dumps({"is_final": True}))
+
+    tts = await dialogue_endpoint(ends)
+
+    assert await collect(tts.stream(once("hello"))) == [b"\x01\x02", b"\x03\x04"]

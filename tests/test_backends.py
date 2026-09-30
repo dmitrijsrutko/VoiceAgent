@@ -18,6 +18,9 @@ from voice_agent.llm.registry import available as llm_available
 from voice_agent.llm.registry import offered as menu_offered
 from voice_agent.stt.registry import EARS, NO_EARS, describe
 from voice_agent.stt.registry import available as stt_available
+from voice_agent.tts import registry as tts_registry
+from voice_agent.tts.elevenlabs_dialogue_tts import ElevenLabsDialogueTTS
+from voice_agent.tts.elevenlabs_tts import ElevenLabsTTS
 
 
 def offered(engine: FakeLLM | None = None, ears: FakeSTT | None = None) -> Backends:
@@ -275,30 +278,54 @@ def voiced() -> Backends:
     return Backends("assemblyai", voice_provider="elevenlabs")
 
 
-def test_the_voice_menu_offers_both_models_fastest_first_and_by_default() -> None:
+def test_the_voice_menu_offers_v4_turbo_by_default_and_flash_as_legacy() -> None:
     pool = voiced()
     tts = pool.choices("x", "none", voice=pool.default_voice)["tts"]
 
-    assert [o["model"] for o in tts] == ["eleven_flash_v2_5", "eleven_multilingual_v2"]
-    assert [o["name"] for o in tts if o["default"]] == ["flash-v2.5"]
+    assert [o["model"] for o in tts] == ["eleven_v4_turbo", "eleven_flash_v2_5"]
+    assert [o["name"] for o in tts if o["default"]] == ["v4-turbo"]
+    assert [o["hint"] for o in tts] == ["most emotive, realtime", "legacy, fastest"]
+
+
+def test_the_menu_no_longer_offers_multilingual_v2() -> None:
+    """Dropped from the configuration, not deprecated by its vendor — so it must
+    leave the menu without entering `DEPRECATED`."""
+    assert "multilingual-v2" not in tts_registry.BY_NAME
+    assert "eleven_multilingual_v2" not in {option.model for option in tts_registry.MENU}
+    assert "eleven_multilingual_v2" not in tts_registry.DEPRECATED
+
+
+def test_two_models_on_two_endpoints_get_two_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Text to Speech socket carries no v4 model, so the model id cannot say
+    which endpoint to use — only the option's own builder can, and a wrong
+    pairing would be a runtime refusal, not a startup error."""
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    pool = voiced()
+
+    turbo, flash = pool.speaker("v4-turbo"), pool.speaker("flash-v2.5")
+
+    assert isinstance(turbo, ElevenLabsDialogueTTS)
+    assert isinstance(flash, ElevenLabsTTS)
+    assert "text-to-dialogue/stream-input" in turbo.url
+    assert "text-to-speech" in flash.url
 
 
 def test_a_voice_model_is_picked_pinned_and_unknown_names_fall_back() -> None:
     pool = voiced()
     conversation = Conversation(id="v")
 
-    *_, first = pool.choose(conversation, {"tts": "multilingual-v2"})
-    *_, again = pool.choose(conversation, {"tts": "flash-v2.5"})
-    *_, unknown = pool.choose(Conversation(id="w"), {"tts": "eleven_turbo_v2_5"})
+    *_, first = pool.choose(conversation, {"tts": "flash-v2.5"})
+    *_, again = pool.choose(conversation, {"tts": "v4-turbo"})
+    *_, unknown = pool.choose(Conversation(id="w"), {"tts": "multilingual-v2"})
 
-    assert (first, again) == ("multilingual-v2", "multilingual-v2"), "a reconnect keeps its voice"
-    assert unknown == "flash-v2.5"
+    assert (first, again) == ("flash-v2.5", "flash-v2.5"), "a reconnect keeps its voice"
+    assert unknown == "v4-turbo", "a voice the menu has dropped falls back to the default"
 
 
 def test_silent_offers_no_voice_and_builds_none() -> None:
     pool = Backends("assemblyai")
 
-    *_, voice = pool.choose(Conversation(id="s"), {"tts": "flash-v2.5"})
+    *_, voice = pool.choose(Conversation(id="s"), {"tts": "v4-turbo"})
 
     assert pool.choices("x", "none")["tts"] == []
     assert voice == "none" and pool.speaker(voice) is None
@@ -308,15 +335,15 @@ def test_a_voice_is_built_once_per_model(monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
     pool = voiced()
 
-    multilingual, flash = pool.speaker("multilingual-v2"), pool.speaker("flash-v2.5")
+    turbo, flash = pool.speaker("v4-turbo"), pool.speaker("flash-v2.5")
 
-    assert multilingual is pool.speaker("multilingual-v2")
-    assert multilingual is not None and flash is not None
-    assert (multilingual.model, flash.model) == ("eleven_multilingual_v2", "eleven_flash_v2_5")
+    assert turbo is pool.speaker("v4-turbo")
+    assert turbo is not None and flash is not None
+    assert (turbo.model, flash.model) == ("eleven_v4_turbo", "eleven_flash_v2_5")
 
 
 def test_an_injected_speaker_serves_every_voice_name() -> None:
     fake = FakeTTS()
     pool = Backends("assemblyai", speaker=fake)
 
-    assert pool.speaker("flash-v2.5") is fake and pool.speaker("multilingual-v2") is fake
+    assert pool.speaker("v4-turbo") is fake and pool.speaker("flash-v2.5") is fake

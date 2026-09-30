@@ -54,9 +54,13 @@ def explain(exc: ApiError) -> str:
 
 
 def describe(detail: dict[str, object], fallback: str) -> str:
-    """One line from an error's `message` and `code`, over HTTP or the socket."""
+    """One line from an error's `message`, plus the hint its code names.
+
+    `stream-input` names the reason in `code`; the dialogue socket names it in
+    `error` and puts a WebSocket close code in `code`, so both are looked in.
+    """
     message = detail.get("message") or detail.get("error") or fallback
-    hint = HINTS.get(str(detail.get("code")))
+    hint = HINTS.get(str(detail.get("code"))) or HINTS.get(str(detail.get("error")))
     return f"elevenlabs synthesis failed: {message}" + (f" — {hint}" if hint else "")
 
 

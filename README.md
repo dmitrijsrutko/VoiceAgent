@@ -70,6 +70,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
 - **29 — The admin page.** `/admin`, behind `VOICE_AGENT_ADMIN_KEY`, shows health, usage totals (since the deploy, 24 h, 7 days, all), ElevenLabs and DeepSeek balances, per-model/ears/voice/judge/role breakdowns, and every recorded session with its topic, score, visitor hash and a link to the live conversation or its record. All of it is read back from the session records. Each record now ends every connection with a `totals` line and carries a hashed visitor, never the address.
 - **30 — Millisecond observability, no audio.** The trace now holds every control message to and from the page (`page.out`, `page.in`) and the microphone's level every 250 ms while the agent speaks (`mic.level`). Each record block gets an `at HH:MM:SS.mmm` note, and each agent voice gets a `mic_level` note: the level during it against the quiet baseline, which is echo as a number. `scripts/echo_eval.py` uses both.
+- **31 — Eleven v4 Turbo, on the dialogue socket.** Multilingual v2 is gone; **v4 Turbo** is the default voice (the start screen's leftmost, "most emotive, realtime") and **Flash v2.5** stays beside it as "legacy, fastest". v4 cannot be spoken on the TTS socket — the vendor excludes v3 and v4 from it — so this is a second adapter behind the same `TTS` protocol: the voice registered in the first message, `inputs` frames, `close_socket`, snake_case alignment, every chunk timed. Nothing above `TTS` changed. Measured, it is not faster to first audio (195 ms against 134 ms on the same sentence) and streams 2–4× more, smaller chunks; the identical opening line runs 10.1–10.3 s against Flash's 7.8–9.3 s.
 - **Fixes from live iPhone sessions.** Words with no voice behind them no longer cut the agent off, and a sentence the recognizer loses (voice heard, no words committed) is asked for again instead of dropped. The language a conversation is being spoken in is remembered **per conversation** — a language hint used to live on the recognizer, which is one instance shared by the whole server, so it reached the next conversation's first sentence — and is sent as a narrowed set first, a pin only once the same language has been heard twice.
 
 ## Requirements
@@ -82,7 +83,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 ```bash
 uv sync                                     # install, including dev tools
 cp .env.example .env                        # fill in only the keys you need
-uv run voice-agent                          # V4.1 Flash max + Scribe + Multilingual v2, on :8000
+uv run voice-agent                          # V4.1 Flash off + Scribe + v4 Turbo, on :8000
                                             # the start screen picks model, ears and voice per conversation
 uv run voice-agent --stt assemblyai         # AssemblyAI pre-selected instead of Scribe
 uv run voice-agent --tts none --stt none    # silent and deaf: typing only
@@ -169,18 +170,15 @@ Measured so far, the round trip is dominated by the recognizer (about 1.0 s from
 the end of speech to a commit on AssemblyAI, 1.8–1.9 s on Scribe) and time to
 first token (about 0.5–0.9 s). Likely next, in order:
 
-1. **Eleven v3 Conversational** as a third voice, evaluated against these two.
-   It is on the Text-to-Dialogue socket, not `stream-input`, so it is a second
-   adapter behind the same `TTS` protocol.
-2. **Our own endpointing**: the voice detector's pause plus a sentence that reads
+1. **Our own endpointing**: the voice detector's pause plus a sentence that reads
    finished ends the turn (AssemblyAI's `ForceEndpoint`), and speculation starts
    on the same signal. Aimed at the recognizer's ~1 s.
-3. **Speaking a thought**: the inner voice cuts in at a pause, then speaks over
+2. **Speaking a thought**: the inner voice cuts in at a pause, then speaks over
    the user, with an assertiveness dial per role.
-4. **Leading**: the role has an agenda and steers toward it.
-5. **A golden conversation suite** from live sessions, on the tapes' format.
-6. **Cost accounting and small-model routing.**
-7. **Telephony transport.**
+3. **Leading**: the role has an agenda and steers toward it.
+4. **A golden conversation suite** from live sessions, on the tapes' format.
+5. **Cost accounting and small-model routing.**
+6. **Telephony transport.**
 
 [docs/ROADMAP.md](docs/ROADMAP.md) has the long version.
 

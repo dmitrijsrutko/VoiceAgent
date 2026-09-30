@@ -228,8 +228,8 @@ class Backends:
         if name not in self._built_speakers:
             option = tts_registry.BY_NAME[name]
             logger.info("building the %s voice", name)
-            # The builder, not `create_tts`: an option is never `none`, and a
-            # test keeps deprecated models off the menu.
-            build = tts_registry.BUILDERS[option.provider]
-            self._built_speakers[name] = build(self._voice, option.model)
+            # The option's own builder, not `create_tts`: an option is never
+            # `none`, and the two ElevenLabs models speak over two different
+            # sockets, so the provider cannot say which adapter to build.
+            self._built_speakers[name] = option.build(self._voice, option.model)
         return self._built_speakers[name]
