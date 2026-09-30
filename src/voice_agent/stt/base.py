@@ -14,10 +14,34 @@ class Transcript:
     committed text that will not change. Only committed text is safe to act on
     — building a turn from a hypothesis means acting on words the user never
     said.
+
+    `language` is what the recognizer *thinks* it heard, on a commit, and it
+    travels with the commit rather than on the adapter: the adapter is shared by
+    every conversation on the server, and one conversation's language hint
+    leaked into the next one's first sentence. It is set even when the commit
+    carries no text — a language detected over an utterance the recognizer
+    could not write down is exactly the evidence that its guess was wrong.
     """
 
     text: str
     is_final: bool
+    language: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class LanguageHint:
+    """What we know of the conversation's language, told to a recognizer.
+
+    Two tiers, because a wrong one costs differently. `candidates` narrows
+    language detection to a set — the recognizer's own answer stays a real
+    answer, so a wrong candidate is recoverable. `pin` is a strong prior: the
+    vendor's own description, and with a wrong pin the session decodes in a
+    language nobody is speaking. So a language is a candidate the first time it
+    is heard and a pin only the second.
+    """
+
+    pin: str | None = None
+    candidates: tuple[str, ...] = ()
 
 
 class STT(Protocol):
@@ -56,7 +80,9 @@ class STT(Protocol):
         something to paper over with a converter."""
         ...
 
-    def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]: ...
+    def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]: ...
 
 
 CHUNK_MS = 100

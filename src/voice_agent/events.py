@@ -23,9 +23,15 @@ class Partial:
 
 @dataclass(frozen=True, slots=True)
 class Final:
-    """A committed transcript: a spoken turn, or a piece of one."""
+    """A committed transcript: a spoken turn, or a piece of one.
+
+    `language` is what the recognizer said the audio was in, when it says —
+    carried on the commit so the conversation can learn it. A commit that
+    carried no text still carries one: see `stt.base.Transcript`.
+    """
 
     text: str
+    language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

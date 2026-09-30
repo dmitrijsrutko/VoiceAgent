@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from tests.tapes.harness import load, run
+from voice_agent.stt.base import LanguageHint
 
 TAPES = sorted((Path(__file__).parent / "tapes").glob("*.tape"))
 
@@ -39,6 +40,22 @@ def test_a_silence_of_minutes_replays_in_well_under_a_second() -> None:
     started = time.perf_counter()
     run(load(Path(__file__).parent / "tapes" / "typed_then_silence.tape"))
     assert time.perf_counter() - started < 5.0
+
+
+def test_a_replay_opens_later_sessions_on_what_was_heard() -> None:
+    """What the recognizer was told, session by session. The golden shows each
+    commit's language but nothing about the hint a *later* session opened on,
+    and that is the fix the whole change is: one guessing session, then the
+    conversation's own answer."""
+    hints: list[list[LanguageHint | None]] = []
+
+    run(load(Path(__file__).parent / "tapes" / "language_hint.tape"), hints=hints)
+
+    (sessions,) = hints
+    assert sessions[0] is None, "the first session cannot know: it must guess"
+    # Two listening sessions: the tape's third commit lands after the last
+    # `listen` was stopped, so there is no third session to open.
+    assert [(h.candidates, h.pin) for h in sessions[1:] if h] == [(("rus",), None)]
 
 
 def test_production_reads_the_high_resolution_clock() -> None:

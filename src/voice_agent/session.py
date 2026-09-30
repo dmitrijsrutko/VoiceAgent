@@ -51,6 +51,7 @@ from voice_agent.mic import Mic
 from voice_agent.roles import Role
 from voice_agent.speculation import Speculation, Speculator
 from voice_agent.stt import STT
+from voice_agent.stt.base import LanguageHint
 from voice_agent.thinker import Thinker
 from voice_agent.timing import elapsed_ms
 from voice_agent.tts import TTS
@@ -142,6 +143,13 @@ class Session:
         never dropped later."""
         self._echo_noted = False
         self._submits = 0
+        self._hint: LanguageHint | None = None
+        """The language hint the current listening session was opened with, as
+        the microphone asked for it. Kept because a commit's language is only
+        evidence against *that* hint: the same language coming back from a
+        session we pinned means nothing, a different one means the pin is not
+        the truth. `None` until a session starts, which cannot happen before the
+        microphone exists."""
         self._cut: tuple[str, str] | None = None
         """The last interrupted reply, as written and as heard."""
         self._resume: tuple[int, asyncio.TimerHandle] | None = None
@@ -149,6 +157,9 @@ class Session:
         self._resumes = 0
         self._held: list[str] = []
         """Pieces of a spoken turn that looked unfinished, waiting for the rest."""
+        self._held_language: str | None = None
+        """The language those pieces were committed in, kept so the turn they
+        finally become can be learned from."""
         self._hold: tuple[int, asyncio.TimerHandle] | None = None
         """The timer releasing the held pieces, by hold number."""
         self._holds = 0
@@ -161,7 +172,22 @@ class Session:
         self.ended = asyncio.Event()
         """Set once `end()` has finished — the microphone let go included — so
         the socket can be hung up without cutting an ending short."""
-        self.mic = Mic(listener, channel, self.post) if listener is not None else None
+        self.mic = (
+            Mic(
+                listener,
+                channel,
+                self.post,
+                # Hermetic on purpose: `Mic` may not guess the language, and it
+                # may not hold it either — the recognizer is one instance shared
+                # by every conversation, so the answer comes from this
+                # conversation, asked afresh at each listening session. The
+                # answer is kept (`_hint`) because a commit is only readable
+                # against the hint the session that produced it ran with.
+                hint=self._language_hint,
+            )
+            if listener is not None
+            else None
+        )
         self._thinker = (
             Thinker(
                 thinker,
@@ -224,8 +250,8 @@ class Session:
                     self._carry_on()
                 if stable:
                     await self._on_partial(stable, repeated)
-            case Final(text):
-                await self._spoken(text)
+            case Final(text, language):
+                await self._spoken(text, language)
             case NewSession():
                 await self.forget_utterance()
             case FloorChanged(state):
@@ -255,6 +281,13 @@ class Session:
 
     async def _decided(self, line: str, rung: int) -> None:
         self.post(Speak(line, rung))
+
+    def _language_hint(self) -> LanguageHint | None:
+        """What this conversation tells the recognizer at the start of a
+        listening session. Kept, so a commit can be read against the hint the
+        session producing it was actually opened with."""
+        self._hint = self.conversation.language.hint()
+        return self._hint
 
     def _agent_busy(self) -> bool:
         """A reply is being written, is audible, or is being cut down to what
@@ -498,9 +531,15 @@ class Session:
                 }
             )
 
-    async def _spoken(self, text: str) -> None:
+    async def _spoken(self, text: str, language: str | None = None) -> None:
         """A committed spoken turn. One that looks unfinished waits briefly for
-        the rest; pieces that arrive in time are answered as one turn."""
+        the rest; pieces that arrive in time are answered as one turn.
+
+        The language is learned where the turn is *started* (`_submitted`), not
+        here: a commit `submit` judges to be the agent's own voice is not a
+        sighting of the user's language, and would otherwise teach the
+        conversation from its own echo.
+        """
         self._stop_holding()
         pieces = [*self._held, text]
         if looks_unfinished(text) and self.mic is not None:
@@ -508,12 +547,15 @@ class Session:
             self._holds += 1
             self._carried_on = False
             self._hold = (self._holds, self._after(HOLD_SECONDS, HoldOver(self._holds)))
+            # The held pieces wait, so this commit's language waits with them:
+            # it is recorded when they are finally submitted as one turn.
+            self._held_language = language
             mic = self.mic
             if mic.speaking or mic.partial.strip():
                 self._carry_on()
             return
         self._held = []
-        await self.submit(" ".join(pieces), merged=len(pieces))
+        await self.submit(" ".join(pieces), merged=len(pieces), language=language)
 
     def _carry_on(self) -> None:
         """The user went on speaking during a hold: wait for the recognizer to
@@ -532,16 +574,26 @@ class Session:
         self._hold = None
         pieces, self._held = self._held, []
         if pieces:
-            await self.submit(" ".join(pieces), merged=len(pieces))
+            # The held commit's language, kept with it: `_held` merges fragments
+            # and typed text alike, so it cannot be reconstructed from `pieces`.
+            await self.submit(" ".join(pieces), merged=len(pieces), language=self._held_language)
 
     def _stop_holding(self) -> None:
         hold, self._hold = self._hold, None
         if hold is not None:
             hold[1].cancel()
 
-    async def submit(self, text: str, merged: int = 1, typed: bool = False) -> None:
+    async def submit(
+        self, text: str, merged: int = 1, typed: bool = False, language: str | None = None
+    ) -> None:
         """Start a turn, spoken or typed alike. Returns once it has *started*,
-        so the caller keeps reading while the reply streams."""
+        so the caller keeps reading while the reply streams.
+
+        `language` is what a recognizer said the audio was in, when it was a
+        recognizer that said. It is learned *after* the echo judgement below,
+        because a commit that turns out to be the agent's own voice heard back
+        is not a sighting of the user's language.
+        """
         if self.conversation.ended:
             return  # a recognizer's last commit can land after the end
         if not typed:
@@ -554,6 +606,10 @@ class Session:
                 # agent replying to itself.
                 await self._echo_ignored(text, "final")
                 return
+        if language is not None:
+            self.conversation.language.record(language, self._hint)
+            if self.mic is not None:
+                self.mic._stt.language = language  # type: ignore[attr-defined]
         self._submits += 1
         self._initiative.reset()  # the user spoke: the silence budget starts over
         if is_exit_command(text):
@@ -564,7 +620,7 @@ class Session:
             # Typed while a spoken fragment waited: one turn, spoken part first.
             self._stop_holding()
             text, merged = " ".join([*self._held, text]), len(self._held) + 1
-            self._held = []
+            self._held, self._held_language = [], None
         # Whatever the agent is still doing answers a question the user has moved on from.
         await self.interrupt()
         claimed = await self._speculator.claim(text)

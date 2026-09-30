@@ -21,7 +21,7 @@ import websockets
 from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.stt.base import Transcript, batched
+from voice_agent.stt.base import LanguageHint, Transcript, batched
 
 ENDPOINT = "wss://api.elevenlabs.io/v1/speech-to-text/realtime"
 DEFAULT_MODEL = "scribe_v2_realtime"
@@ -191,25 +191,45 @@ class ElevenLabsSTT:
         self.languages = LANGUAGES
         self.silence_seconds = silence_seconds or DEFAULT_SILENCE_SECONDS
         self._api_key = api_key or require_env("ELEVENLABS_API_KEY")
-        self.language: str | None = None
-        """The language the last commit was detected in, sent as the next
-        session's hint. One recognizer serves one conversation, so a session
-        after the first need not guess from scratch; a hint does not stop it
-        hearing another language."""
 
     @property
     def url(self) -> str:
-        return f"{ENDPOINT}?" + urlencode(
-            {
-                "model_id": self.model,
-                "commit_strategy": "vad",
-                "vad_silence_threshold_secs": self.silence_seconds,
-                "include_language_detection": "true",
-                **({"language_code": self.language} if self.language else {}),
-            }
-        )
+        """The session with no language known, as a fresh conversation opens it."""
+        return self.session_url()
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    def session_url(self, language: LanguageHint | None = None) -> str:
+        """One recognizer session's URL.
+
+        **The language hint is an argument, never state.** This adapter is one
+        instance shared by every conversation on the server (`Backends.ears`),
+        so a `language` attribute was not per conversation: a hint from the
+        last conversation that spoke reached the next conversation's *first*
+        sentence, which then decoded in a language nobody in the room was
+        speaking. It is the reason a conversation newly opened from a shared
+        link could produce a sentence of confident nonsense.
+
+        `candidates` goes out as repeated `secondary_languages`, which narrows
+        detection to a set — the vendor's description — and still lets the
+        recognizer answer with a language outside it. `pin` goes out as
+        `language_code`, a strong prior. Both may be sent together; the
+        candidate set is what makes a wrong pin survivable.
+        """
+        query: dict[str, object] = {
+            "model_id": self.model,
+            "commit_strategy": "vad",
+            "vad_silence_threshold_secs": self.silence_seconds,
+            "include_language_detection": "true",
+        }
+        if language is not None:
+            if language.pin:
+                query["language_code"] = language.pin
+            if language.candidates:
+                query["secondary_languages"] = list(language.candidates)
+        return f"{ENDPOINT}?" + urlencode(query, doseq=True)
+
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
         # Set before we close the socket ourselves. Without it, our own orderly
         # shutdown surfaces as `ConnectionClosedError: sent 1000 (OK); no close
         # frame received` — the peer never answers our close — and gets reported
@@ -238,10 +258,22 @@ class ElevenLabsSTT:
                 closing.set()
                 await socket.close()
 
-        trace.event("stt.session", {"provider": self.provider, "sample_rate": self.sample_rate})
+        trace.event(
+            "stt.session",
+            {
+                "provider": self.provider,
+                "sample_rate": self.sample_rate,
+                # What was actually sent, so a live failure names its own hint
+                # rather than leaving it to be inferred from the adapter's code.
+                # No separate "narrowed": it is what `candidates` not being empty
+                # means, and a second field saying it could disagree with this one.
+                "language": language.pin if language else None,
+                "candidates": list(language.candidates) if language else [],
+            },
+        )
         try:
             async with websockets.connect(
-                self.url, additional_headers={"xi-api-key": self._api_key}
+                self.session_url(language), additional_headers={"xi-api-key": self._api_key}
             ) as socket:
                 task = asyncio.create_task(pump(socket))
                 # Which of the two commit events already gave this segment's
@@ -257,15 +289,21 @@ class ElevenLabsSTT:
                             yield Transcript(text=text, is_final=False)
                         elif kind in (COMMITTED, COMMITTED_DETECTED):
                             text = str(payload.get("text", ""))
-                            language = payload.get("language_code")
-                            if kind == COMMITTED_DETECTED and isinstance(language, str) and text:
-                                self.language = language
+                            language_code = payload.get("language_code")
+                            detected = language_code if isinstance(language_code, str) else None
                             if answered is not None and answered[0] != kind and answered[1] == text:
                                 answered = None  # the pair's second half
                                 continue
                             answered = (kind, text)
-                            trace.event("stt.committed", {"text": text, "language": language})
-                            yield Transcript(text=text, is_final=True)
+                            trace.event(
+                                "stt.committed",
+                                {"text": text, "language": detected, "kind": kind},
+                            )
+                            # The language is carried even when the text is
+                            # empty: a guess of which language the audio was in
+                            # is evidence either way, and dropping it left a
+                            # misdetection with nothing to correct it.
+                            yield Transcript(text=text, is_final=True, language=detected)
                         elif isinstance(kind, str) and "error" in kind:
                             raise ProviderError(explain(payload))
                 finally:

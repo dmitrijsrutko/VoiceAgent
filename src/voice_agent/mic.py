@@ -15,6 +15,7 @@ from voice_agent.floor import Floor, Transition
 from voice_agent.level import Level
 from voice_agent.stt import STT
 from voice_agent.stt.agreement import StablePrefix
+from voice_agent.stt.base import LanguageHint
 from voice_agent.timing import elapsed_ms
 from voice_agent.vad import SAMPLE_RATE as VAD_SAMPLE_RATE
 from voice_agent.vad import VAD, WINDOW_MS, Detector
@@ -83,6 +84,7 @@ class Mic:
         idle_timeout: float | None = None,
         session_cap: float | None = None,
         detector: Callable[[], Detector] = VAD,
+        hint: Callable[[], LanguageHint | None] = lambda: None,
     ) -> None:
         self._stt = stt
         self.detector = detector
@@ -90,6 +92,12 @@ class Mic:
         self._post = post
         """Where what was heard goes. Posted, never awaited: the microphone
         never waits on a decision, and a decision never runs inside it."""
+        self._hint = hint
+        """What this conversation knows of its language, asked afresh at the
+        start of every listening session: the memory changes while a session
+        runs, and a stale hint is worse than none. A callable rather than a
+        value for the same reason the conversation owns it at all — the
+        recognizer is shared, so the answer has to come from the conversation."""
         self.partial = ""
         """What the recognizer last heard of the utterance in progress, settled
         or not; empty between utterances. For listening along, not for acting."""
@@ -462,7 +470,8 @@ class Mic:
         self._post(NewSession())
         await self._drop()
         heard_at = timing.now()
-        async for transcript in self._stt.stream(self._audio()):
+        hint = self._hint()
+        async for transcript in self._stt.stream(self._audio(), hint):
             self._heard_speech_at = timing.now()
             self._client_frames = 0
             if not transcript.is_final:
@@ -533,10 +542,11 @@ class Mic:
                     # Whether the text called stable really was how the turn began.
                     "prefix_held": self._agreement.holds_for(transcript.text),
                     "stable_words": len(self._agreement.text.split()),
+                    "lang": transcript.language,
                 }
             )
             self._utterance_over()
             self._agreement.reset()
             self._drawn = False
             heard_at = timing.now()
-            self._post(Final(transcript.text))
+            self._post(Final(transcript.text, transcript.language))

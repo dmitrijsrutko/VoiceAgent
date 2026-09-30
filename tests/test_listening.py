@@ -506,6 +506,49 @@ def test_stopping_mid_sentence_does_not_poison_the_next_utterance(
     assert commit["stable_words"] == 4, commit
 
 
+def test_the_language_is_not_shared_between_conversations(store: SessionStore) -> None:
+    """One recognizer serves every conversation (`Backends.ears` keeps one
+    instance per backend), so the language a conversation learns must not be
+    reachable from another's `Session`. Live, 09-30: a hint left by one
+    conversation reached the next one's first sentence, which then decoded in a
+    language nobody in the room was speaking — "Karandaz oğğl, lütshe çem
+    ruchka" instead of a sentence of Russian.
+
+    Two conversations over a real socket, both listening on the same shared
+    recognizer: the second opens on nothing. (`test_backends` and `test_stt`
+    guard the other half — that the adapter has no attribute to leak.)
+    """
+    stt = FakeSTT(
+        [
+            Transcript("Караңдаш лучше чем ручка.", is_final=False),
+            Transcript("Караңдаш лучше чем ручка.", is_final=True, language="rus"),
+        ]
+    )
+    client = build(store, stt, FakeLLM())
+    first, second = start(client), start(client)
+
+    with client.websocket_connect(f"/ws/{first}") as socket:
+        text_frame(socket)
+        socket.send_json({"type": "listen_start"})
+        text_frame(socket)
+        for _ in range(2):
+            socket.send_bytes(FRAME)
+        while text_frame(socket)["type"] != "reply_end":
+            pass
+
+    with client.websocket_connect(f"/ws/{second}") as socket:
+        text_frame(socket)
+        socket.send_json({"type": "listen_start"})
+        text_frame(socket)
+
+    assert store.get(first).language.hint() is not None, "the first heard nothing to learn"
+    assert store.get(second).language.hint() is None, "a hint crossed conversations"
+    # Both opened the *same* recognizer instance, which is the whole point, and
+    # the second was told nothing: the answer comes from the conversation, which
+    # is what makes two of them independent.
+    assert list(stt.hints[:2]) == [None, None]
+
+
 def test_stopping_the_mic_mid_reply_neither_waits_for_nor_cuts_the_reply(
     store: SessionStore,
 ) -> None:

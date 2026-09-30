@@ -25,7 +25,7 @@ import websockets
 from voice_agent import trace
 from voice_agent.config import require_env
 from voice_agent.errors import ProviderError
-from voice_agent.stt.base import Transcript, batched
+from voice_agent.stt.base import LanguageHint, Transcript, batched
 
 ENDPOINT = "wss://streaming.assemblyai.com/v3/ws"
 
@@ -150,7 +150,13 @@ class AssemblyAISTT:
             }
         )
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
+        """`language` is accepted and ignored: these ears pin one of eighteen
+        languages or code-switch natively, and the service reports no language
+        on a turn, so there is nothing to hint and nothing to learn. The ears
+        keep the protocol's shape, not every recognizer's features."""
         # Set before closing the socket ourselves: an orderly shutdown is not a failure.
         closing = asyncio.Event()
 

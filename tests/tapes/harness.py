@@ -29,7 +29,7 @@ from voice_agent.initiative import LADDER, Rung
 from voice_agent.llm.base import Usage
 from voice_agent.server import handle_text, ladder_for
 from voice_agent.session import Session
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import LanguageHint, Transcript
 from voice_agent.timeline import Timeline
 from voice_agent.tts.base import Alignment, AudioChunk, pcm_seconds
 from voice_agent.vad import WINDOW_BYTES
@@ -102,7 +102,7 @@ def parse(text: str, name: str) -> Tape:
         greeting <text>            role <card>            ladder 5,15,28 | off
         llm <ttft> <pace>          reply <match> = <text>  think <match> = <json>
         <t> listen | unlisten | voice on | voice off | partial <text>
-            | final <text> | type <text> | end
+            | final <text> [lang=<code>] | type <text> | end
     A `reply` or `think` repeated for the same match is used in order, the last
     one again after that. `<match>` is a substring of the last message.
     """
@@ -221,8 +221,15 @@ class TapeSTT:
     def __init__(self, script: list[tuple[float, Transcript]], started: float) -> None:
         self._script = script
         self._started = started
+        self.hints: list[LanguageHint | None] = []
+        """What each listening session was opened with, in order: the language
+        memory is invisible in the frames otherwise, and a tape should be able
+        to assert what the recognizer was told."""
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
+        self.hints.append(language)
         ended = asyncio.Event()
 
         async def drain() -> None:
@@ -381,7 +388,7 @@ FIELDS: dict[str, tuple[str, ...]] = {
     "audio_end": ("seconds", "first_audio_ms"),
     "truncated": ("played_ms", "heard_chars", "chars", "estimated"),
     "interrupt": ("id",),
-    "transcript": ("final", "text"),
+    "transcript": ("final", "text", "lang"),
     "floor": ("state", "agent"),
     "listening": ("active", "reason"),
     "initiative": ("rung", "decision", "line"),
@@ -412,15 +419,29 @@ def describe(payload: dict[str, object]) -> str | None:
     return " ".join(parts)
 
 
+LANG_SUFFIX = re.compile(r"\s+lang=(\S+)$")
+"""`final Привет. lang=ru` — the tape says what the recognizer thought it heard.
+
+A suffix rather than a directive of its own, so a language cannot be left set
+by one event and silently applied to the next: on a real recognizer it arrives
+*on* the commit, and only on a commit.
+"""
+
+
 def _transcripts(tape: Tape) -> list[tuple[float, Transcript]]:
-    return [
-        (at, Transcript(arg, is_final=verb == "final"))
-        for at, verb, arg in tape.events
-        if verb in ("partial", "final")
-    ]
+    script: list[tuple[float, Transcript]] = []
+    for at, verb, arg in tape.events:
+        if verb not in ("partial", "final"):
+            continue
+        language = None
+        if verb == "final" and (tag := LANG_SUFFIX.search(arg)) is not None:
+            arg = arg[: tag.start()]
+            language = tag.group(1)
+        script.append((at, Transcript(arg, is_final=verb == "final", language=language)))
+    return script
 
 
-async def replay(tape: Tape) -> str:
+async def replay(tape: Tape, hints: list[list[LanguageHint | None]] | None = None) -> str:
     started = timing.now()
     log = Log(started)
     browser = Browser(log)
@@ -433,6 +454,11 @@ async def replay(tape: Tape) -> str:
     inner = ScriptedLLM(tape.thoughts, 1.0, 0.0, log, "thk") if card is not None else None
     log.started = started = timing.now()
     listener = TapeSTT(_transcripts(tape), started)
+    if hints is not None:
+        # The golden shows a commit's language, but no frame carries the hint a
+        # *later* session opened on. A tape that is about the language captures
+        # it here, sharing the recognizer's own list.
+        hints.append(listener.hints)
     prompt = build_prompt(
         (),
         "female",
@@ -492,13 +518,18 @@ async def _act(browser: Browser, verb: str, arg: str, name: str) -> None:
         raise ValueError(f"{name}: unknown event {verb!r}")
 
 
-def run(tape: Tape, limit: float = 600.0) -> str:
-    """Replay on a fresh virtual loop; `limit` virtual seconds is a hang."""
+def run(
+    tape: Tape, limit: float = 600.0, hints: list[list[LanguageHint | None]] | None = None
+) -> str:
+    """Replay on a fresh virtual loop; `limit` virtual seconds is a hang.
+
+    `hints`, when given, receives one entry: the recognizer's list of the hints
+    each listening session was opened with, to be read after the replay."""
     loop = VirtualLoop()
 
     async def bounded() -> str:
         async with asyncio.timeout(limit):
-            return await replay(tape)
+            return await replay(tape, hints)
 
     try:
         with timing.using(loop.time):

@@ -1,0 +1,62 @@
+  0.000  >   greeting text='Hi.'
+  0.150  >   audio_end seconds=0.18 first_audio_ms=150
+  0.190  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.390  <   playback off
+  1.056  >   floor state='speaking'
+  1.600  >   transcript text='Карандаш лучше'
+  2.400  >   transcript text='Карандаш лучше чем ручка'
+  3.200  >   floor state='micro_pause'
+  3.584  >   floor state='pause'
+  4.000  >   transcript final=True text='Карандаш лучше чем ручка.' lang='rus'
+  4.000  llm ask 'Карандаш лучше чем ручка.'
+  4.480  >   floor state='yielded'
+  4.690  <   playback on
+  4.770  >   reply_end ttft_ms=500 text='Карандаш лучше, потому что им можно писать и стирать.'
+  4.770  >   audio_end seconds=3.18 first_audio_ms=650
+  6.020  <   listen_stop
+  6.020  >   listening
+  7.020  <   listen_start
+  7.020  >   listening active=True
+  7.890  <   playback off
+  7.904  >   mic_level
+  8.032  >   floor state='speaking'
+  8.600  >   transcript text='Караңдаш'
+  9.600  >   floor state='micro_pause'
+  9.984  >   floor state='pause'
+ 10.400  >   transcript final=True text='Караңдаш.' lang='rus'
+ 10.400  llm ask 'Караңдаш.'
+ 10.880  >   floor state='yielded'
+ 10.930  >   reply_end ttft_ms=500 text='Okay.'
+ 11.050  >   audio_end seconds=0.3 first_audio_ms=650
+ 11.090  <   playback on
+ 11.410  <   playback off
+ 11.424  >   mic_level
+ 13.000  >   transcript text='Карандаш.'
+ 15.000  >   transcript final=True text='Карандаш.' lang='rus'
+ 15.000  llm ask 'Карандаш.'
+ 15.530  >   reply_end ttft_ms=500 text='Okay.'
+ 15.650  >   audio_end seconds=0.3 first_audio_ms=650
+ 15.690  <   playback on
+ 16.010  <   playback off
+ 16.032  >   mic_level
+ 18.020  <   listen_stop
+ 18.020  >   listening
+
+assistant: Hi.
+     user: Карандаш лучше чем ручка.
+assistant: Карандаш лучше, потому что им можно писать и стирать.
+     user: Караңдаш.
+assistant: Okay.
+     user: Карандаш.
+assistant: Okay.
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 0.2 s): "Hi."
+[00:01] YOU (answered after 0.7 s · spoke 1.9 s · 4 words): "Карандаш лучше чем ручка."
+[00:05] ADVOCATE (spoke 3.2 s): "Карандаш лучше, потому что им можно писать и стирать."
+[00:08] YOU (answered after 0.1 s · spoke 1.3 s · 1 words): "Караңдаш."
+[00:11] ADVOCATE (spoke 0.4 s): "Okay."
+[00:15] YOU (answered after 3.6 s · 1 words): "Карандаш."
+[00:16] ADVOCATE (spoke 0.4 s): "Okay."

@@ -23,7 +23,7 @@ from voice_agent.events import Final, FloorChanged, MicEvent, NewSession
 from voice_agent.floor import Transition
 from voice_agent.level import FLOOR_DBFS
 from voice_agent.mic import Mic
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import LanguageHint, Transcript
 from voice_agent.vad import WINDOW_BYTES
 
 WAIT_TIMEOUT = 2.0
@@ -66,7 +66,9 @@ class SilentSTT:
     sample_rate = 16000
     nothing: tuple[Transcript, ...] = ()
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
         async for _ in audio:
             pass
         for transcript in self.nothing:  # never runs; makes this a generator
@@ -235,7 +237,9 @@ class DroppingSTT:
         self.limit = frames_before_dropping
         self.sessions = 0
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
         self.sessions += 1
         session = self.sessions
         seen = 0
@@ -295,7 +299,9 @@ async def test_silence_is_sent_when_the_browser_goes_quiet(
         frames = 0
         nothing: tuple[Transcript, ...] = ()
 
-        async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+        async def stream(
+            self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+        ) -> AsyncIterator[Transcript]:
             async for _ in audio:
                 Counting.frames += 1
             for transcript in self.nothing:  # never runs; makes this a generator
@@ -339,7 +345,9 @@ async def test_a_recognizer_defect_is_reported_not_silent() -> None:
     channel = RecordingChannel()
 
     class BrokenSTT(SilentSTT):
-        async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+        async def stream(
+            self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+        ) -> AsyncIterator[Transcript]:
             async for _ in audio:
                 raise RuntimeError("unexpected payload")
             for transcript in self.nothing:
@@ -460,6 +468,34 @@ async def test_a_stopped_mic_stops_hearing() -> None:
 
     assert hearing.done()
     mic.feed(b"\x00" * WINDOW_BYTES)  # after stop: dropped, not queued for nobody
+
+
+async def test_the_hint_is_asked_for_at_every_listening_session() -> None:
+    """The recognizer is one instance shared by the whole server, so the
+    microphone cannot keep a language of its own: it asks the conversation — and
+    asks again for each session, because the answer changes while the
+    conversation runs. A hint captured once would pin a conversation to the
+    language its first sentence happened to be guessed in."""
+    channel = RecordingChannel()
+    stt = FakeSTT([Transcript("Привет.", is_final=True, language="rus")])
+    first = LanguageHint(candidates=("rus",))
+    second = LanguageHint(pin="rus", candidates=("rus",))
+    hint = first
+
+    def asked_for() -> LanguageHint:
+        return hint
+
+    mic = Mic(stt, channel, never_called, hint=asked_for)  # type: ignore[arg-type]
+    await mic.start()
+    await asyncio.sleep(0.05)
+    await mic.stop()
+
+    hint = second
+    await mic.start()
+    await asyncio.sleep(0.05)
+    await mic.stop()
+
+    assert stt.hints == [first, second], "a session ran on a stale hint"
 
 
 async def test_a_new_session_gets_a_new_detector() -> None:

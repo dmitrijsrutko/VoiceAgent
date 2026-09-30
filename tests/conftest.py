@@ -10,7 +10,7 @@ import pytest
 from voice_agent.conversation import Message
 from voice_agent.errors import ProviderError
 from voice_agent.llm.base import Usage
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import LanguageHint, Transcript
 from voice_agent.tts.base import Alignment, AudioChunk
 
 
@@ -241,14 +241,21 @@ class FakeSTT:
             ]
         )
         self.heard: list[bytes] = []
+        self.hints: list[LanguageHint | None] = []
+        """Every hint this recognizer was opened with, in order. Recorded so a
+        test can assert the wire `Session` -> `Mic` -> ears, which is the only
+        place the language memory becomes visible to a real backend."""
         # Shared across `stream()` calls, so a session that restarts — the user
         # pressing listen again, or a reconnect — continues the script rather
         # than replaying it. A recognizer does not rewind when its socket does.
         self._remaining = iter(self.script)
 
-    async def stream(self, audio: AsyncIterator[bytes]) -> AsyncIterator[Transcript]:
+    async def stream(
+        self, audio: AsyncIterator[bytes], language: LanguageHint | None = None
+    ) -> AsyncIterator[Transcript]:
         if self.fail:
             raise ProviderError("recognizer exploded")
+        self.hints.append(language)
         async for chunk in audio:
             self.heard.append(chunk)
             transcript = next(self._remaining, None)

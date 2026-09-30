@@ -17,6 +17,7 @@ from websockets.frames import Close
 from voice_agent.config import load_settings
 from voice_agent.errors import ConfigError, ProviderError
 from voice_agent.stt import create_stt, elevenlabs_stt
+from voice_agent.stt.base import LanguageHint
 from voice_agent.stt.elevenlabs_stt import ElevenLabsSTT
 
 
@@ -136,7 +137,7 @@ def commits(*events: tuple[str, str]) -> list[str]:
     ]
 
 
-async def test_the_detected_commit_alone_is_the_turn_and_sets_the_next_hint(
+async def test_the_detected_commit_alone_is_the_turn_and_reports_its_language(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Measured live: with language detection on, Scribe sent only the commit
@@ -145,13 +146,52 @@ async def test_the_detected_commit_alone_is_the_turn_and_sets_the_next_hint(
     monkeypatch.setattr(websockets, "connect", lambda *a, **k: peer)
     monkeypatch.setattr(elevenlabs_stt, "FLUSH_GRACE_SECONDS", 0.01)
     stt = ElevenLabsSTT(api_key="test")
-    assert "language_code" not in stt.url  # the first session guesses
 
     transcripts = [t async for t in stt.stream(audio_of(1))]
 
-    assert [(t.text, t.is_final) for t in transcripts] == [("Привет.", True)]
-    assert stt.language == "ru"
-    assert "language_code=ru" in stt.url and "include_language_detection=true" in stt.url
+    assert [(t.text, t.is_final, t.language) for t in transcripts] == [("Привет.", True, "ru")]
+
+
+def test_the_hint_is_an_argument_and_nothing_is_remembered() -> None:
+    """The regression that a shared adapter made live. `Backends.ears` builds
+    one recognizer per backend and keeps it, so a language held on the adapter
+    was every conversation's: a hint set by the last conversation that spoke
+    reached the next conversation's first sentence, which then decoded in a
+    language nobody in the room was speaking."""
+    stt = ElevenLabsSTT(api_key="test")
+    pinned = stt.session_url(LanguageHint(pin="rus"))
+
+    assert "language_code=rus" in pinned
+    # `url` — the property, not `session_url()` — so the assertion is about what
+    # a session with nothing passed *and nothing remembered* actually sends.
+    assert "language_code" not in stt.url
+    assert "include_language_detection=true" in stt.url
+
+
+def test_a_candidate_narrows_detection_instead_of_pinning_it() -> None:
+    """`secondary_languages` is the vendor's soft form: detection is limited to
+    a set, and its own answer stays an answer. That is what makes a first
+    sighting safe to act on — a wrong candidate is recoverable, a wrong pin is
+    a session decoded in the wrong language."""
+    url = ElevenLabsSTT(api_key="test").session_url(LanguageHint(candidates=("rus", "kaz")))
+
+    assert "secondary_languages=rus" in url
+    assert "secondary_languages=kaz" in url
+    assert "language_code" not in url
+
+
+async def test_a_language_over_an_utterance_with_no_text_is_still_reported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live, 09-30: a commit arrived with an empty text and a language. It was
+    dropped, and with it the only evidence that the guess in force was wrong."""
+    peer = RudePeer(commits(("committed_transcript_with_timestamps", "")))
+    monkeypatch.setattr(websockets, "connect", lambda *a, **k: peer)
+    monkeypatch.setattr(elevenlabs_stt, "FLUSH_GRACE_SECONDS", 0.01)
+
+    transcripts = [t async for t in ElevenLabsSTT(api_key="test").stream(audio_of(1))]
+
+    assert [(t.text, t.language) for t in transcripts] == [("", "ru")]
 
 
 async def test_both_commit_events_are_one_turn(monkeypatch: pytest.MonkeyPatch) -> None:

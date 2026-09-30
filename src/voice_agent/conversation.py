@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from voice_agent.language import LanguageMemory
 from voice_agent.timeline import Timeline
 
 Role = Literal["user", "assistant"]
@@ -49,6 +50,12 @@ class Conversation:
     """Where this conversation is written down, once it has been."""
     judge: str | None = None
     """Which judge rules on it (`judge.JUDGES`), pinned like the engine."""
+    language: LanguageMemory = field(default_factory=LanguageMemory)
+    """Which language it is being spoken in, learned from what the recognizer
+    committed. **Per conversation, deliberately**: the recognizer adapter is one
+    instance shared by every conversation on the server (`Backends.ears`), so
+    the hint cannot live there — and this survives a reconnect or a reload,
+    since the conversation outlives the socket."""
     started: float | None = None
     """When it was first connected to, on `timing.now()`: a time limit counts
     from here, so reconnecting does not start the clock again."""

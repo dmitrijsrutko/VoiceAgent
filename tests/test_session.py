@@ -12,9 +12,11 @@ from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS
 from voice_agent.conversation import Conversation, Message
-from voice_agent.events import Typed
+from voice_agent.events import Final, Typed
+from voice_agent.heard import Spoken
 from voice_agent.session import Session
-from voice_agent.stt.base import Transcript
+from voice_agent.stt.base import LanguageHint, Transcript
+from voice_agent.tts.base import AudioChunk
 
 WAIT_TIMEOUT = 2.0
 SLOW_REPLY = "one two three four five six seven eight nine ten"
@@ -436,3 +438,111 @@ async def test_an_end_asked_for_as_the_socket_closes_is_not_left_waiting() -> No
 
     async with asyncio.timeout(WAIT_TIMEOUT):
         await ending
+
+
+def hint_of(conversation: Conversation) -> tuple[str | None, tuple[str, ...]]:
+    """The conversation's language as a plain pair, so a test can read it
+    without restating what a `LanguageHint` is."""
+    hint = conversation.language.hint()
+    return (None, ()) if hint is None else (hint.pin, hint.candidates)
+
+
+async def test_a_committed_turn_teaches_the_conversation_its_language() -> None:
+    """The memory lives on the conversation because the recognizer is shared by
+    every conversation on the server (`Backends.ears`), and this is where a
+    commit lands: one owner, so a stray commit cannot teach it."""
+    llm = FakeLLM(replies=["Да."], pace=0.01)
+    session, channel, conversation = session_for(llm)
+    session.post(Final("Караңдаш лучше чем ручка.", "rus"))
+
+    await channel.wait_for("reply_end")
+
+    assert hint_of(conversation) == (None, ("rus",)), "one sighting may not pin"
+    await session.close()
+
+
+async def test_the_pin_the_session_ran_with_is_not_confirmed_by_the_commit() -> None:
+    """A recognizer told to expect Russian answers Russian. Reading that as a
+    second sighting would make the first guess permanent; a different language
+    is the evidence that it should not be — and it leads the candidates, so the
+    next session is narrowed to the language actually heard."""
+    session, channel, conversation = session_for(FakeLLM(replies=["Так."], pace=0.01))
+    conversation.language.record("rus", None)
+    conversation.language.record("rus", LanguageHint(candidates=("rus",)))
+    session._language_hint()  # the listening session opens on the pin
+    assert conversation.language.pin == "rus"
+
+    session.post(Final("Так.", "rus"))
+    await channel.wait_for("reply_end")
+    session.post(Final("Иә.", "kaz"))
+    await channel.wait_for("reply_end", count=2)
+
+    assert hint_of(conversation) == (None, ("kaz", "rus")), "the pin was read as its own proof"
+    await session.close()
+
+
+async def test_a_commit_judged_to_be_echo_teaches_no_language() -> None:
+    """The agent's own voice, coming back through the speaker, is recognised
+    again and carries a language like any other commit — usually the agent's.
+    Learning from it would let the agent's own words decide what language the
+    conversation is in, and reading a language off its own echo is exactly the
+    evidence that is worthless."""
+    session, channel, conversation = session_for(FakeLLM())
+    greeting = conversation.add_assistant("Карандаш лучше, потому что им можно писать.")
+    voice = Spoken(message=greeting)
+    voice.add(AudioChunk(b"\x00" * 48_000))
+    session.voiced(voice)
+    session.playback(True)
+
+    session.post(Final("Карандаш лучше, потому что им можно писать.", "rus"))
+    await channel.wait_for("echo_ignored", count=1)
+    await asyncio.sleep(0.05)
+
+    assert hint_of(conversation) == (None, ()), "the agent taught itself from its own echo"
+    await session.close()
+
+
+async def test_a_commit_with_no_language_leaves_the_memory_alone() -> None:
+    """AssemblyAI reports none, and so does a Scribe session with detection off.
+    That is not a sighting of an unknown language, and must not empty what is
+    known."""
+    session, channel, conversation = session_for(FakeLLM(replies=["Да."], pace=0.01))
+    conversation.language.record("rus", None)
+
+    session.post(Final("Да."))
+    await channel.wait_for("reply_end")
+
+    assert hint_of(conversation) == (None, ("rus",))
+    await session.close()
+
+
+class Quiet:
+    """A voice detector that hears nobody, so a test can drive the recognizer
+    without the ONNX model deciding anything."""
+
+    def probabilities(self, pcm: bytes) -> list[float]:
+        return [0.02]
+
+
+async def test_the_listening_session_is_opened_on_what_the_conversation_knows() -> None:
+    """The wire from the conversation's memory to the recognizer, through the
+    microphone: the session must not guess when the conversation has already
+    heard a language, and `Mic` must not hold one of its own — the recognizer is
+    shared by every conversation on the server."""
+    llm = FakeLLM(replies=["Да."], pace=0.01)
+    stt = FakeSTT([Transcript("Караңдаш лучше чем ручка.", is_final=True, language="rus")])
+    session, channel, conversation = session_for(llm, stt)
+    assert session.mic is not None
+    session.mic.detector = Quiet
+    # What the *previous* session in this conversation heard. Without this the
+    # recognizer would open on nothing, which is the bug this guards.
+    conversation.language.record("rus", None)
+
+    await session.mic.start()
+    for _ in range(2):
+        session.mic.feed(b"\x00\x00")
+    await channel.wait_for("reply_end")
+    await session.mic.stop()
+
+    assert [hint.candidates if hint else None for hint in stt.hints] == [("rus",)]
+    await session.close()

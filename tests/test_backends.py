@@ -210,6 +210,29 @@ def test_the_recognizers_differ_in_the_way_chapter_12_cared_about() -> None:
     assert "rus" in EARS["elevenlabs"].languages
 
 
+def test_the_recognizer_is_shared_but_the_language_is_not(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The bug that made a freshly opened conversation decode its first sentence
+    in a language nobody in the room was speaking: `ears` builds one recognizer
+    per backend and keeps it for the process, so a language *on the adapter* was
+    every conversation's. The instance is still shared on purpose (a
+    connection is the asset); the memory is per conversation, so two of them
+    cannot meet."""
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "test")
+    pool = Backends("elevenlabs")
+
+    listener = pool.ears("elevenlabs")
+    assert listener is pool.ears("elevenlabs")  # shared, as designed
+    assert not hasattr(listener, "language"), "the adapter holds no language to leak"
+
+    first, second = Conversation(id="first"), Conversation(id="second")
+    first.language.record("rus", None)
+
+    assert first.language.hint() is not None
+    assert second.language.hint() is None
+
+
 DEVIL = roles_module.load("devils_advocate")
 
 
