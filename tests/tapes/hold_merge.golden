@@ -21,6 +21,7 @@
   5.950  >   audio_end seconds=1.14 first_audio_ms=650
   5.990  <   playback on
   7.150  <   playback off
+  7.168  >   mic_level
 
 assistant: Hi.
      user: I was thinking about, the trip to Riga.

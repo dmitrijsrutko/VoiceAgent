@@ -131,7 +131,15 @@ def parse(path: Path) -> SessionSummary:
             if speaker.startswith("you"):
                 fallback["you"] += 1
                 if not first_words:
-                    body = next((ln for ln in lines[number_ + 1 :] if ln.strip()), "")
+                    # Past the block's `at` note: its millisecond, not its words.
+                    body = next(
+                        (
+                            ln
+                            for ln in lines[number_ + 1 :]
+                            if ln.strip() and not ln.startswith("`at ")
+                        ),
+                        "",
+                    )
                     first_words = "" if body.startswith(("#", "`")) else body
             elif speaker == "agent":
                 fallback["replies"] += 1

@@ -394,6 +394,7 @@ async def test_a_normal_reply_records_its_end_and_its_reasoning() -> None:
         text, usage = await reply(openai_compatible(provider.port))
 
     assert (text, usage.finish_reason, usage.reasoning_chars) == ("Yes.", "stop", 5)
+    assert usage.reasoning == "Easy."
 
 
 async def test_a_chain_of_thought_is_never_spoken() -> None:

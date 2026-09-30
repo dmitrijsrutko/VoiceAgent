@@ -66,8 +66,10 @@ primary_region = "iad"
 
   # Recorded, and the page says so before anybody speaks (`noteRecording`).
   VOICE_AGENT_SESSIONS = "/data/sessions"
-  # No trace in public: it holds whole prompts and replies (AGENTS.md §10).
-  VOICE_AGENT_TRACE = "off"
+  # Always on: the trace is how a live failure is explained (whole prompts,
+  # replies and the model's reasoning). On the volume beside the records, which
+  # hold the same words; `--purge-sessions` deletes both (AGENTS.md §10).
+  VOICE_AGENT_TRACE = "/data/traces"
   # The log, as rotating files on the volume (~55 MB at most): Fly's own buffer
   # is ~100 lines and is lost on deploy. `scripts/pull-fly.sh` downloads it.
   VOICE_AGENT_LOGS = "/data/logs"

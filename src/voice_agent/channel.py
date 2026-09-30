@@ -3,11 +3,13 @@ producer of audio on it."""
 
 import asyncio
 import logging
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
 from fastapi import WebSocket
 from starlette.websockets import WebSocketDisconnect, WebSocketState
 
+from voice_agent import trace
 from voice_agent.tts.base import MEDIA_TYPE, SAMPLE_RATE
 
 if TYPE_CHECKING:
@@ -24,6 +26,42 @@ GONE = (WebSocketDisconnect, RuntimeError, OSError)
 "Cannot call send once a close message has been sent"). A RuntimeError on a
 socket still connected is a real mistake (sending before accepting, a wrong
 message type) and is raised, not taken for a hang-up."""
+
+
+UNTRACED = frozenset({"delta", "transcript", "floor", "marks"})
+"""Frames in the trace another way — tokens (`llm.reply`), partials and commits
+(`stt.*`), the floor (`floor`) — or bulky: `marks` repeats every character's
+timing, chunk by chunk."""
+
+TRACE_FIELDS = frozenset({"type", "kind", "at", "mono", "trace", "span", "parent"})
+
+PAGE_TEXT_LIMIT = 500
+"""A client-supplied string is cut to this in the trace."""
+
+
+def page_event(direction: str, payload: Mapping[str, Any]) -> None:
+    """One frame to or from the page, in the trace at its millisecond: the
+    record's headings are whole seconds, and a race lives in the gap."""
+    kind = str(payload.get("type", ""))
+    if direction == "out" and kind in UNTRACED:
+        return
+    attrs: dict[str, Any] = {"type": kind}
+    for key, value in payload.items():
+        if key in TRACE_FIELDS:
+            continue  # the trace's own: a frame must not relabel its line
+        if direction == "in":
+            # From the client: scalars only, strings cut, so a page cannot
+            # fill the trace.
+            if isinstance(value, str):
+                attrs[key] = value[:PAGE_TEXT_LIMIT]
+            elif isinstance(value, int | float | bool) or value is None:
+                attrs[key] = value
+        elif key == "history" and isinstance(value, list):
+            # The whole conversation, on every connect: its size is enough.
+            attrs["history_messages"] = len(value)
+        else:
+            attrs[key] = value
+    trace.event(f"page.{direction}", attrs)
 
 
 class Channel:
@@ -69,6 +107,7 @@ class Channel:
                 self._frames.append(dict(payload))
             if not await self._write(self._websocket.send_json(payload)):
                 return
+            page_event("out", payload)
             if self.timeline is not None:
                 self.timeline.frame(payload)
             if self._record is not None:
@@ -105,7 +144,7 @@ class Channel:
         return True
 
 
-UNSHOWN = frozenset({"ready", "delta", "marks", "floor", "transcript_dropped"})
+UNSHOWN = frozenset({"ready", "delta", "marks", "floor", "transcript_dropped", "mic_level"})
 """Frames a reload does not redraw: `ready` carries the whole history, text
 arrives whole in `reply_end`, and the rest paint something only while live."""
 

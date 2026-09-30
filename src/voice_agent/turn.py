@@ -9,14 +9,14 @@ engine has finished the last one.
 import asyncio
 import contextlib
 import logging
-from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
+from collections.abc import AsyncIterator, Callable
+from dataclasses import dataclass, field, fields
 
 from voice_agent import timing
 from voice_agent.channel import Channel, audio_start
 from voice_agent.conversation import Conversation, Message
 from voice_agent.decline import guard
-from voice_agent.errors import VoiceAgentError
+from voice_agent.errors import SilentReplyError, VoiceAgentError
 from voice_agent.heard import Spoken
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
@@ -69,6 +69,39 @@ class Turn:
     started: bool = False
 
 
+async def once_more_if_silent(
+    first: AsyncIterator[str],
+    again: Callable[[Usage], AsyncIterator[str]],
+    usage: Usage,
+    conversation_id: str,
+) -> AsyncIterator[str]:
+    """Stream `first`; if it is refused as silent, stream one fresh ask instead.
+
+    Safe to repeat because a silent reply wrote nothing, and a fresh ask
+    usually answers. The fresh ask gets its own `Usage`, so its trace and any
+    second refusal describe that call alone; the turn then reports it, with the
+    refused call's billed tokens added on.
+    """
+    try:
+        async with closing(first) as fragments:
+            async for fragment in fragments:
+                yield fragment
+        return
+    except SilentReplyError as exc:
+        logger.warning("silent reply for session %s, asking once more: %s", conversation_id, exc)
+    retry = Usage()
+    async with closing(again(retry)) as fragments:
+        async for fragment in fragments:
+            yield fragment
+    billed = (usage.prompt_tokens, usage.cached_tokens, usage.output_tokens, usage.attempts)
+    for spec in fields(Usage):
+        setattr(usage, spec.name, getattr(retry, spec.name))
+    usage.prompt_tokens += billed[0]
+    usage.cached_tokens += billed[1]
+    usage.output_tokens += billed[2]
+    usage.attempts += billed[3]
+
+
 async def run_turn(
     ctx: Context,
     turn: Turn,
@@ -97,12 +130,13 @@ async def run_turn(
         first_token_at: float | None = None
         usage = usage if usage is not None else Usage()
 
-        def ask() -> AsyncIterator[str]:
-            return ctx.engine.stream(ctx.system_prompt, conversation.context, usage)
+        def ask(into: Usage = usage) -> AsyncIterator[str]:
+            return ctx.engine.stream(ctx.system_prompt, conversation.context, into)
 
         # Guarded whatever the source; a retry always asks the engine, since
         # re-running a guess would only produce the guess again.
-        source = guard(fragments if fragments is not None else ask(), ask)
+        first = fragments if fragments is not None else ask()
+        source = guard(once_more_if_silent(first, ask, usage, conversation.id), ask)
         try:
             async with closing(source) as fragments:
                 async for fragment in fragments:
@@ -115,7 +149,9 @@ async def run_turn(
         except VoiceAgentError as exc:
             # Fail closed: drop the question too, so no call resends a dangling
             # one; close any audio already begun so the page stops waiting.
-            if question is not None:
+            # Not after a silent reply: the question was heard and is still owed
+            # an answer, and without it the agent's lines run back to back.
+            if question is not None and not isinstance(exc, SilentReplyError):
                 conversation.replace(question, None)
             if speech is not None:
                 await speech.interrupt()

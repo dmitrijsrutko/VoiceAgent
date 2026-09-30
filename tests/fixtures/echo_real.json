@@ -1,0 +1,44 @@
+[
+ {
+  "source": "o2txiohB 20:34:37",
+  "heard": "Я ещё в начале.",
+  "said": "Понял. Ты уже что-то создаёшь, или ты ещё в начале?",
+  "gap_s": 3.3,
+  "echo": false
+ },
+ {
+  "source": "o2txiohB 20:35:01",
+  "heard": "Только начинается.",
+  "said": "Хорошо. Ты уже много путешествовал, или это только начинается?",
+  "gap_s": 2.7,
+  "echo": false
+ },
+ {
+  "source": "oaulVXUI 20:37:48",
+  "heard": "Give me a position you actually hold.",
+  "said": "Hi. Give me a position you actually hold — something you'd defend — and I'll try to take it apart. What is it?",
+  "gap_s": -1.8,
+  "echo": true
+ },
+ {
+  "source": "APwQm2HA 19:32:25",
+  "heard": "Никто не делает оливье?",
+  "said": "А теперь ты сравниваешь не с оливье, а с его карикатурой: в оливье курица, яйца, горошек — там белка не меньше. Так шуба выигрывает у салата, которого никто не делает?",
+  "gap_s": 6.0,
+  "echo": false
+ },
+ {
+  "source": "3DsD97MX 23:46:08",
+  "heard": "Here's a free one to swing at. I'll argue that tipping should be abolished.",
+  "said": "Here's a free one to swing at: I'll argue that tipping should be abolished and service prices just posted honestly.",
+  "gap_s": 2.5,
+  "echo": true
+ },
+ {
+  "source": "3DsD97MX 23:46:24",
+  "heard": "Tipping should be abolished. What's on the menu should be the price of the meal. Swing whenever you're ready.",
+  "said": "Tipping should be abolished — what's on the menu should be the price of the meal. Swing whenever you're ready.",
+  "gap_s": 2.3,
+  "echo": true
+ }
+]

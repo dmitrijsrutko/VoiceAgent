@@ -11,6 +11,7 @@ gets past this; a clean one does not.
 """
 
 import re
+from difflib import SequenceMatcher
 from typing import Literal
 
 Verdict = Literal["echo", "user", "unsure"]
@@ -101,3 +102,26 @@ def is_echo_final(heard: str, said: str) -> bool:
         return False
     spoken = set(words(said))
     return sum(1 for w in got if w in spoken) / len(got) >= FINAL_ECHO_SHARE
+
+
+REPLAY_MIN_WORDS = 5
+"""Shorter, a turn after the voice is kept even if it is the voice's own words:
+an answer that repeats one option of an either-or question ("Ещё в начале." to
+"…или ты ещё в начале?") is that short, and a recorded echo is longer."""
+
+
+def is_replay(heard: str, said: str) -> bool:
+    """Whether a turn committed after the agent's voice stopped is that voice
+    replayed: a run of its words, in its order.
+
+    Stricter than `is_echo_final`, which counts words wherever they fall: after
+    the voice there is no partial heard over it to vouch for echo, and a short
+    answer shares every word with a long reply ("It is the colour." after
+    "…is it the colour, or just a long day?") without repeating any of it.
+    """
+    got = words(heard)
+    if len(got) < REPLAY_MIN_WORDS:
+        return False
+    spoken = words(said)
+    run = SequenceMatcher(None, got, spoken, autojunk=False).find_longest_match()
+    return run.size / len(got) >= FINAL_ECHO_SHARE

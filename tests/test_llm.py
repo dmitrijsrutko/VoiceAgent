@@ -11,11 +11,10 @@ from voice_agent.llm import create_llm
 from voice_agent.llm.anthropic_provider import (
     CACHE_THROUGH_LAST,
     DEFAULT_EFFORT,
-    OPENING,
     AnthropicLLM,
     to_anthropic_messages,
 )
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Usage, refuse_silent_reply
+from voice_agent.llm.base import MAX_OUTPUT_TOKENS, OPENING, Usage, refuse_silent_reply
 from voice_agent.llm.openai_compatible import (
     DEEPSEEK,
     OPENAI,
@@ -37,6 +36,20 @@ def test_openai_wire_puts_the_system_prompt_first_and_keeps_history_in_order() -
         {"role": "user", "content": "hello"},
         {"role": "assistant", "content": "hi"},
         {"role": "user", "content": "and again"},
+    ]
+
+
+def test_openai_wire_opens_with_a_user_turn_when_the_agent_spoke_first() -> None:
+    """Replayed against DeepSeek at effort high, a history opening with the
+    agent's unprompted line ended 5 of 18 replies with reasoning and no text;
+    the same history behind this user turn, 0 of 15."""
+    unprompted = [Message("assistant", "Here's one to swing at."), Message("user", "Go on")]
+
+    assert to_openai_messages("be brief", unprompted) == [
+        {"role": "system", "content": "be brief"},
+        {"role": "user", "content": OPENING},
+        {"role": "assistant", "content": "Here's one to swing at."},
+        {"role": "user", "content": "Go on"},
     ]
 
 

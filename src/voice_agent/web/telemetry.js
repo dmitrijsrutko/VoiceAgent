@@ -67,6 +67,7 @@ const VERDICTS = {
   declined: "🤫 nothing worth saying",
   yielded: "🤫 had something, but you started talking",
   overran: "✂️ its answer ran on, so it went unsaid",
+  silent: "🫥 thought about it, then the model sent nothing",
 };
 
 // Every consideration, spoken or not: the declines are the behaviour being built.

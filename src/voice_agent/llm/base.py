@@ -80,10 +80,20 @@ class Usage:
     reasoning_chars: int = 0
     """Characters of chain of thought streamed beside the reply, never spoken.
     Zero for a provider that does not stream its reasoning."""
+    reasoning: str = ""
+    """That chain of thought itself, for the trace: without it a reply that came
+    back empty says how long the model thought, never what it concluded."""
     attempts: int = 0
     """HTTP requests the call took. More than one means the SDK retried after a
     refusal (429, 5xx) or a dropped connection, with a backoff in between. Zero
     when the adapter cannot tell."""
+
+
+OPENING = "(call connected)"
+"""The user turn put before a conversation that opens with the agent (its
+greeting, or an unprompted line). Anthropic rejects such a conversation;
+DeepSeek at effort high accepts it, then often thinks and sends no reply. Fixed
+text, so every conversation's cached prefix starts the same."""
 
 
 def refuse_silent_reply(

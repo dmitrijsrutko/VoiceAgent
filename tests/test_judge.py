@@ -1,16 +1,13 @@
 """The judge: what it is shown, how its reply is read, and when it is not asked."""
 
 import json
-from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 
 import pytest
 
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, Scripted
 from voice_agent import judge
-from voice_agent.conversation import Message
 from voice_agent.errors import SilentReplyError
-from voice_agent.llm.base import Usage
 from voice_agent.timeline import Turn, stats
 
 FIXTURES = Path(__file__).parent / "fixtures"
@@ -134,29 +131,6 @@ def test_the_judge_asks_for_json_where_the_vendor_can_promise_it(
     inner = judge.build("deepseek-high")._inner  # type: ignore[attr-defined]
     assert inner._response_format == {"type": "json_object"}
     judge.build("opus-5-5")  # no JSON mode there; the retry covers it
-
-
-class Scripted(FakeLLM):
-    """Each call plays the next step: a reply and why the stream ended, or an
-    exception, the way an adapter reports it."""
-
-    def __init__(self, steps: Sequence[tuple[str, str] | Exception]) -> None:
-        super().__init__()
-        self.steps = list(steps)
-
-    async def stream(
-        self, system: str, messages: Sequence[Message], usage: Usage | None = None
-    ) -> AsyncIterator[str]:
-        self.seen.append(list(messages))
-        step = self.steps[len(self.seen) - 1]
-        if usage is not None:
-            usage.output_tokens = 10
-        if isinstance(step, Exception):
-            raise step
-        text, finish = step
-        if usage is not None:
-            usage.finish_reason = finish
-        yield text
 
 
 async def test_an_empty_json_reply_is_asked_for_again() -> None:

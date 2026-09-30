@@ -157,7 +157,7 @@ def main() -> None:
         return
 
     if args.purge_sessions:
-        purge_sessions(settings.sessions)
+        purge_sessions(settings.sessions, settings.trace)
         return
 
     if args.list_voices:
@@ -283,27 +283,29 @@ def open_log_file(directory: Path | None) -> logging.Handler | None:
     return handler
 
 
-def purge_sessions(directory: Path | None) -> None:
-    """Delete every recorded conversation.
+def purge_sessions(directory: Path | None, traces: Path | None = None) -> None:
+    """Delete every recorded conversation, and every trace.
 
     The retention policy is "keep everything", so this is the whole of the
     delete half of it — which means it asks first. These are transcripts of
-    things somebody said out loud, and there is no second copy.
+    things somebody said out loud, and there is no second copy. A trace holds
+    the same words (every prompt resends the conversation), so it goes too.
     """
-    if directory is None:
+    if directory is None and traces is None:
         print("Conversations are not being recorded.")
         return
-    files = sorted(directory.glob("*.md"))
-    if not files:
-        print(f"No conversations in {directory}.")
+    files = sorted(directory.glob("*.md")) if directory is not None else []
+    traced = sorted(traces.glob("*.jsonl")) if traces is not None else []
+    if not files and not traced:
+        print(f"No conversations in {directory} and no traces in {traces}.")
         return
-    print(f"{len(files)} conversation(s) in {directory}, from {files[0].name}.")
+    print(f"{len(files)} conversation(s) in {directory}, {len(traced)} trace(s) in {traces}.")
     if input("Delete them all? [y/N] ").strip().casefold() not in ("y", "yes"):
         print("Left alone.")
         return
-    for path in files:
+    for path in [*files, *traced]:
         path.unlink()
-    print(f"Deleted {len(files)}.")
+    print(f"Deleted {len(files)} conversation(s) and {len(traced)} trace(s).")
 
 
 def list_voices(provider: str) -> None:

@@ -5,11 +5,14 @@ measured on localhost, and a cap that quietly engaged there would mean the thing
 being developed was no longer the thing being deployed.
 """
 
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from tests.conftest import FakeLLM, receive
+from voice_agent import trace
 from voice_agent.config import load_settings
 from voice_agent.errors import ConfigError
 from voice_agent.limits import MINT_WINDOW, Live, MintLimit, budget_reason, client_address
@@ -314,6 +317,21 @@ def test_the_page_is_told_whether_it_is_being_written_down(
     silent = TestClient(create_app(llm=llm, voice=False, ears=False, greeting="", record=False))
     with silent, silent.websocket_connect(f"/ws/{mint(silent)}") as socket:
         assert receive(socket)["recording"] is False
+
+
+def test_a_trace_alone_still_counts_as_being_written_down(llm: FakeLLM, tmp_path: Path) -> None:
+    """Records off, trace on: the trace holds every prompt, and so every word."""
+    writer = trace.open_trace(tmp_path / "traces")
+    trace.install(writer)
+    try:
+        app = create_app(llm=llm, voice=False, ears=False, greeting="", record=False)
+        client = TestClient(app)
+        with client, client.websocket_connect(f"/ws/{mint(client)}") as socket:
+            assert receive(socket)["recording"] is True
+    finally:
+        trace.install(None)
+        if writer is not None:
+            writer.close()
 
 
 def test_healthz_is_ready_rather_than_merely_alive(llm: FakeLLM) -> None:

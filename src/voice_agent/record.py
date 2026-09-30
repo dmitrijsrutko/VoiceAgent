@@ -49,6 +49,12 @@ but they are cut short with a marker rather than dropped. Absence has to mean
 "the frame did not carry it", never "it was too long to show"."""
 
 
+def at_note(now: datetime) -> str:
+    """A block's millisecond, as its first note. Headings stay whole seconds:
+    the judge, the ledger and echo_eval parse them."""
+    return f"`at {now:%H:%M:%S}.{now.microsecond // 1000:03}`"
+
+
 def render(value: object) -> str:
     if isinstance(value, bool):
         return "yes" if value else "no"
@@ -264,10 +270,6 @@ class Record:
             self._broken = True
             logger.warning("conversation recording stopped: %s", exc)
 
-    @staticmethod
-    def _clock() -> str:
-        return datetime.now().strftime("%H:%M:%S")
-
     def block(self, speaker: str, body: str = "", notes: str = "") -> None:
         """One turn, or one thing worth its own heading.
 
@@ -277,7 +279,9 @@ class Record:
         so without the blank lines a rendered view runs every measurement
         together into a single run-on line.
         """
-        self._write(f"\n## {self._clock()} — {speaker}\n")
+        now = datetime.now()
+        self._write(f"\n## {now:%H:%M:%S} — {speaker}\n")
+        self._write(f"\n{at_note(now)}\n")
         if body.strip():
             self._write(f"\n{body.strip()}\n")
         if notes:
@@ -388,7 +392,9 @@ class Record:
             since=timing.now(),
         )
         if self._path.exists() and self._path.stat().st_size:
-            self._write(f"\n## {self._clock()} — reconnected\n{settings}\n")
+            now = datetime.now()
+            self._write(f"\n## {now:%H:%M:%S} — reconnected\n{settings}\n")
+            self._write(f"\n{at_note(now)}\n")
             return
         started = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         line = f"started {started} · {settings}"

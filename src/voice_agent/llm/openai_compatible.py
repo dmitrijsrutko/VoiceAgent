@@ -20,7 +20,13 @@ from openai.types.shared_params.response_format_json_object import ResponseForma
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError, ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
+from voice_agent.llm.base import (
+    MAX_OUTPUT_TOKENS,
+    OPENING,
+    Effort,
+    Usage,
+    refuse_silent_reply,
+)
 from voice_agent.llm.http import http_client, record_call
 
 
@@ -77,6 +83,8 @@ def to_openai_messages(
     is stateless, so the entire history goes up each time.
     """
     payload: list[ChatCompletionMessageParam] = [{"role": "system", "content": system}]
+    if messages and messages[0].role == "assistant":
+        payload.append({"role": "user", "content": OPENING})
     for message in messages:
         if message.role == "user":
             payload.append({"role": "user", "content": message.content})
@@ -163,7 +171,9 @@ class OpenAICompatibleLLM:
                 if usage is not None:
                     usage.finish_reason = first.get("finish_reason") or usage.finish_reason
                     thought = (first.get("delta") or {}).get("reasoning_content")
-                    usage.reasoning_chars += len(thought) if isinstance(thought, str) else 0
+                    if isinstance(thought, str):
+                        usage.reasoning_chars += len(thought)
+                        usage.reasoning += thought
                 if delta:
                     wrote = True
                     yield delta

@@ -19,7 +19,7 @@ from dataclasses import dataclass
 from voice_agent import timing, trace
 from voice_agent.conversation import Conversation, Message
 from voice_agent.decline import DECLINE, is_decline
-from voice_agent.errors import VoiceAgentError
+from voice_agent.errors import SilentReplyError, VoiceAgentError
 from voice_agent.llm import LLM
 from voice_agent.llm.base import Usage
 from voice_agent.streams import closing
@@ -206,6 +206,13 @@ class Initiative:
                 trace_id=self._conversation.id,
             ):
                 reply = await self._ask(nudge, usage)
+        except SilentReplyError as exc:
+            # Not a decline, which is said with the sentinel, and not an outage:
+            # the model thought and sent nothing. Its own name, so the page
+            # calls it neither.
+            logger.info("the model thought and sent nothing: %s", exc)
+            await self._note(index, quiet, "silent", started, usage)
+            return
         except VoiceAgentError as exc:
             # Reported: a clock failing silently looks like one choosing silence.
             # The rung stays spent, so an outage is not a retry loop.

@@ -24,6 +24,7 @@
   7.200  >   echo_ignored stage='final' text='Riga is the capital of Latvia.'
   7.680  >   floor state='yielded' agent=True
   9.630  <   playback off
+  9.632  >   mic_level
 
 assistant: Hi.
      user: What is the capital of Latvia?

@@ -39,24 +39,32 @@ class Traced:
             # `closing`, not a bare `async for`: closing this wrapper does not
             # close what it wraps, and the provider's stream is billed until it
             # is closed.
-            async with closing(self._inner.stream(system, messages, counted)) as inner:
-                async for fragment in inner:
-                    produced.append(fragment)
-                    yield fragment
-            trace.event(
-                "llm.reply",
-                {
-                    "text": "".join(produced),
-                    "gen_ai.usage.input_tokens": counted.prompt_tokens,
-                    "gen_ai.usage.output_tokens": counted.output_tokens,
-                    "cached_tokens": counted.cached_tokens,
-                    "accepted_ms": counted.accepted_ms,
-                    "connect_ms": counted.connect_ms,
-                    "attempts": counted.attempts,
-                    "finish_reason": counted.finish_reason,
-                    "reasoning_chars": counted.reasoning_chars,
-                },
-            )
+            # `finally`: a reply refused as silent raises from inside the stream,
+            # and its reasoning is the one most worth reading.
+            try:
+                async with closing(self._inner.stream(system, messages, counted)) as inner:
+                    async for fragment in inner:
+                        produced.append(fragment)
+                        yield fragment
+            finally:
+                self._reply(produced, counted)
+
+    def _reply(self, produced: list[str], counted: Usage) -> None:
+        trace.event(
+            "llm.reply",
+            {
+                "text": "".join(produced),
+                "gen_ai.usage.input_tokens": counted.prompt_tokens,
+                "gen_ai.usage.output_tokens": counted.output_tokens,
+                "cached_tokens": counted.cached_tokens,
+                "accepted_ms": counted.accepted_ms,
+                "connect_ms": counted.connect_ms,
+                "attempts": counted.attempts,
+                "finish_reason": counted.finish_reason,
+                "reasoning_chars": counted.reasoning_chars,
+                "reasoning": counted.reasoning,
+            },
+        )
 
     def _request(self, system: str, messages: Sequence[Message]) -> dict[str, object]:
         """OpenTelemetry's GenAI attribute names where they have settled, so

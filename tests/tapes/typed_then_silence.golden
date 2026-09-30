@@ -4,12 +4,14 @@
   0.520  <   listen_start
   0.520  >   listening active=True
   3.030  <   playback off
+  3.040  >   mic_level
   4.020  <   typed 'What is the capital of Latvia?'
   4.020  llm ask 'What is the capital of Latvia?'
   4.700  >   reply_end ttft_ms=500 text='Riga. It sits on the Baltic.'
   4.700  >   audio_end seconds=1.68 first_audio_ms=650
   4.710  <   playback on
   6.410  <   playback off
+  6.432  >   mic_level
  12.150  llm ask '[This is not the other person speaking. It is you…'
  12.680  >   initiative rung=1 decision='declined'
  21.680  llm ask '[This is not the other person speaking. It is you…'
@@ -18,12 +20,14 @@
  22.540  >   audio_end seconds=2.1 first_audio_ms=150
  22.580  <   playback on
  24.700  <   playback off
+ 24.704  >   mic_level
  53.390  llm ask '[This is not the other person speaking. It is you…'
  54.160  >   initiative rung=3 decision='spoke' line="I'll stay quiet now; start again whenever you like."
  54.160  >   reply_end initiative=3 text="I'll stay quiet now; start again whenever you like."
  54.310  >   audio_end seconds=3.06 first_audio_ms=150
  54.350  <   playback on
  57.430  <   playback off
+ 57.440  >   mic_level
 
 assistant: Hi, I'm a test agent. What shall we talk about?
      user: What is the capital of Latvia?

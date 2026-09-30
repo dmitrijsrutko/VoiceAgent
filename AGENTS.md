@@ -203,6 +203,11 @@ Add dependencies with `uv add` (`--dev` for tooling). Never hand-edit `uv.lock`.
 - **Audio is personal data.** Nothing persists audio; a chapter that does says
   where it goes, how long it lives and how it is deleted. Log metadata and
   timings freely, not raw audio or full transcripts by default.
+- **The trace is always on, in production too** (`VOICE_AGENT_TRACE`), with
+  whole prompts, replies and the model's reasoning: it is how a live failure
+  is explained, and turning it off left 13 empty replies unexplainable. It
+  lives beside the conversation records, which hold the same words, and
+  `--purge-sessions` deletes both. Never switch it off to keep words out of it.
 - A chapter that lets the model act in the world (tools, transfers, payments)
   adds the confirmation boundary around it in the same chapter.
 

@@ -38,7 +38,7 @@ from starlette.types import Scope
 
 from voice_agent import admin, judge, roles, timing, trace, vad
 from voice_agent.backends import Backends
-from voice_agent.channel import Channel
+from voice_agent.channel import Channel, page_event
 from voice_agent.config import DEFAULT_GREETING, Settings, build_prompt, load_settings
 from voice_agent.conversation import Conversation, Message
 from voice_agent.errors import ConfigError, SessionNotFoundError, VoiceAgentError
@@ -291,7 +291,9 @@ class Agent:
                 if listener
                 else None
             ),
-            "recording": self.record_dir is not None,
+            # A trace holds the same words as a record (AGENTS.md §10), so either
+            # one means the page must say it is being written down.
+            "recording": self.record_dir is not None or trace.current() is not None,
             "choices": self.backends.choices(engine, ears, role, voice),
         }
 
@@ -657,6 +659,8 @@ async def handle_text(
     except (ValueError, KeyError, TypeError):
         await channel.send_json({"type": "error", "message": "malformed message"})
         return
+    if isinstance(payload, dict):
+        page_event("in", payload)
 
     if kind == "playback":
         # The user is not expected to speak for however long the audio lasts —

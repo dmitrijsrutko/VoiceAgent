@@ -1,8 +1,10 @@
 """The technical trace: the span tree, the bodies, and the secrets that must
 never reach it."""
 
+import asyncio
 import json
 import logging
+from collections.abc import AsyncIterator, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,11 @@ from fastapi.testclient import TestClient
 from tests.conftest import FakeLLM, FakeSTT, FakeTTS, receive
 from tests.test_server import start
 from voice_agent import trace
+from voice_agent.channel import page_event
+from voice_agent.conversation import Message
+from voice_agent.errors import SilentReplyError
+from voice_agent.llm.base import Usage
+from voice_agent.llm.traced import Traced
 from voice_agent.server import create_app
 from voice_agent.sessions import SessionStore
 
@@ -109,6 +116,87 @@ def test_a_conversation_traces_the_prompt_and_the_reply(traced: Any, tmp_path: P
     assert reply["gen_ai.usage.output_tokens"] > 0
     turn = next(w for w in written if w.get("name") == "turn" and w["kind"] == "span.start")
     assert llm_start["parent"] == turn["span"]
+
+
+def test_what_the_page_is_sent_and_says_back_is_in_the_trace(traced: Any, tmp_path: Path) -> None:
+    """At the millisecond, under the conversation: the record's headings are
+    whole seconds. Tokens and partials are traced elsewhere; a client field
+    cannot relabel the line it lands on."""
+    client = TestClient(
+        create_app(
+            llm=FakeLLM(["the answer"]),
+            tts=FakeTTS(),
+            stt=FakeSTT(script=[]),
+            store=SessionStore(),
+            greeting="",
+            sessions_dir=tmp_path / "s",
+        )
+    )
+    key = start(client)
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        receive(socket)
+        socket.send_json({"type": "user_message", "text": "the question"})
+        while receive(socket).get("type") != "reply_end":
+            pass
+        socket.send_json({"type": "playback", "active": False, "trace": "forged", "x": [1]})
+        socket.send_json({"type": "user_message", "text": "x" * 2000})
+        while receive(socket).get("type") != "reply_end":
+            pass
+
+    written = lines(traced)
+    out = [w for w in written if w["kind"] == "page.out"]
+    into = [w for w in written if w["kind"] == "page.in"]
+    assert "reply_end" in {w["type"] for w in out}
+    assert not {"delta", "transcript"} & {w["type"] for w in out}
+    playback = next(w for w in into if w["type"] == "playback")
+    assert playback["active"] is False
+    assert playback["trace"] == key  # the conversation's, not the page's
+    assert "x" not in playback  # client-supplied: scalars only
+    assert max(len(w.get("text", "")) for w in into) == 500
+    assert all(w["trace"] == key for w in out + into)
+
+
+def test_frames_traced_elsewhere_or_bulky_are_left_out(traced: Any) -> None:
+    """`marks` repeats every character's timing per chunk, `floor` is traced by
+    the mic, and `ready`'s history is the whole conversation on every connect."""
+    history = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    page_event("out", {"type": "marks", "from_ms": 0, "ends_ms": [1, 2, 3]})
+    page_event("out", {"type": "floor", "state": "speaking"})
+    page_event("out", {"type": "ready", "history": history, "ended": False})
+
+    written = [w for w in lines(traced) if w["kind"] == "page.out"]
+    assert [w["type"] for w in written] == ["ready"]
+    assert "history" not in written[0] and written[0]["history_messages"] == 2
+
+
+class ThoughtOnly(FakeLLM):
+    """Thinks, then answers nothing: what DeepSeek did to an echoed turn."""
+
+    async def stream(
+        self, system: str, messages: Sequence[Message], usage: Usage | None = None
+    ) -> AsyncIterator[str]:
+        if usage is not None:
+            usage.output_tokens, usage.finish_reason = 140, "stop"
+            usage.reasoning = "The user just repeated my own words back."
+        for _ in ():  # an async generator that yields nothing
+            yield ""
+        raise SilentReplyError("deepseek sent no text")
+
+
+def test_a_silent_reply_still_leaves_its_reasoning_in_the_trace(traced: Any) -> None:
+    """Seen live: 13 empty replies nobody could explain, because the one reply
+    the trace skipped was the one that raised."""
+
+    async def ask() -> None:
+        async for _ in Traced(ThoughtOnly([])).stream("system", [Message("user", "hi")]):
+            pass
+
+    with pytest.raises(SilentReplyError):
+        asyncio.run(ask())
+
+    reply = next(w for w in lines(traced) if w["kind"] == "llm.reply")
+    assert reply["reasoning"] == "The user just repeated my own words back."
+    assert (reply["text"], reply["finish_reason"]) == ("", "stop")
 
 
 @pytest.mark.parametrize(

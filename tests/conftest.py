@@ -77,6 +77,30 @@ class FakeLLM:
             self.active -= 1
 
 
+class Scripted(FakeLLM):
+    """Each call plays the next step: a reply and why the stream ended, or an
+    exception, the way an adapter reports it."""
+
+    def __init__(self, steps: Sequence[tuple[str, str] | Exception]) -> None:
+        super().__init__()
+        self.steps = list(steps)
+
+    async def stream(
+        self, system: str, messages: Sequence[Message], usage: Usage | None = None
+    ) -> AsyncIterator[str]:
+        self.seen.append(list(messages))
+        step = self.steps[len(self.seen) - 1]
+        if usage is not None:
+            usage.output_tokens = 10
+            usage.reasoning_chars += 5  # as an adapter does: added to, per call
+        if isinstance(step, Exception):
+            raise step
+        text, finish = step
+        if usage is not None:
+            usage.finish_reason = finish
+        yield text
+
+
 @pytest.fixture(autouse=True)
 def _sessions_in_tmp(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """No test writes a conversation or a trace into the working tree.

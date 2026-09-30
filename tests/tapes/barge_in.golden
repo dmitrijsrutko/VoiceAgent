@@ -21,6 +21,7 @@
   6.920  <   playback off (cut)
   6.920  <   interrupted 1 played 2830ms
   6.920  >   truncated played_ms=2830 heard_chars=45 chars=131
+  6.944  >   mic_level
   7.520  >   floor state='micro_pause'
   7.904  >   floor state='pause'
   8.300  >   transcript final=True text='And Estonia?'
@@ -30,6 +31,7 @@
   8.950  >   audio_end seconds=0.48 first_audio_ms=650
   8.990  <   playback on
   9.490  <   playback off
+  9.504  >   mic_level
 
 assistant: Hi.
      user: What is the capital of Latvia?

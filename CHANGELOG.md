@@ -14,6 +14,119 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 30 — Millisecond observability: the conversation's events and the mic's level, no audio
+
+Tracing the empty DeepSeek replies and the echo turns hit three walls: the
+record's headings are whole seconds (`scripts/echo_eval.py` placed the echo
+window to ±1 s); the trace had the model calls, recognition and floor, but not
+what the page was sent or said back; and nothing showed whether the agent's
+voice reached the microphone — echo was inferred from matching words. Audio
+recording would answer all three and is set aside (AGENTS.md §10): this
+chapter records times and a *level*, never a sample.
+
+**What changed**
+- `channel.py`: every frame to the page is a `page.out` trace event, bar
+  those traced already (`delta`, `transcript`, `floor`) and `marks`, which
+  repeats every character's timing; `ready` gives its history's length only.
+  `server.handle_text`: every message from the page is a `page.in` — scalars
+  only, strings cut to 500, and no field may relabel its line (`trace`, `span`).
+- `level.py` (new): RMS in dBFS per 250 ms of mic audio; windows during the
+  agent's voice, and a quiet baseline (last 10 s with nobody speaking). A window
+  is one side or the other: mixed, one loud frame read a quiet window as -13
+  dBFS instead of -63.
+- `mic.py`: each frame is tagged at arrival with whether the agent was audible,
+  and measured after the VAD. While it is, a `mic.level` trace event per
+  window; when the frames show its voice stopped, one `mic_level` frame:
+  `dbfs_p50/p95/max`, `baseline_dbfs`, `windows`, `ended_at` (ms, as the page
+  reported). A frame, so the record, trace and timeline all take it; the page
+  ignores it and a reload does not redraw it. A failure in measuring turns
+  the level off for the session and never stops the floor, which runs in the
+  same loop.
+- `record.py`: every block's first note is `at HH:MM:SS.mmm` (after the settings
+  line on a reconnect); headings are
+  unchanged, since the judge, ledger and echo_eval parse them. `ledger` skips
+  the note when it takes a session's first words.
+- `scripts/echo_eval.py`: uses `at` and `ended_at` for ms gaps where a record
+  has them, and shows the mic level beside each case; old records read as before.
+
+**Design decisions**
+- A level, not audio: whether the voice leaked shows as the mic during the
+  voice over the baseline, with nothing anyone said kept. Rejected for now:
+  owner-only audio, a chapter of its own if levels are not enough.
+- The agent's state is taken when a frame *arrives*, and a voice ends where the
+  frames say: the first version read the hold when a queued frame was
+  processed, and the test for it caught a voice's frames counted as quiet.
+- The `at` note, not `HH:MM:SS.mmm` headings: three parsers read headings.
+
+**Latency impact** — none on the reply path. RMS is one numpy dot product per
+32 ms frame on the hearing task, after the VAD; not measured beyond that.
+
+**Deliberately not done** — the page does not draw `mic_level`; the trace has
+no expiry (estimated, not measured: about 1 MB an hour, `docs/DEPLOY.md`); echo is not yet judged by
+level, which needs levels from live echo first.
+
+**Verification** — `uv run verify`; tests for dBFS against a known sine,
+windows and baseline (`test_level.py`), the voice's report through `Mic`
+(`test_mic.py`), page events in the trace (`test_trace.py`) and the `at` and
+`mic_level` notes (`test_record.py`); tapes changed by `mic_level` lines only.
+`echo_eval.py` run on a synthetic ms record gave the right gap (+0.8 s) after a
+fix it exposed. **Not yet exercised live**: a spoken conversation on speakers.
+
+## Fix — DeepSeek's empty replies: the history opens with the user, and the trace is on
+
+"deepseek sent no text … finish_reason stop" hit 13 live turns in 4 sessions,
+8 of them in one conversation after the v65 deploy, and the user heard nothing.
+Nothing said why: the production trace had been off since 2026-09-23, and the
+adapter kept only the length of the reasoning.
+
+- **Cause, found by replay.** The live 23:46 turn, replayed against
+  `deepseek-flash` at `high` with the record's own prompt (hash `ccb6b62`), was
+  silent 5 times in 18. In every silent reply whose reasoning was read (1 in
+  full and 2 in part here, 2 more in full on the 19:30 echo turn) the answer
+  was drafted, and then the stream ended with no text: DeepSeek dropping it,
+  not the model choosing silence. The same history behind a `(call connected)`
+  user turn: 0 in 15. Merging the two agent lines it opened with did not help
+  (3 in 15). The
+  greeting is left out of the context, so a conversation whose first line was
+  unprompted, or a greeting resumed, opened with the agent: that is every
+  failing session. `to_openai_messages` now opens with the same user turn the
+  Anthropic adapter always sent (`OPENING`, now in `llm/base.py`).
+- **One more ask on a silent reply** (`turn.once_more_if_silent`). If it is
+  silent again the question stays in the history; dropping it had lost a live
+  question ("any language?", asked twice) and left agent lines back to back.
+  The retry gets its own `Usage`, so its trace shows its own reasoning; the
+  turn reports it with the refused call's tokens added. A turn silent twice is
+  still billed and reports no tokens, as any failed turn did before.
+- **An unprompted line that comes back empty is `silent`**, not `failed` (an
+  outage) or `declined` (which is said with the sentinel).
+- **Echo after the voice stopped.** A spoken turn committed within
+  `ECHO_WINDOW_SECONDS` of the agent's voice ending — as the browser said, or as
+  cut off, with no playback grace — is dropped when it is that reply's words in
+  its order, 5 words or more (`echo.is_replay`). Live, two whole lines came back
+  as turns, most likely from a second tab (two sockets were open 23:45:44–
+  23:46:34). A typed turn no longer uses up the judgement of an utterance still
+  being heard. Tape: `echo_after_voice`.
+  *Measured* by `scripts/echo_eval.py` over 599 archived spoken turns that came
+  after the agent's voice: it drops 3, all echoes (23:46:08, 23:46:24 and a
+  greeting), and no real turn. A first, order-blind version (`is_echo_final`,
+  window counted with the 10 s playback grace) also dropped a real question,
+  "Никто не делает оливье?". Every real echo was 7+ words; answers repeating
+  one option of an either-or question are 2–4, hence the 5. Labelled cases from
+  the owner's own sessions are a fixture (`tests/fixtures/echo_real.json`).
+  Still missed: 2 echoes that cut the voice off (09-29 19:30:53 and a greeting)
+  go through the barge-in check, which is unchanged.
+- **The trace is always on in production** (`VOICE_AGENT_TRACE=/data/traces`,
+  AGENTS.md §10), with the reasoning text (`Usage.reasoning`), and an
+  `llm.reply` is written even for a call that raised — before, the silent calls
+  were exactly the ones it skipped. `--purge-sessions` deletes traces too, and
+  `scripts/pull-fly.sh` archives them. The page says it is being written down
+  when either records or the trace are on. The Anthropic adapter still records
+  no thinking text.
+- **A verdict section the judge left out is not drawn.** The 23:51 ruling had
+  no `persuasion`, and the page read "Did it land? Moved the advocate: ."
+  (`verdict.js` drew every section; the record already skipped empty ones).
+  Still optional in `judge.parse`: a missing section is not worth a 30 s retry.
+
 ## Chapter 29 — The admin page: one private look at the server, its spend and every session
 
 The owner could see how the public instance was used only by `fly ssh` and

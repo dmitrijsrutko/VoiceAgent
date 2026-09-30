@@ -20,7 +20,13 @@ from anthropic.types import (
 from voice_agent.config import require_env
 from voice_agent.conversation import Message
 from voice_agent.errors import ConfigError, ProviderError
-from voice_agent.llm.base import MAX_OUTPUT_TOKENS, Effort, Usage, refuse_silent_reply
+from voice_agent.llm.base import (
+    MAX_OUTPUT_TOKENS,
+    OPENING,
+    Effort,
+    Usage,
+    refuse_silent_reply,
+)
 from voice_agent.llm.http import http_client, record_call
 
 ANTHROPIC_API_KEY = "ANTHROPIC_API_KEY"
@@ -66,10 +72,6 @@ CACHE_THROUGH_LAST: CacheControlEphemeralParam = {"type": "ephemeral"}
 Unlike the OpenAI-compatible backends, Anthropic caches only what is explicitly
 marked. With only the system prompt marked, every turn re-processed the whole
 conversation."""
-
-OPENING = "(call connected)"
-"""The user turn the API requires before the agent's greeting. Fixed text, so
-the start of every conversation's cached prefix is identical."""
 
 
 def cacheable(system: str) -> list[TextBlockParam]:

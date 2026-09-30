@@ -10,11 +10,11 @@ import pytest
 from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
-from tests.conftest import FakeLLM, FakeSTT, FakeTTS, pcm_for, receive
+from tests.conftest import FakeLLM, FakeSTT, FakeTTS, Scripted, pcm_for, receive
 from voice_agent import prompts
 from voice_agent import turn as turn_module
 from voice_agent.conversation import Message
-from voice_agent.errors import ConfigError, ProviderError
+from voice_agent.errors import ConfigError, ProviderError, SilentReplyError
 from voice_agent.llm.base import Usage
 from voice_agent.server import create_app
 from voice_agent.session import is_exit_command
@@ -232,6 +232,61 @@ def test_a_failed_turn_rolls_back_the_user_message(store: SessionStore) -> None:
     assert kind == "error"
     assert "provider exploded" in str(frames[-1]["message"])
     assert store.get(key).messages == []
+
+
+def test_a_silent_reply_is_asked_for_once_more(store: SessionStore) -> None:
+    """DeepSeek at effort high sometimes thinks and sends no text; asked again,
+    it usually answers."""
+    llm = Scripted([SilentReplyError("deepseek sent no text"), ("Here it is.", "stop")])
+    app = create_app(llm=llm, store=store, voice=False, ears=False, greeting="")
+    client = TestClient(app)
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "any language?"})
+        kind, frames = drain(socket, audio=False)
+
+    assert kind == "reply_end"
+    assert len(llm.seen) == 2
+    assert [m.content for m in store.get(key).messages] == ["any language?", "Here it is."]
+    end = next(f for f in frames if f["type"] == "reply_end")
+    assert end["output_tokens"] == 20  # the refused call was billed too
+
+
+def test_a_retry_reports_its_own_call_and_both_bills() -> None:
+    """The adapter adds reasoning into the `Usage` it is given: shared, the
+    retry's trace and error would carry both calls' thinking run together."""
+    llm = Scripted([SilentReplyError("deepseek sent no text"), ("Here it is.", "stop")])
+    usage = Usage()
+
+    async def run() -> str:
+        def ask(into: Usage = usage) -> AsyncIterator[str]:
+            return llm.stream("system", [Message("user", "hi")], into)
+
+        stream = turn_module.once_more_if_silent(ask(), ask, usage, "test")
+        return "".join([fragment async for fragment in stream])
+
+    assert asyncio.run(run()) == "Here it is."
+    assert (usage.reasoning_chars, usage.finish_reason) == (5, "stop")
+    assert usage.output_tokens == 20
+
+
+def test_a_reply_silent_twice_keeps_the_question(store: SessionStore) -> None:
+    """Dropping it lost a live question and left the agent's lines back to back."""
+    silent = SilentReplyError("deepseek sent no text")
+    llm = Scripted([silent, silent])
+    app = create_app(llm=llm, store=store, voice=False, ears=False, greeting="")
+    client = TestClient(app)
+    key = start(client)
+
+    with client.websocket_connect(f"/ws/{key}") as socket:
+        socket.receive_json()
+        socket.send_json({"type": "user_message", "text": "any language?"})
+        kind, _ = drain(socket)
+
+    assert kind == "error"
+    assert [m.content for m in store.get(key).messages] == ["any language?"]
 
 
 def test_an_unknown_key_cannot_open_a_socket(client: TestClient) -> None:

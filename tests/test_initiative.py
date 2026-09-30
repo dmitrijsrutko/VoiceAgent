@@ -11,9 +11,10 @@ import asyncio
 
 import pytest
 
-from tests.conftest import FakeLLM
+from tests.conftest import FakeLLM, Scripted
 from voice_agent.conversation import Conversation
 from voice_agent.decline import DECLINE
+from voice_agent.errors import SilentReplyError
 from voice_agent.initiative import Initiative, Rung, nudge_prompt, spoken_line
 
 WAIT = 2.0
@@ -235,6 +236,18 @@ async def test_a_failed_rung_is_still_spent() -> None:
         await initiative.tick()
 
     assert len(clock.reports) == len(LADDER)
+
+
+async def test_a_silent_reply_is_neither_a_decline_nor_a_failure() -> None:
+    """Replayed, DeepSeek's reasoning had its line ready and then it sent
+    nothing: calling that "declined" or an outage would both mislead."""
+    llm = Scripted([SilentReplyError("deepseek sent no text")])
+    initiative, clock = clock_for(llm, quiet=5.5)
+
+    await initiative.tick()
+
+    assert clock.spoken == []
+    assert clock.decisions() == ["silent"]
 
 
 async def test_an_empty_ladder_never_starts_a_clock() -> None:

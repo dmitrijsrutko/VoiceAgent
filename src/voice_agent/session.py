@@ -235,7 +235,7 @@ class Session:
             case Playback(active):
                 self.playback(active)
             case Typed(text):
-                await self.submit(text)
+                await self.submit(text, typed=True)
             case Speak(line, rung):
                 await self.speak(line, rung)
             case HoldOver(hold):
@@ -340,6 +340,23 @@ class Session:
             self._resumes += 1
             due = ResumeDue(submits, text, self._resumes)
             self._resume = (self._resumes, self._after(RESUME_AFTER_SECONDS, due))
+
+    def _is_echo(self, text: str, over: tuple[str, float, bool] | None) -> bool:
+        """Whether a committed spoken turn is plainly the agent's own voice.
+
+        Heard over the voice, it is judged against what the voice was saying,
+        and only if every partial read as echo. Heard after it stopped — a
+        speaker's tail, or a second tab on the same conversation — only as a
+        run of that reply's words in order (`echo.is_replay`).
+        """
+        if over is not None:
+            recent = timing.now() - over[1] <= ECHO_WINDOW_SECONDS
+            return recent and over[2] and echo.is_echo_final(text, over[0])
+        voice = self._voice
+        stopped = voice.stopped_at() if voice is not None else None
+        if voice is None or stopped is None or timing.now() - stopped > ECHO_WINDOW_SECONDS:
+            return False
+        return echo.is_replay(text, voice.text)
 
     async def _echo_ignored(self, text: str, stage: str) -> None:
         """Reported once per utterance while it is heard, and again if it was
@@ -513,19 +530,21 @@ class Session:
         if hold is not None:
             hold[1].cancel()
 
-    async def submit(self, text: str, merged: int = 1) -> None:
+    async def submit(self, text: str, merged: int = 1, typed: bool = False) -> None:
         """Start a turn, spoken or typed alike. Returns once it has *started*,
         so the caller keeps reading while the reply streams."""
         if self.conversation.ended:
             return  # a recognizer's last commit can land after the end
-        over, self._over = self._over, None
-        self._echo_noted = False
-        recent = over is not None and timing.now() - over[1] <= ECHO_WINDOW_SECONDS
-        if recent and over is not None and over[2] and echo.is_echo_final(text, over[0]):
-            # Its own voice, committed as a turn. Answered, it would be the
-            # agent replying to itself.
-            await self._echo_ignored(text, "final")
-            return
+        if not typed:
+            # Typed text is never echo, and must not use up the judgement of an
+            # utterance still being heard.
+            over, self._over = self._over, None
+            self._echo_noted = False
+            if self._is_echo(text, over):
+                # Its own voice, committed as a turn. Answered, it would be the
+                # agent replying to itself.
+                await self._echo_ignored(text, "final")
+                return
         self._submits += 1
         self._initiative.reset()  # the user spoke: the silence budget starts over
         if is_exit_command(text):

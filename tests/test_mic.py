@@ -8,6 +8,8 @@ for.
 """
 
 import asyncio
+import json
+import re
 import wave
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -16,9 +18,10 @@ import pytest
 
 from tests.conftest import FakeSTT
 from voice_agent import mic as mic_module
-from voice_agent import timing
+from voice_agent import timing, trace
 from voice_agent.events import Final, FloorChanged, MicEvent, NewSession
 from voice_agent.floor import Transition
+from voice_agent.level import FLOOR_DBFS
 from voice_agent.mic import Mic
 from voice_agent.stt.base import Transcript
 from voice_agent.vad import WINDOW_BYTES
@@ -368,6 +371,65 @@ async def test_the_floor_reaches_the_page_as_the_user_speaks_and_pauses() -> Non
     floors = [f for f in channel.frames if f["type"] == "floor"]
     assert [f["state"] for f in floors[:3]] == ["speaking", "micro_pause", "pause"]
     assert all(f["agent"] is True for f in floors)
+    await mic.stop()
+
+
+async def test_a_voice_that_stops_reports_the_mic_level_during_it(tmp_path: Path) -> None:
+    """While the agent is audible, the level goes into the trace every window;
+    once its voice stops, one frame says how loud the mic was during it. A
+    number per window, never the audio."""
+    writer = trace.open_trace(tmp_path)
+    trace.install(writer)
+    try:
+        channel = RecordingChannel()
+        mic = Mic(SilentSTT(), channel, never_called)  # type: ignore[arg-type]
+        await mic.start()
+        quiet = b"\x00" * WINDOW_BYTES
+        for _ in range(10):  # the room, before the voice
+            mic.feed(quiet)
+        mic.hold("playback", True)
+        for _ in range(20):
+            mic.feed(quiet)
+        mic.hold("playback", False)
+        mic.feed(quiet)  # the next frame reports it
+
+        level = await channel.wait_for(type="mic_level")
+        await mic.stop()
+    finally:
+        trace.install(None)
+        if writer is not None:
+            writer.close()
+
+    windows = level["windows"]
+    assert isinstance(windows, int) and windows >= 2  # 20 frames of 32 ms
+    assert level["dbfs_p50"] == FLOOR_DBFS
+    assert re.fullmatch(r"\d\d:\d\d:\d\d\.\d{3}", str(level["ended_at"]))
+    assert writer is not None
+    kinds = [json.loads(line)["kind"] for line in writer.path.read_text().splitlines()]
+    assert kinds.count("mic.level") == windows
+
+
+async def test_a_broken_level_never_silences_the_floor() -> None:
+    """The level is diagnostics; the floor is what turn-taking runs on."""
+
+    class Broken:
+        def add(self, pcm: bytes, agent: bool, speaking: bool) -> float | None:
+            raise ValueError("level exploded")
+
+        def voice_ended(self) -> None:
+            return None
+
+    channel = RecordingChannel()
+    mic = Mic(SilentSTT(), channel, never_called)  # type: ignore[arg-type]
+    await mic.start()
+    mic._level = Broken()  # type: ignore[assignment]  # a defect in the level
+
+    with wave.open(str(Path(__file__).parent / "fixtures" / "pause.wav")) as clip:
+        audio = clip.readframes(clip.getnframes())
+    for i in range(0, len(audio), WINDOW_BYTES):
+        mic.feed(audio[i : i + WINDOW_BYTES])
+
+    await channel.wait_for(type="floor", state="pause")
     await mic.stop()
 
 

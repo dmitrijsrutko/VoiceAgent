@@ -43,6 +43,9 @@ class Spoken:
     finished: bool = False
     """The browser has said it stopped: played to the end, or cut off."""
     interrupted_at: float | None = None
+    ended_at: float | None = None
+    """When the browser said it stopped, or it was cut off. None while playing,
+    or when the browser never said."""
 
     def add(self, chunk: AudioChunk) -> list[float]:
         """Record a chunk about to be sent. Returns the end times it adds to
@@ -94,6 +97,20 @@ class Spoken:
             self.playing = True
         elif self.playing:
             self.finished = True
+            if self.ended_at is None:
+                self.ended_at = timing.now()
+
+    def stopped_at(self) -> float | None:
+        """When its sound was over: as the browser said, or as cut off, or at
+        the end of the audio sent. Unlike `audible`, no grace: this bounds how
+        long after the voice a turn can still be its echo."""
+        if self.started_at is None:
+            return None
+        if self.ended_at is not None:
+            return self.ended_at
+        if self.interrupted_at is not None:
+            return self.interrupted_at
+        return self.started_at + pcm_seconds(self.sent_bytes)
 
     def estimate_played_ms(self) -> float:
         """How far playback got, assuming it started when the first audio was

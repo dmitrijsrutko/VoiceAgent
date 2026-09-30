@@ -12,12 +12,23 @@ test("a ruling shows the outcome, the split and every section", () => {
   const html = renderRuling(ruling);
   assert.match(html, /class="verdict lose"/);
   assert.match(html, /You 30<\/span><span class="adv">70 Advocate/);
-  for (const section of ["Your position", "Scorecard", "Moments", "How to improve", "Rematch brief"]) {
+  for (const section of ["Your position", "Scorecard", "Moments", "Did it land?", "How to improve", "Rematch brief"]) {
     assert.ok(html.includes(section), section);
   }
   assert.equal((html.match(/class="v-row"/g) ?? []).length, 10);
   assert.ok(html.includes("Пил по кругу"));
   assert.match(html, /Judged by DeepSeek V4\.1 Flash in 41 s/);
+});
+
+test("a section the judge left out is not drawn empty", () => {
+  // Seen live: a ruling with no "persuasion" read "Moved the advocate: ."
+  const { persuasion, position, ...rest } = ruling.verdict;
+  const partial = { ...ruling, verdict: { ...rest, position: { stated: "Тезис" } } };
+  const html = renderRuling(partial);
+  assert.ok(!html.includes("Did it land?"));
+  assert.ok(!html.includes("Moved the advocate"));
+  assert.match(html, /<dt>Stated<\/dt><dd>Тезис<\/dd><\/dl>/);
+  assert.ok(!html.includes("<dt>Held</dt>"));
 });
 
 test("a win is drawn as one", () => {

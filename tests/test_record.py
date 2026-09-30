@@ -5,6 +5,7 @@ is that tapping `Channel` records exactly what the browser was sent — a test
 that called `Record` directly would not check that bet.
 """
 
+import re
 from pathlib import Path
 from typing import Any
 
@@ -129,8 +130,10 @@ def test_a_reconnect_restates_what_it_runs_on(tmp_path: Path) -> None:
     converse(client, key, "after")
 
     lines = recorded(tmp_path).splitlines()
-    again = lines[next(i for i, line in enumerate(lines) if "reconnected" in line) + 1]
+    at = next(i for i, line in enumerate(lines) if "reconnected" in line)
+    again = lines[at + 1]
     assert again.startswith("role ") and "llm fake/fake-1" in again, again
+    assert re.fullmatch(r"`at \d\d:\d\d:\d\d\.\d{3}`", lines[at + 3]), lines[at + 3]
 
 
 def test_no_audio_ever_reaches_the_file(tmp_path: Path) -> None:
@@ -271,6 +274,35 @@ def test_the_audio_frame_count_belongs_to_one_reply(tmp_path: Path) -> None:
     record.close()
 
     assert "frames 1" in (tmp_path / "c.md").read_text()
+
+
+def test_every_block_says_its_millisecond_and_a_voice_its_mic_level(tmp_path: Path) -> None:
+    """Headings stay whole seconds, which every reader of records parses; the
+    millisecond lines a block up with the trace."""
+    record = Record(tmp_path / "c.md")
+    record.frame({"type": "reply_end", "text": "an answer"})
+    record.frame(
+        {
+            "type": "mic_level",
+            "dbfs_p50": -54.2,
+            "dbfs_p95": -41.0,
+            "dbfs_max": -33.5,
+            "baseline_dbfs": -61.0,
+            "windows": 36,
+            "ended_at": "23:46:07.512",
+        }
+    )
+    record.close()
+
+    text = (tmp_path / "c.md").read_text()
+    found = re.search(r"## (\d\d:\d\d:\d\d) — agent\n\n`at (\S+)`", text)
+    assert found is not None, "the `at` note comes straight after the heading"
+    heading, at = found.groups()
+    assert re.fullmatch(r"\d\d:\d\d:\d\d\.\d{3}", at) and at.startswith(heading)
+    assert (
+        "`mic_level: dbfs_p50 -54.2 · dbfs_p95 -41 · dbfs_max -33.5 · baseline_dbfs -61 · "
+        "windows 36 · ended_at 23:46:07.512`"
+    ) in text
 
 
 def test_a_reconnect_reopens_its_own_file_and_another_conversation_gets_one(

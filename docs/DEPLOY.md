@@ -121,9 +121,13 @@ On the 1 GB volume at `/data`:
   them on every deploy; this does not. Some warnings quote a few words of a
   reply.
 
-The span-tree trace is **off** here (`VOICE_AGENT_TRACE = "off"`): it holds whole
-prompts and replies, which AGENTS.md §10 keeps out of logs by default. Traces
-written before it was turned off may remain in `/data/traces`.
+- `/data/traces/*.jsonl` — the span-tree trace (`VOICE_AGENT_TRACE`), always
+  on (AGENTS.md §10): whole prompts, replies and the model's reasoning, one
+  file per server start. It is what explains a live failure; off from
+  2026-09-23 to 2026-09-30, it left 13 empty DeepSeek replies unexplained.
+  It grows with no expiry: an estimated 1 MB an hour of conversation, most of it the
+  page's messages and the mic level (Chapter 30). Check `du -sh /data/traces`
+  beside the sessions, and purge both when the volume fills.
 
 **No audio is ever written.** Binary frames are counted and discarded
 (Chapter 10).
@@ -132,19 +136,20 @@ Nothing expires. The delete is the one the CLI has always had:
 
 ```bash
 fly ssh console            # then, on the machine:
-#   uv run --no-sync voice-agent --purge-sessions   (it asks first, so not via -C)
-#   rm -rf /data/traces                              (older traces, if any)
+#   uv run --no-sync voice-agent --purge-sessions   (records and traces; it asks
+#                                                    first, so not via -C)
 #   rm -rf /data/logs                                (the log files)
 ```
 
 **Copies kept locally.** `scripts/pull-fly.sh` downloads Fly's log buffer, the
-log files and every session record into `fly-archive/` (gitignored). It runs
+log files, every session record and the traces into `fly-archive/` (gitignored). It runs
 before every deploy. A purge on the machine does not reach that copy: delete
 `fly-archive/` too.
 
-To run the public instance without recording anything, set
-`VOICE_AGENT_SESSIONS` to `off` in `fly.toml` as well. The
-page's notice follows the setting, so it cannot claim one while doing the other.
+To run the public instance without conversation records, set
+`VOICE_AGENT_SESSIONS` to `off` in `fly.toml`. The page's notice follows the
+setting, so it cannot claim one while doing the other. The trace stays on
+(AGENTS.md §10) and still holds the words.
 
 ## Running the image locally
 

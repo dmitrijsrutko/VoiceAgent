@@ -20,6 +20,7 @@
   5.490  <   playback on
   6.450  >   thought reason='reply' decision='thought' move='challenge' urgency=2 line='Everyone?'
   6.710  <   playback off
+  6.720  >   mic_level
 
 assistant: Hi.
      user: Remote work is better because everyone is more productive.

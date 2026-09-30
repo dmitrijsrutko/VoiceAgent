@@ -69,6 +69,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **28 — The judge.** The devil's advocate spars with wit and a little bite, and each conversation with it is a round: six minutes at most, an **⏹ End** button, and then a judge (DeepSeek V4.1 Flash at high effort by default, or Claude Opus 5.5 at medium) reads the timed transcript and rules. It gives win or lose, a split such as 40/60, the reasoning, a ten-point scorecard with quotes, the best and weakest moments, how to improve, a rematch brief, and a nickname and badge. It is drawn as a card under the transcript. `--judge RECORD` rules on a saved conversation offline.
 - **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
 - **29 — The admin page.** `/admin`, behind `VOICE_AGENT_ADMIN_KEY`, shows health, usage totals (since the deploy, 24 h, 7 days, all), ElevenLabs and DeepSeek balances, per-model/ears/voice/judge/role breakdowns, and every recorded session with its topic, score, visitor hash and a link to the live conversation or its record. All of it is read back from the session records. Each record now ends every connection with a `totals` line and carries a hashed visitor, never the address.
+- **30 — Millisecond observability, no audio.** The trace now holds every control message to and from the page (`page.out`, `page.in`) and the microphone's level every 250 ms while the agent speaks (`mic.level`). Each record block gets an `at HH:MM:SS.mmm` note, and each agent voice gets a `mic_level` note: the level during it against the quiet baseline, which is echo as a number. `scripts/echo_eval.py` uses both.
 
 ## Requirements
 
@@ -148,7 +149,8 @@ docs/                     ROADMAP.md (research), DEPLOY.md (runbook), history.md
 tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ the thinker replay's scripts;
                           tests/tapes/ whole conversations replayed on virtual time against golden transcripts,
                           each ending with what a judge would read; tests/fixtures/ a real record and ruling
-scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records into fly-archive/ (gitignored)
+scripts/pull-fly.sh       before a deploy: Fly's logs, the volume's records and traces into fly-archive/ (gitignored)
+scripts/echo_eval.py      what the echo rules would drop, over every archived conversation
 ```
 
 ## Deployment
@@ -156,8 +158,8 @@ scripts/pull-fly.sh       before a deploy: Fly's logs and the volume's records i
 One always-on machine, one region, one volume on Fly.io: conversations live in
 process memory, so a second instance would break links. [docs/DEPLOY.md](docs/DEPLOY.md) is the runbook and
 `fly.toml` the configuration. The public instance turns on the caps in
-`limits.py` and records conversations (never audio); the span-tree trace is off
-there.
+`limits.py`, records conversations (never audio) and keeps the span-tree trace,
+reasoning included, beside them on the volume.
 
 ## Roadmap
 

@@ -38,6 +38,25 @@ function moment(icon, title, m) {
     `<q>${escape(m.quote ?? m.objection)}</q><p>${escape(m.why)}</p></div>`;
 }
 
+// Every part of a verdict but the split, headline and reasoning is optional
+// (`judge.parse`): a section the judge left out is not drawn, rather than drawn
+// empty.
+const section = (title, body) => (body ? `<h4>${title}</h4>${body}` : "");
+
+function positionRows(position) {
+  const rows = [["Stated", position.stated], ["Held", position.survived], ["Fell", position.fell]]
+    .filter(([, text]) => text)
+    .map(([label, text]) => `<dt>${label}</dt><dd>${escape(text)}</dd>`).join("");
+  return rows && `<dl>${rows}</dl>`;
+}
+
+function landed(persuasion) {
+  const moved = persuasion.advocate_moved
+    ? `Moved the advocate: <b>${escape(persuasion.advocate_moved)}</b>. ` : "";
+  const audience = persuasion.audience ? escape(persuasion.audience) : "";
+  return moved || audience ? `<p>${moved}${audience}</p>` : "";
+}
+
 const list = (items) =>
   Array.isArray(items) && items.length ? `<ol>${items.map((i) => `<li>${escape(i)}</li>`).join("")}</ol>` : "";
 
@@ -99,22 +118,19 @@ export function renderRuling(ruling) {
     `<p>${escape(v.reasoning)}</p>` +
     statChips(ruling.stats) +
     (v.timing ? `<p class="v-muted">${escape(v.timing)}</p>` : "") +
-    `<h4>Your position</h4><dl>` +
-    `<dt>Stated</dt><dd>${escape(position.stated)}</dd>` +
-    `<dt>Held</dt><dd>${escape(position.survived)}</dd>` +
-    `<dt>Fell</dt><dd>${escape(position.fell)}</dd></dl>` +
-    `<h4>Scorecard</h4><div class="v-card">${cards}</div>` +
-    `<h4>Moments</h4>` +
-    moment("💪", "Best", v.moments?.best) +
-    moment("🩹", "Weakest", v.moments?.worst) +
-    moment("❓", "Left unanswered", v.moments?.unanswered) +
-    (fallacies ? `<h4>Fallacies</h4><ul>${fallacies}</ul>` : "") +
-    `<h4>Did it land?</h4><p>Moved the advocate: <b>${escape(persuasion.advocate_moved)}</b>. ` +
-    `${escape(persuasion.audience)}</p>` +
-    `<h4>How to improve</h4>${list(v.improve)}` +
-    `<h4>Rematch brief</h4>${list(rematch.prepare)}` +
-    (rematch.next_attack ? `<p><b>Next attack:</b> ${escape(rematch.next_attack)}</p>` : "") +
-    (rematch.missed_angle ? `<p><b>The angle you missed:</b> ${escape(rematch.missed_angle)}</p>` : "") +
+    section("Your position", positionRows(position)) +
+    section("Scorecard", cards && `<div class="v-card">${cards}</div>`) +
+    section("Moments",
+      moment("💪", "Best", v.moments?.best) +
+      moment("🩹", "Weakest", v.moments?.worst) +
+      moment("❓", "Left unanswered", v.moments?.unanswered)) +
+    section("Fallacies", fallacies && `<ul>${fallacies}</ul>`) +
+    section("Did it land?", landed(persuasion)) +
+    section("How to improve", list(v.improve)) +
+    section("Rematch brief",
+      list(rematch.prepare) +
+      (rematch.next_attack ? `<p><b>Next attack:</b> ${escape(rematch.next_attack)}</p>` : "") +
+      (rematch.missed_angle ? `<p><b>The angle you missed:</b> ${escape(rematch.missed_angle)}</p>` : "")) +
     `<div class="v-fun">` +
     (fun.nickname ? `<p>🎭 Your debating name: <b>${escape(fun.nickname)}</b></p>` : "") +
     (fun.crowd ? `<p>📣 ${escape(fun.crowd)}</p>` : "") +

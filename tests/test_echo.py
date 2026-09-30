@@ -7,6 +7,9 @@ by words nobody followed up, and 16 s of silence came after it.
 """
 
 import asyncio
+import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -14,8 +17,9 @@ from tests.test_barge_in import answer, speak_over, talking_agent
 from tests.test_session import RecordingChannel
 from voice_agent import session as session_module
 from voice_agent.conversation import Message
-from voice_agent.echo import is_echo_final, recent, verdict
+from voice_agent.echo import is_echo_final, is_replay, recent, verdict
 from voice_agent.heard import resume_from
+from voice_agent.session import ECHO_WINDOW_SECONDS
 
 pytestmark = pytest.mark.anyio
 
@@ -128,6 +132,34 @@ def test_a_turn_is_dropped_only_when_it_is_plainly_the_agents_own_words() -> Non
     assert not is_echo_final(quote, said)  # not enough to drop the turn
     assert is_echo_final("что стейк самая вкусная еда", said)
     assert not is_echo_final("вкус субъективен", said)  # too short to be sure
+
+
+def test_after_the_voice_only_a_run_of_its_words_is_its_echo() -> None:
+    """With no partial heard over the voice to vouch for echo, sharing words is
+    not enough: a short answer shares every word with a long reply."""
+    said = "Defeat already? You haven't heard my argument. So is it the colour, or just a long day?"
+
+    assert is_echo_final("It is the colour.", said)  # what the barge-in test would say
+    assert not is_replay("It is the colour.", said)  # an answer, in its own order
+    assert not is_replay("Just a long day, honestly, I am tired of it.", said)
+    assert is_replay("So is it the colour, or just a long day?", said)
+    # Answering an either-or question with one of its options, word for word.
+    assert not is_replay("Ещё в начале.", "Понял. Ты уже что-то создаёшь, или ты ещё в начале?")
+    assert not is_replay("just a long day", said)  # too short to be sure
+
+
+REAL = json.loads((Path(__file__).parent / "fixtures" / "echo_real.json").read_text("utf-8"))
+
+
+@pytest.mark.parametrize("case", REAL, ids=[c["source"] for c in REAL])
+def test_real_turns_after_the_voice_are_judged_as_labelled(case: dict[str, Any]) -> None:
+    """Turns from recorded conversations (the owner's own), labelled by hand.
+    `scripts/echo_eval.py` measures the rule over the whole archive; these are
+    the echoes it catches and the real answers closest to being dropped —
+    "Никто не делает оливье?" was dropped by a first, order-blind version."""
+    dropped = case["gap_s"] <= ECHO_WINDOW_SECONDS and is_replay(case["heard"], case["said"])
+
+    assert dropped == case["echo"]
 
 
 async def test_a_quote_of_the_agent_is_answered_not_dropped() -> None:

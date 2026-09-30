@@ -5,12 +5,14 @@ import asyncio
 import contextlib
 import logging
 from collections.abc import AsyncIterator, Callable, Iterator
+from datetime import datetime
 
 from voice_agent import timing, trace
 from voice_agent.channel import Channel
 from voice_agent.errors import VoiceAgentError
 from voice_agent.events import Final, FloorChanged, MicEvent, NewSession, Partial
 from voice_agent.floor import Floor, Transition
+from voice_agent.level import Level
 from voice_agent.stt import STT
 from voice_agent.stt.agreement import StablePrefix
 from voice_agent.timing import elapsed_ms
@@ -52,6 +54,11 @@ def human_seconds(value: float) -> str:
         minutes = int(value // 60)
         return f"{minutes} minute{'s' if minutes != 1 else ''}"
     return f"{value:.0f}s"
+
+
+Heard = tuple[bytes, float, bool]
+"""A frame for the VAD and the level: its audio, when it arrived, and whether
+the agent's voice was playing then."""
 
 
 class Mic:
@@ -101,7 +108,15 @@ class Mic:
         """The VAD handles 16 kHz only; other ears go without a floor."""
         self._vad: Detector | None = None
         self._floor = Floor(WINDOW_MS)
-        self._heard: asyncio.Queue[tuple[bytes, float] | None] | None = None
+        self._level = Level(VAD_SAMPLE_RATE)
+        self._voice_ended_at: str | None = None
+        """Wall clock, to the millisecond, when the page said the agent's voice
+        last stopped."""
+        self._agent_was = False
+        """Whether the last frame measured arrived during the agent's voice."""
+        self._measuring = True
+        """Off for the rest of a listening session once measuring has failed."""
+        self._heard: asyncio.Queue[Heard | None] | None = None
         self._hearing: asyncio.Task[None] | None = None
         self._began_at: float | None = None
         """When the VAD heard the current utterance begin; cleared by its first partial."""
@@ -150,6 +165,9 @@ class Mic:
         if self._hears:
             self._vad = self.detector()
             self._floor = Floor(WINDOW_MS)
+            self._level = Level(VAD_SAMPLE_RATE)
+            self._agent_was = False
+            self._measuring = True
             self._stopped_at = None
             self._utterance_over()
             self._heard = asyncio.Queue()
@@ -162,15 +180,16 @@ class Mic:
             self._last_frame_at = timing.now()
             self._frames.put_nowait(pcm)
             if self._heard is not None:
-                self._heard.put_nowait((pcm, self._last_frame_at))
+                # The agent's state as the frame arrived: by the time the queue
+                # reaches it, the voice may have stopped.
+                agent = "playback" in self._holds
+                self._heard.put_nowait((pcm, self._last_frame_at, agent))
 
-    async def _hear(
-        self, vad: Detector, frames: "asyncio.Queue[tuple[bytes, float] | None]"
-    ) -> None:
+    async def _hear(self, vad: Detector, frames: "asyncio.Queue[Heard | None]") -> None:
         """Run the VAD over the page's audio, in arrival order, and report each
         change of floor. Only the page's frames: keep-alive silence is ours."""
         while (item := await frames.get()) is not None:
-            pcm, arrived = item
+            pcm, arrived, agent = item
             try:
                 # Inline: ~0.1 ms a window, less than a hop to a worker thread costs.
                 probabilities = vad.probabilities(pcm)
@@ -181,6 +200,30 @@ class Mic:
             for probability in probabilities:
                 for change in self._floor.push(probability):
                     await self._report(change, arrived)
+            if self._measuring:
+                try:
+                    await self._measure(pcm, agent)
+                except Exception:
+                    # Diagnostics: a defect here must not take the floor with it.
+                    logger.exception("measuring the mic level failed; the level goes dark")
+                    self._measuring = False
+
+    async def _measure(self, pcm: bytes, agent: bool) -> None:
+        """The mic's level: every window in the trace while the agent is
+        audible, and once its voice stops, how loud the mic was during it
+        against the quiet baseline — its echo, as a number."""
+        level = self._level.add(pcm, agent, self._floor.state == "speaking")
+        if level is not None and agent:
+            trace.event("mic.level", {"dbfs": round(level, 1), "floor": self._floor.state})
+        # The voice ended where the frames say so: the hold is released at once,
+        # while frames heard before it may still be queued.
+        was, self._agent_was = self._agent_was, agent
+        if agent or not was:
+            return
+        ended, self._voice_ended_at = self._voice_ended_at, None
+        ended = ended or datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        if (summary := self._level.voice_ended()) is not None:
+            await self._channel.send_json({"type": "mic_level", **summary, "ended_at": ended})
 
     async def _report(self, change: Transition, arrived: float) -> None:
         # The frame's last sample arrived at `arrived`; the change began `lag_ms`
@@ -236,6 +279,8 @@ class Mic:
         answer.
         """
         was_free = not self._holds
+        if name == "playback" and not held and name in self._holds:
+            self._voice_ended_at = datetime.now().strftime("%H:%M:%S.%f")[:-3]
         self._holds.add(name) if held else self._holds.discard(name)
         if was_free and self._holds:
             self._held_since = timing.now()

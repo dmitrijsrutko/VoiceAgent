@@ -17,6 +17,7 @@
   3.776  >   floor state='yielded'
   3.790  <   playback on
   4.110  <   playback off
+  4.128  >   mic_level
   7.040  >   floor state='speaking'
   7.500  >   transcript text='what about'
   8.000  >   transcript text='what about'
@@ -34,6 +35,7 @@
  10.550  >   audio_end seconds=0.48 first_audio_ms=150
  10.590  <   playback on
  11.090  <   playback off
+ 11.104  >   mic_level
 
 assistant: Hi.
      user: What is the capital of Latvia?

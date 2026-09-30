@@ -8,7 +8,8 @@
 #   into fly-archive/logs/all.log.
 # - The app's own log file and the conversation records live on the volume
 #   and survive deploys, but not a deleted volume; they are mirrored into
-#   fly-archive/logs/volume/ and fly-archive/sessions/.
+#   fly-archive/logs/volume/ and fly-archive/sessions/, and the traces into
+#   fly-archive/traces/.
 #   `--purge-sessions` on the server does not reach this copy: delete it too
 #   (AGENTS.md §10).
 set -euo pipefail
@@ -24,8 +25,8 @@ cat "$archive"/logs/fly-*.log | sort -u > "$archive/logs/all.log"
 echo "logs: $(wc -l < "$archive/logs/fly-$stamp.log") lines pulled, $(wc -l < "$archive/logs/all.log") kept in all.log"
 
 remote="/tmp/sessions-$stamp.tgz"
-# `logs` only once the app has written one (VOICE_AGENT_LOGS).
-fly ssh console -C "sh -c 'cd /data && tar -czf $remote sessions \$(ls -d logs 2>/dev/null)'" > /dev/null
+# `logs` and `traces` only once the app has written them (VOICE_AGENT_LOGS, VOICE_AGENT_TRACE).
+fly ssh console -C "sh -c 'cd /data && tar -czf $remote sessions \$(ls -d logs traces 2>/dev/null)'" > /dev/null
 fly ssh sftp get "$remote" "$archive/sessions-$stamp.tgz" > /dev/null
 fly ssh console -C "rm -f $remote" > /dev/null
 unpacked="$archive/.unpack-$stamp"
@@ -37,6 +38,11 @@ if [ -d "$unpacked/logs" ]; then
   mkdir -p "$archive/logs/volume"
   cp -R "$unpacked/logs/." "$archive/logs/volume/"
   echo "volume log: $(cat "$archive"/logs/volume/voice-agent.log* | wc -l | tr -d ' ') lines in $archive/logs/volume/"
+fi
+if [ -d "$unpacked/traces" ]; then
+  mkdir -p "$archive/traces"
+  cp -R "$unpacked/traces/." "$archive/traces/"
+  echo "traces: $(ls "$archive/traces" | wc -l | tr -d ' ') files in $archive/traces/"
 fi
 rm -rf "$unpacked"
 echo "sessions: $(ls "$archive/sessions" | wc -l | tr -d ' ') records in $archive/sessions/"

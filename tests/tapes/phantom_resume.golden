@@ -19,11 +19,13 @@
   6.520  <   playback off (cut)
   6.520  <   interrupted 1 played 2430ms
   6.520  >   truncated played_ms=2430 heard_chars=38 chars=131
+  6.528  >   mic_level
   9.000  >   resumed chars=100
   9.000  >   reply_end resumed=True text='It sits on the Baltic Sea, at the mouth of the Daugava rive…'
   9.150  >   audio_end seconds=6.0 first_audio_ms=150
   9.190  <   playback on
  15.210  <   playback off
+ 15.232  >   mic_level
 
 assistant: Hi.
      user: What is the capital of Latvia?
