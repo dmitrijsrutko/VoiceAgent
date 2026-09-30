@@ -1,0 +1,50 @@
+  0.000  >   greeting text='Hi.'
+  0.150  >   audio_end seconds=0.18 first_audio_ms=150
+  0.190  <   playback on
+  0.220  <   listen_start
+  0.220  >   listening active=True
+  0.390  <   playback off
+  1.056  >   floor state='speaking'
+  1.400  >   transcript text='what is the'
+  2.000  >   transcript text='what is the capital of Latvia'
+  2.592  >   floor state='micro_pause'
+  2.976  >   floor state='pause'
+  3.400  >   transcript final=True text='What is the capital of Latvia?'
+  3.400  llm ask 'What is the capital of Latvia?'
+  3.872  >   floor state='yielded'
+  4.090  <   playback on
+  5.000  >   transcript text='네.'
+  5.000  >   echo_ignored stage='partial' text='네.'
+  5.010  >   reply_end ttft_ms=500 text='Riga is the capital of Latvia. It sits on the Baltic Sea, a…'
+  5.010  >   audio_end seconds=11.1 first_audio_ms=650
+  6.200  >   transcript text='Я так думаю.'
+  8.544  >   floor state='speaking' agent=True
+  8.900  >   transcript text='and Estonia'
+  8.900  >   interrupt id=1
+  8.920  <   playback off (cut)
+  8.920  <   interrupted 1 played 4830ms
+  8.920  >   truncated played_ms=4830 heard_chars=77 chars=185
+  8.928  >   mic_level
+  9.504  >   floor state='micro_pause'
+  9.888  >   floor state='pause'
+ 10.300  >   transcript final=True text='And Estonia?'
+ 10.300  llm ask 'And Estonia?'
+ 10.784  >   floor state='yielded'
+ 10.830  >   reply_end ttft_ms=500 text='Tallinn.'
+ 10.950  >   audio_end seconds=0.48 first_audio_ms=650
+ 10.990  <   playback on
+ 11.490  <   playback off
+ 11.520  >   mic_level
+
+assistant: Hi.
+     user: What is the capital of Latvia?
+assistant: Riga is the capital of Latvia. It sits on the Baltic Sea, at the mouth of the
+     user: And Estonia?
+assistant: Tallinn.
+
+what a judge would read:
+[00:00] ADVOCATE (spoke 0.2 s): "Hi."
+[00:01] YOU (answered after 0.7 s · spoke 1.3 s · 6 words): "What is the capital of Latvia?"
+[00:04] ADVOCATE (cut off by YOU after 4.8 s of 11.1 s): "Riga is the capital of Latvia. It sits on the Baltic Sea, at the mouth of the Daugava river. Its old town is a World Heritage site, and its Art Nouveau quarter is the largest in Europe."
+[00:09] YOU (started 0.3 s before the ADVOCATE finished (talked over it) · spoke 0.7 s · 2 words): "And Estonia?"
+[00:11] ADVOCATE (spoke 0.5 s): "Tallinn."

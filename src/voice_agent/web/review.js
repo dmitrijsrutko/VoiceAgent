@@ -5,7 +5,7 @@
 // `app.js` draws the entries.
 
 import {
-  audioLine, committedLine, initiativeLine, quietLine, replyLines, thoughtLine,
+  audioLine, committedLine, echoLine, initiativeLine, quietLine, replyLines, thoughtLine,
   truncatedLine, unpromptedLine,
 } from "./telemetry.js";
 
@@ -80,11 +80,9 @@ export function review(frames) {
       case "initiative":
         line(initiativeLine(msg), "note think thought");
         break;
-      case "echo_ignored": {
-        const what = msg.stage === "final" ? "not answered" : "not an interruption";
-        line(`🔁 heard its own voice (“${msg.text}”) — ${what}`, "note think telemetry");
+      case "echo_ignored":
+        line(echoLine(msg), "note think telemetry");
         break;
-      }
       case "thought":
         if (declined(msg)) {
           if (!quiet) quiet = { entry: line("", "note think thought"), count: 0 };

@@ -62,6 +62,14 @@ export function committedLine(msg) {
 
 export const gapsLine = (s) => `⚠ ${plural(s.gaps, "gap")} · ${ms(s.gapMs)} of silence mid-reply`;
 
+// Words heard and not acted on: the agent's own voice coming back, or words a
+// recognizer made up with no voice behind them (`why: "no voice"`).
+export function echoLine(msg) {
+  const what = msg.stage === "final" ? "not answered" : "not an interruption";
+  const heard = msg.why === "no voice" ? "🔇 words with no voice behind them" : "🔁 heard its own voice";
+  return `${heard} (“${msg.text}”) — ${what}`;
+}
+
 const VERDICTS = {
   spoke: "💬 had something to say",
   declined: "🤫 nothing worth saying",

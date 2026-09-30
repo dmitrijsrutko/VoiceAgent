@@ -79,3 +79,10 @@ test("the live handler and the review choose the same lines", () => {
 test("a reply still being written when the page loaded is not drawn empty", () => {
   assert.deepEqual(review([{ type: "said", text: "hi" }, { type: "reply_start" }]).map((e) => e.cls), ["msg user"]);
 });
+
+test("an ignored echo or phantom comes back as the note it was live", () => {
+  const entries = review([{ type: "echo_ignored", stage: "partial", text: "네.", why: "no voice" }]);
+  assert.deepEqual(entries.map((e) => e.text), [
+    "🔇 words with no voice behind them (“네.”) — not an interruption",
+  ]);
+});

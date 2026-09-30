@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  audioLine, committedLine, gapsLine, initiativeLine, ms, quietLine, replyLines, thoughtLine,
-  truncatedLine,
+  audioLine, committedLine, echoLine, gapsLine, initiativeLine, ms, quietLine, replyLines,
+  thoughtLine, truncatedLine,
 } from "../../src/voice_agent/web/telemetry.js";
 
 const reply = {
@@ -119,4 +119,11 @@ test("nothing new to think about joins the quiet line", () => {
   const msg = { decision: "unchanged", reason: "micro_pause", consider_ms: 0, prompt_tokens: 0 };
   assert.equal(thoughtLine(msg), "🤫 nothing new to think about · after micro pause");
   assert.equal(quietLine(2, msg), "🤫 2 considerations, nothing worth saying · last after micro pause");
+});
+
+test("words with no voice behind them are not called the agent's own voice", () => {
+  const phantom = echoLine({ type: "echo_ignored", stage: "partial", text: "네.", why: "no voice" });
+  assert.equal(phantom, "🔇 words with no voice behind them (“네.”) — not an interruption");
+  const own = echoLine({ type: "echo_ignored", stage: "final", text: "Riga is the capital." });
+  assert.equal(own, "🔁 heard its own voice (“Riga is the capital.”) — not answered");
 });

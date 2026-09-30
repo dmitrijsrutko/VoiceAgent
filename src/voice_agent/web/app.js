@@ -13,7 +13,8 @@ import {
 import { progress, renderRuling } from "./verdict.js";
 import { chosenEars, servedFacts, showStart, stackQuery } from "./start.js";
 import {
-  audioLine, committedLine, gapsLine, initiativeLine, quietLine, thoughtLine, truncatedLine,
+  audioLine, committedLine, echoLine, gapsLine, initiativeLine, quietLine, thoughtLine,
+  truncatedLine,
 } from "./telemetry.js";
 import { declined, endLines, review } from "./review.js";
 import {
@@ -379,10 +380,7 @@ const handlers = {
 
   floor(msg) { recordFloor(floorEvents, msg, performance.now()); },
 
-  echo_ignored(msg) {
-    const what = msg.stage === "final" ? "not answered" : "not an interruption";
-    add(`🔁 heard its own voice (“${msg.text}”) — ${what}`, "note think telemetry");
-  },
+  echo_ignored(msg) { add(echoLine(msg), "note think telemetry"); },
 
   resumed() {},  // the resumed reply carries its own note
 

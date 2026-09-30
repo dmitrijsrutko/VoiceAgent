@@ -433,6 +433,23 @@ async def test_a_broken_level_never_silences_the_floor() -> None:
     await mic.stop()
 
 
+async def test_a_voice_counts_as_heard_only_while_the_floor_says_so() -> None:
+    """Barge-in asks this before believing the recognizer's words. Ears the
+    detector cannot run on (not 16 kHz) cannot tell, so they are believed."""
+
+    class NarrowSTT(SilentSTT):
+        sample_rate = 8000
+
+    def heard(mic: Mic) -> bool:
+        return mic.heard_voice  # read afresh each time, not narrowed once
+
+    mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
+    assert not heard(mic)  # a new floor is yielded
+    mic._floor.state = "pause"
+    assert heard(mic)
+    assert heard(Mic(NarrowSTT(), RecordingChannel(), never_called))  # type: ignore[arg-type]
+
+
 async def test_a_stopped_mic_stops_hearing() -> None:
     mic = Mic(SilentSTT(), RecordingChannel(), never_called)  # type: ignore[arg-type]
     await mic.start()

@@ -14,12 +14,16 @@
   4.090  <   playback on
   4.710  >   reply_end ttft_ms=500 text='Riga is the capital of Latvia. It sits on the Baltic Sea, a…'
   4.710  >   audio_end seconds=7.86 first_audio_ms=650
+  6.240  >   floor state='speaking' agent=True
   6.500  >   transcript text='Hm'
   6.500  >   interrupt id=1
   6.520  <   playback off (cut)
   6.520  <   interrupted 1 played 2430ms
   6.520  >   truncated played_ms=2430 heard_chars=38 chars=131
   6.528  >   mic_level
+  6.816  >   floor state='micro_pause'
+  7.200  >   floor state='pause'
+  8.096  >   floor state='yielded'
   9.000  >   resumed chars=100
   9.000  >   reply_end resumed=True text='It sits on the Baltic Sea, at the mouth of the Daugava rive…'
   9.150  >   audio_end seconds=6.0 first_audio_ms=150

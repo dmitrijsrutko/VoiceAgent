@@ -136,6 +136,14 @@ class Mic:
         return self._listening and self._floor.state == "speaking"
 
     @property
+    def heard_voice(self) -> bool:
+        """The voice detector heard speech in the last ~2 s (the floor is not
+        `yielded`). True without a detector, where it cannot say."""
+        if not self._hears:
+            return True
+        return self._floor.state != "yielded"
+
+    @property
     def held(self) -> bool:
         """Something is expected to fill the silence: a turn, or a reply playing."""
         return bool(self._holds)

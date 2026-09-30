@@ -321,6 +321,12 @@ class Session:
         voice = self._voice
         if voice is None or not voice.audible:
             return
+        if self.mic is not None and not self.mic.heard_voice:
+            # Words with no voice behind them: a recognizer can make them up
+            # out of the faint echo a phone's canceller leaves. The next
+            # partial is judged afresh, so a voice heard a moment later cuts in.
+            await self._echo_ignored(text, "partial", why="no voice")
+            return
         said = voice.text
         # Judged against the tail of the reply, not all of it: the text is
         # complete long before its audio has finished playing (see `echo.recent`).
@@ -358,14 +364,17 @@ class Session:
             return False
         return echo.is_replay(text, voice.text)
 
-    async def _echo_ignored(self, text: str, stage: str) -> None:
+    async def _echo_ignored(self, text: str, stage: str, why: str = "") -> None:
         """Reported once per utterance while it is heard, and again if it was
         committed: the page and the record should show every time the agent
         declined to answer itself."""
         if stage == "partial" and self._echo_noted:
             return
         self._echo_noted = stage == "partial"
-        await self._channel.send_json({"type": "echo_ignored", "stage": stage, "text": text[:160]})
+        frame: dict[str, object] = {"type": "echo_ignored", "stage": stage, "text": text[:160]}
+        if why:
+            frame["why"] = why
+        await self._channel.send_json(frame)
 
     async def _resume_if_nobody(self, due: ResumeDue) -> None:
         """Carry on with a reply cut by words nobody followed up.

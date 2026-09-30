@@ -14,6 +14,36 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Fix — Words with no voice behind them no longer cut the agent off
+
+On an iPhone (Safari, speaker) the agent was interrupted 12 times in six
+minutes, 5 of them with nobody speaking, and restarted its line after those;
+the page showed words nobody said.
+Chapter 30's trace showed why. The phone's echo canceller works — the agent's
+voice reached the mic at −47 to −65 dBFS, against −17 to −25 for the user — but
+ElevenLabs' realtime recognizer made words out of that residue ("네.",
+"Какая-нибудь домохозяйка?", "Я так думаю."). They were not the agent's words,
+so the echo check took them for the user's and interrupted; nobody followed, so
+the reply resumed. The voice detector heard nobody each time (floor `yielded`).
+
+- **A partial over the agent's voice needs a voice behind it**
+  (`Mic.heard_voice`: the floor is not `yielded`, speech in the last ~2 s). If
+  not, it is `echo_ignored` with `why no voice`, and the next partial is judged
+  afresh. Replayed over that session's 12 interruptions: the 5 phantoms are
+  blocked, the 7 real ones kept — including a quiet "Да, в 1990-х." at −58 dBFS,
+  which a level threshold would have lost; hence the detector, not the level.
+  Ears the detector cannot run on (not 16 kHz) are believed as before.
+- Tape `phantom_partial` (the live words, no voice: no interrupt; a voiced
+  barge-in still cuts). `phantom_resume` used a voiceless "Hm" to test resuming;
+  it now voices it, and its golden is otherwise unchanged.
+- Limits: "the last ~2 s" is not "behind this partial" — the floor stays
+  `pause` about 2 s after the user stops, so a phantom in a reply's first
+  moments still cuts in (none of the 12 did; requiring speech after the voice
+  started would have blocked 2 real ones). A phone loud enough for its echo to
+  trigger the detector falls back to the word check. Only partials are gated:
+  a phantom committed with text would still be answered (here they committed
+  empty). The ignored words still show grey on the page.
+
 ## Chapter 30 — Millisecond observability: the conversation's events and the mic's level, no audio
 
 Tracing the empty DeepSeek replies and the echo turns hit three walls: the

@@ -16,13 +16,17 @@ from voice_agent.stt.base import Transcript
 from voice_agent.tts.base import AudioChunk
 
 
-async def speak_over(session: Session, words: str = "wait") -> None:
-    """One partial transcript with words in it, as the recognizer sends them."""
+async def speak_over(session: Session, words: str = "wait", voiced: bool = True) -> None:
+    """One partial transcript with words in it, as the recognizer sends them —
+    with a voice behind it, as the voice detector would hear, unless `voiced`
+    is False: the words a recognizer makes up out of a phone's faint echo."""
     assert session.mic is not None
     session.mic._stt.script = [Transcript(words, is_final=False)]  # type: ignore[attr-defined]
     session.mic._stt._remaining = iter(session.mic._stt.script)  # type: ignore[attr-defined]
     if not session.mic.listening:
         await session.mic.start()
+    # Voiced: heard a moment ago and stopped, so a resume is still possible.
+    session.mic._floor.state = "pause" if voiced else "yielded"
     session.mic.feed(b"\x00\x00")
 
 
@@ -38,6 +42,26 @@ def talking_agent(
     llm, tts = FakeLLM(replies=[reply, "Sure."], pace=pace), FakeTTS()
     session, channel, _ = session_for(llm, FakeSTT(script=[]), latency=latency, tts=tts)
     return session, channel, llm, tts
+
+
+async def test_words_with_no_voice_behind_them_do_not_stop_it() -> None:
+    """Seen live on an iPhone: the recognizer turned the echo left by the
+    phone's canceller into "Я так думаю." while the voice detector heard nobody,
+    and the agent cut itself off, then resumed — 5 of 12 interruptions in six
+    minutes."""
+    session, channel, llm, _ = talking_agent()
+
+    await session.submit("tell me something long")
+    await channel.wait_for("audio_bytes", count=3)
+    await speak_over(session, "Я так думаю.", voiced=False)
+    await channel.wait_for("echo_ignored")
+    await channel.wait_for("reply_end")
+
+    ignored = next(f for f in channel.frames if f["type"] == "echo_ignored")
+    assert ignored["why"] == "no voice"
+    assert not [f for f in channel.frames if f["type"] == "interrupt"]
+    assert len(llm.seen) == 1
+    await session.close()
 
 
 async def test_words_over_the_agent_stop_it_and_keep_only_what_was_heard() -> None:
