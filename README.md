@@ -70,6 +70,7 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **Sonnet 5.5.** The balanced Claude option runs Claude Sonnet 5.5 instead of Sonnet 5 (`?llm=sonnet-5-5`), still at effort `low`.
 - **29 — The admin page.** `/admin`, behind `VOICE_AGENT_ADMIN_KEY`, shows health, usage totals (since the deploy, 24 h, 7 days, all), ElevenLabs and DeepSeek balances, per-model/ears/voice/judge/role breakdowns, and every recorded session with its topic, score, visitor hash and a link to the live conversation or its record. All of it is read back from the session records. Each record now ends every connection with a `totals` line and carries a hashed visitor, never the address.
 - **30 — Millisecond observability, no audio.** The trace now holds every control message to and from the page (`page.out`, `page.in`) and the microphone's level every 250 ms while the agent speaks (`mic.level`). Each record block gets an `at HH:MM:SS.mmm` note, and each agent voice gets a `mic_level` note: the level during it against the quiet baseline, which is echo as a number. `scripts/echo_eval.py` uses both.
+- **Fixes from live iPhone sessions.** Words with no voice behind them no longer cut the agent off, and a sentence the recognizer loses (voice heard, no words committed) is asked for again instead of dropped. The language a conversation is being spoken in is remembered **per conversation** — a language hint used to live on the recognizer, which is one instance shared by the whole server, so it reached the next conversation's first sentence — and is sent as a narrowed set first, a pin only once the same language has been heard twice.
 
 ## Requirements
 
@@ -151,6 +152,7 @@ tests/                    pytest; tests/web/ holds node tests; tests/scenarios/ 
                           each ending with what a judge would read; tests/fixtures/ a real record and ruling
 scripts/pull-fly.sh       before a deploy: Fly's logs, the volume's records and traces into fly-archive/ (gitignored)
 scripts/echo_eval.py      what the echo rules would drop, over every archived conversation
+scripts/language_eval.py  what each listening session was told about the language, session by session
 ```
 
 ## Deployment

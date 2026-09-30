@@ -14,6 +14,132 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Fix — The language belongs to the conversation, and is pinned only once heard twice
+
+A sentence of Russian was decoded as Turkish letters — "Karandaz oğğl, lütshe
+çem ruchka" for «карандаш лучше чем ручка» — and the attempt to repeat it
+committed nothing at all. Both are the recognizer decoding with the wrong
+acoustic model, and the reason it had one was ours: `ElevenLabsSTT.language` was
+**instance** state on an adapter that is a process-wide singleton
+(`Backends.ears` builds one per backend and keeps it), so a hint left by the
+last conversation that spoke opened the next conversation's first session:
+
+```
+same instance: True
+conversation B hinted: tur
+url B: …&include_language_detection=true&language_code=tur
+```
+
+A conversation newly opened from the front page could therefore decode its first
+sentence in a language nobody in the room was speaking, and only heal once a
+commit with text had replaced the hint.
+
+Two lesser defects had the same cause. The first session of every conversation
+still guesses, because a hint only exists from the second commit on — it is
+*that* guess which the leak then made wrong. And `self.language = language` was
+guarded by `and text`, so the language detected over an utterance the recognizer
+could not write down was dropped, which is the empty commit above: the one piece
+of evidence that the guess in force was wrong, thrown away. The reproduction is
+local (`Backends` + `ElevenLabsSTT`); whether *this* round of 09-30 was caused by
+the leak or by a misdetection on the first sentence is not provable from the
+pulled traces, which predate the hint being traced at all — the fix removes the
+first, and the trace now names the second.
+
+**What changed**
+- **The adapter holds no language.** `stream(audio, language=...)` takes a
+  `LanguageHint` and `session_url()` re-derives the URL per session, so a hint
+  cannot outlive the conversation it belongs to. `stt.session` in the trace now
+  names the hint sent (`language`, `candidates`), and
+  `scripts/language_eval.py` (new) prints every session's hint and every
+  commit's language over archived traces — the only place a hint is visible,
+  since no frame carries one.
+- **The hint travels with the commit.** `Transcript.language` carries what the
+  recognizer said the audio was in — *including on a commit whose text is
+  empty*, which used to be dropped, and with it the only evidence that the guess
+  in force was wrong. `mic.py` passes it to the `transcript` frame (`lang`) and
+  `Final`; `Session.submit` records it on the conversation, after the echo
+  judgement, so the agent's own voice cannot teach it anything.
+- **Two tiers, because a wrong one costs differently.** `language.py` (new)
+  holds the rule: the first sighting is sent as `secondary_languages` — the
+  vendor's own soft form, which narrows detection to a set and leaves the
+  recognizer's answer an answer — and only a second sighting is sent as
+  `language_code`, the strong prior. A language that contradicts the pin the
+  session ran with is the strongest evidence there is: the pin goes, and the
+  language that contradicted it leads the candidates, so the next session is
+  narrowed to what was actually heard rather than to the guess that was wrong.
+- **The memory lives on `Conversation`** (with the other per-conversation pins),
+  survives a reconnect or a reload, and is asked afresh at each listening
+  session through a callable `Mic` was given — never captured once.
+
+**Design decisions**
+- **Per conversation, not per process**, and not "better detection": the
+  recognizer being shared is deliberate (an adapter per conversation would pay
+  DNS and TLS again for every visitor), so the state it must not hold is the
+  state that has to move.
+- **`secondary_languages` before `language_code`,** taken from the vendor's own
+  SDK description (`elevenlabs/realtime/scribe.py:65-68`): a pin is a strong
+  prior and a wrong one decodes a whole session in the wrong language, while a
+  candidate is recoverable. Rejected: pinning on the first sighting (the
+  previous behaviour, and what made one short utterance final), and never
+  pinning at all (Russian is what most turns here are, and the pin is what had
+  been making later sessions good).
+- **One owner.** The language is learned in `Session.submit`, where the turn is
+  actually started, so an utterance judged echo, dropped, merged or `unheard`
+  teaches nothing — and a fragment held for the rest of its sentence carries its
+  language until the turn it becomes is submitted. Rejected: learning in `Mic`,
+  which does not know what the session did with the commit.
+- **Open question this does not answer**: the *first* session still guesses —
+  there is nothing honest to tell it — so one round of misdetection remains
+  possible, and the `unheard` re-ask from the previous fix is what catches it.
+
+**Latency impact** — none measured and none expected: the hint is query
+parameters on a socket that was already opened, and nothing new is on the audio
+path. The effect is on *retries*: the round that prompted this cost two extra
+turns, tens of seconds, and the extra speech-recognition audio that goes with
+them.
+
+**Deliberately not done**
+- No language chip on the page, and no page code at all: the field rides the
+  `transcript` frame, so it is in the record and the trace without the interface
+  learning a new vocabulary. The record's settings line is written once and
+  stays as it was.
+- No change to `vad_silence_threshold_secs`, turn-taking, or the `unheard` rule.
+- No patience for a second language in one conversation beyond the two kept
+  candidates: a longer tab would end up naming every language and narrowing
+  nothing.
+
+**Verification**
+- `uv run verify` — 877 tests, ruff, format, mypy strict.
+- New: `test_language.py` (the rule itself, case by case), the shared-instance
+  regression in `test_backends.py` and over a real socket in
+  `test_listening.py`, the empty-text commit in `test_stt.py` (which also
+  asserts the adapter has no `language` attribute to leak, using `url` rather
+  than a fresh `session_url()` so the assertion is about what a session with
+  nothing remembered really sends), the per-session hint re-read in
+  `test_mic.py`, and the recording in `test_session.py` — including the echo
+  case below.
+- **Two bugs found reviewing the fix itself.** A pin contradicted by the
+  recognizer was dropped *without* remembering the language that contradicted
+  it, so the next session opened narrowed to the wrong language — the same trap
+  one round later. And `_spoken` recorded the language before `submit` judged
+  the commit echo, so the agent's own voice, heard back through the speaker,
+  could set the conversation's language. Both have tests that fail without their
+  fix: `test_a_language_that_contradicts_the_pin_demotes_it` and
+  `test_a_commit_judged_to_be_echo_teaches_no_language`.
+- The one-guessing-session story is a tape, not a live run: `language_hint`'s
+  first session opens with nothing, the second with `rus` as a candidate, and
+  `test_tapes.py` asserts the hints themselves — no frame carries a hint, so
+  nothing else can.
+- Live, **not yet run** — no deploy was made for this change: a fresh
+  conversation's first `stt.session` trace must show no `language` and no
+  `candidates`, the next one `candidates ['rus']`, the one after `language rus`.
+  `scripts/language_eval.py` prints exactly that. Reported in this entry when it
+  has been run.
+- The socket-level test above cannot distinguish the old adapter from the new
+  one on its own: with a faked recognizer the leak had no observable effect.
+  The leak is guarded at the adapter (`test_stt`), at the shared instance
+  (`test_backends`), and by the protocol's `stream` signature (mypy).
+
 ## Fix — A verdict that slips on one brace is repaired; the judge leaves JSON mode
 
 A 6-minute round (09-30 09:03) ended "No verdict": both attempts returned the
