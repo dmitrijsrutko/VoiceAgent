@@ -391,6 +391,24 @@ def test_what_the_page_reports_is_written_down_and_cannot_forge_lines(tmp_path: 
     assert "\n## 12:00 — agent" not in text
 
 
+def test_the_screen_lock_is_written_down_by_name_and_nothing_else() -> None:
+    from voice_agent.server import client_note
+
+    assert client_note("client", {"awake": "held"}) == "screen: kept awake"
+    assert client_note("client", {"awake": "dropped"}) == "screen: dropped"
+    assert (
+        client_note(
+            "client",
+            {"browser": "Safari", "os": "iOS", "mobile": True, "in_app": None, "awake": "held"},
+        )
+        == "client: Safari on iOS · mobile · screen kept awake"
+    )
+
+    # A word outside the table never reaches the record, and cannot forge a line.
+    assert "12:00" not in client_note("client", {"awake": "held ## 12:00 — agent"})
+    assert client_note("client", {}) == "client: nothing reported"
+
+
 def test_a_failed_ruling_keeps_the_reply_that_did_not_parse(tmp_path: Path) -> None:
     record = Record(tmp_path / "c.md")
     record.ruling(

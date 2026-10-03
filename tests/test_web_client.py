@@ -326,6 +326,50 @@ def body_of(script: str, signature: str) -> str:
     return body[: body.index("\n}")]
 
 
+def test_the_screen_lock_is_asked_for_in_the_tap_and_let_go_at_the_end() -> None:
+    """`awake.js` is executed under node; the page that uses it is not, so a
+    deleted call would be invisible. Asked for outside the gesture, WebKit
+    refuses the lock — and a lock never released keeps a phone awake after the
+    conversation that needed it."""
+    app = source("app.js")
+    tap = body_of(app, "begin.onclick = async () => {")
+
+    assert "awake.want()" in tap
+    assert not re.search(r"\bawait\b", tap[: tap.index("awake.want()")]), (
+        "asked for after the gesture was over"
+    )
+    assert "awake.release()" in body_of(app, "function endConversation(why) {")
+
+
+def test_a_judged_round_lets_go_of_the_screen_when_its_ruling_arrives() -> None:
+    """The lock outlives `ended` for the verdict wait — the one moment in a
+    judged round when the user is watching and doing nothing else. A wait that
+    nothing releases, or one with no bound, is a phone left lit for a judge that
+    never answered."""
+    ruling = body_of(source("app.js"), "async function awaitRuling() {")
+
+    assert "awake.release()" in ruling
+    assert "RULING_HOLD_MS" in ruling
+
+
+def test_leaving_the_lock_held_is_only_ever_leaving_it_to_a_ruling_wait() -> None:
+    """`endConversation` skips the release for a judged round because a ruling
+    wait follows and lets go — the bound for a hung judge lives inside that wait,
+    so a third ending that forgot it would hold a screen with nothing to release
+    it. Both halves are text a test can read: the page is executed by none."""
+    app = source("app.js")
+    release = re.search(r"if \(!\(.*?\)\) awake\.release\(\);", app)
+
+    assert release, "the release in endConversation is no longer guarded"
+    assert "judge" in release.group(0) and "ruled" in release.group(0), (
+        "the lock is left held for something other than a round awaiting its ruling"
+    )
+
+    for ending in re.finditer(r'endConversation\("ended"\)', app):
+        following = app[ending.end() : ending.end() + 200]
+        assert "awaitRuling()" in following, "an ending whose lock nothing releases"
+
+
 def test_nothing_scrolls_the_log_outside_the_helper(page_script: str) -> None:
     """Telemetry is the last thing appended to a turn, so an append that does
     not scroll is one nobody ever sees."""

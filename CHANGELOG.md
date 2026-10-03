@@ -14,6 +14,138 @@ Newest chapter first. Each entry says *why* the chapter was the right next
 step — the diff already says what changed. The chapter entry format is
 specified in [AGENTS.md](AGENTS.md#5-documentation-is-part-of-every-chapter).
 
+## Chapter 33 — The screen stays awake: a wake lock held for exactly the conversation
+
+A phone locks its screen after a minute or two without a touch, and a locked screen is a
+suspended page: playback stops, the microphone stops, and a six-minute judged round carries on
+with nobody in it. Nothing in the page had ever asked for anything — the recognizer's own
+`IDLE_TIMEOUT_SECONDS` ended listening 30 s into the sleep, and a socket that died with the
+freeze offered "start a new conversation", the round and its ruling gone. The desktop never
+showed it, which is the trap: its display-sleep setting is simply longer than a round, so the
+one place the bug was invisible was the one place it was looked for. This chapter asks the
+platform for the only thing that can hold a screen — `navigator.wakeLock.request("screen")` —
+for exactly as long as a conversation is running, and writes down what came of asking. It does
+not attempt to survive a screen that sleeps anyway.
+
+**What changed**
+- `web/awake.js` (new): `createAwake({ wakeLock, doc, onState })` → `want()`, `release()`,
+  `settled()`, `state`. Asks only while wanted **and** visible, asks again on becoming
+  visible, forgets a lock the platform took back, and answers in one word: `held`, `dropped`,
+  `refused`, `failed`, `unsupported`, `released`. `screenLine()` words it for the page's own
+  line, `screenNote()` for the user, says nothing for the states that need no saying, and
+  `worthRecording()` says which words the record keeps — the ones describing a lock. Only a lock
+  that was actually held is let go: a browser that refused keeps saying why, and a page that
+  never asked — a review of an ended conversation — says nothing at all.
+- `web/app.js`: `awake.want()` in the start tap, before the first `await` — WebKit refuses a
+  wake lock asked for without transient activation, the same rule the microphone is already
+  asked under. `awake.release()` in `endConversation`, beside the microphone and the voice —
+  except for a judged round, whose lock outlives `ended` until the ruling is on screen: released
+  in `awaitRuling`'s `finally` however that wait ends, bounded by `RULING_HOLD_MS`, and not held
+  at all when the socket dropped, since no ruling is coming. One telemetry line, reused rather
+  than appended, and one note the first time the screen will not be held. The state rides the
+  existing `client` message, so the server hears it with no new message type.
+- `server.py`: `client_note` words the screen state for the record from a fixed table —
+  `screen: kept awake`, `screen: refused by the system` — and drops any word outside it, as
+  every other client-supplied field is dropped when it is not what it claims to be.
+- `tests/web/awake.test.mjs` (new, fifteen executed cases): taken on the tap and let go at the
+  end; nothing asked from the start screen; a hidden page never asked and a return asked; hiding
+  drops the lock, the return holds it again, and the old lock's late release cannot report the
+  new one gone; the system taking a lock back is a word and not a loop; a lock granted after
+  the round ended is released at once without being announced; a refusal and a missing API are
+  words, never throws; an ask abandoned by hiding, or by the round ending, is neither a refusal
+  nor a failure; a lock that was never held is never announced as let go, and a round after one
+  is a new ask; and the words the record keeps are the ones that describe a lock.
+- `tests/test_web_client.py`: the one thing no executed test can see — that the ask is still
+  inside the tap, with nothing awaited above it, that the lock is let go at the end, and that
+  leaving it held is only ever leaving it to a ruling wait: the release in `endConversation` is
+  still conditioned on `judge` and `ruled`, every `endConversation("ended")` is followed by
+  `awaitRuling()`, and that wait both releases and is bounded. Each of the three regressions was
+  confirmed to fail the check rather than pass it quietly.
+- `tests/test_record.py`: the record line, and that a forged word cannot reach it.
+- `README.md`, `CHANGELOG.md`.
+
+**Design decisions**
+- **A word, not a boolean.** "Is the screen held?" has five interesting answers, and four of
+  them are reasons to look at the record later. The words that describe a lock travel unchanged
+  from the page to the record, so a phone that slept is one `grep` away instead of a story
+  about a phone.
+- **`released` is the page's word, not the record's.** Every ordinary round ends by letting go,
+  so recording it would add a line to every conversation to say nothing; `idle`, the start
+  screen, is not news either. Both are still shown on the page, where they answer "is the
+  screen being held right now?".
+- **The lock covers the conversation the user is in, whichever role plays it.** Asked whether the
+  thinking partner got this too: it does, and by construction — `awake.want()` is in the start
+  tap, before the socket exists, and the server does not name the role until `ready`; nothing on
+  the lock's path reads it. What the roles change is how long the lock is held and when it goes.
+  `round_budget` gives the advocate its card's 6 minutes and a role without `minutes` the
+  deployment's 30, which is the cost of the feature stated plainly: a half-hour thinking-partner
+  session holds a lit screen for half an hour. And only a judged round has a verdict wait — the
+  one place the two differ in the other direction, where the round is over, the panel is up, and
+  the user is watching it with nothing else to do. So the lock outlives `ended` there, bounded at
+  2 minutes: the page's own expectation is 30 s (`verdict.js`), the two rulings in `sessions/`
+  took 15.5 s and 25.9 s, and the live one below took 14.4 s — so about five times the slowest
+  ruling seen, and a judge slower than that is not worth a lit screen. The patience loop keeps
+  running either way, and a woken page still shows the verdict.
+- **Asked for on the tap and on becoming visible, never on a timer.** A device that refused —
+  low power mode, an in-app browser — must not be asked once a second, and a lock taken back by
+  the system must not be re-asked in a loop only the platform can end. The tap is a gesture;
+  the return is a fresh reason. Nothing else is.
+- **Hiding is not a failure, and the page forgets its own handle.** Every platform releases the
+  lock when the document is hidden, so `awake.js` drops the handle on the way out rather than
+  waiting for an event that would otherwise block every later ask. A refusal stays a refusal
+  through any number of tab switches: only a lock that was actually held can be reported
+  dropped.
+- **The refusal is a note with the setting in it**, not a silent degradation — `micFailure`'s
+  precedent, for the same reason: "the system would not keep the screen awake — low power mode
+  refuses it (on an iPhone: Settings → Battery → Low Power Mode)".
+- **Not the silent video.** A muted looping `<video>` (NoSleep.js) was the pre-16.4 workaround.
+  It burns battery, fails silently and differently on each iOS version, and it is exactly the
+  kind of guess this project does not build a guarantee on. Where the API is missing, the page
+  says so; the next chapter decides what to do about it.
+- **Not in the audio path, and not a control.** The lock is asked for once and never read by
+  playback, the gate, or the clock. There is no user-facing toggle: a conversation that talks
+  to you is not a case where "let the screen sleep" is a preference worth a switch.
+
+**Latency impact** — none: nothing here is on the audio path, and no measured stage changed.
+Observed in the browser exercise: the page reads `held` while the socket is connected — the ask
+is made in the tap, and the socket opens after it.
+
+**Deliberately not done** — surviving a screen that sleeps anyway: an away/hold event so the
+server's clock, the recognizer and the judge know nobody was there, a microphone re-armed on
+return without a tap, and a socket the freeze killed reconnected. The refusal note is the
+instrument that says how much of that is needed, and it is Chapter 34's work. Also not done: a
+manifest to make the page installable, and any attempt to fake a held screen.
+
+**Verification** — `uv run verify`. Real exercise: headless Chrome 154 driven over CDP against
+a local server, the page worked as a person works it. Click Start: `screen: kept awake` in the
+page's line, and `screen: kept awake` in the session record beside `client: Chrome on macOS`.
+Click End: `screen: let go`. With `navigator.wakeLock` removed before the page loaded, and with
+a `NotAllowedError` refusal, the same run read `screen: not supported by this browser` and
+`screen: refused by the system`, each with its note in the log, and the conversation connected
+and greeted in both. Both roles were then exercised the same way: with `--role thinking_partner`
+the header read *Thinking partner*, the card's own opening arrived, and the page and its record
+read `screen: kept awake` — the record naming `role thinking_partner` and one screen line, over a
+socket that never heard a judge. And a judged round, three typed turns, read `screen: kept awake`
+at every 300 ms sample for the first 11 s of the 14.4 s the judge took, and `screen: let go` with
+the ruling card on the same page once it arrived — the hold across the verdict wait, observed
+rather than assumed. A reload of an ended judged conversation, which is the `served.ended` path,
+took no lock at all: no telemetry line, and its "No contest" ruling redrawn. `ledger.read()` over
+all three records: no `error`, one `screen:` line each. **Not verified: a real phone.** The
+six-minute round on an iPhone with the screen untouched is the exercise this chapter exists for,
+and a terminal cannot run it; the record now says which of `held` / `refused` / `unsupported` that
+phone answered.
+
+**Fixes**
+- An ask abandoned by hiding was reported as a refusal: every platform refuses a hidden
+  document, so a tab switch inside the ask's window was written down — and shown to the user — as
+  low power mode. The answer that arrives after the reason for asking went away is now ignored,
+  and the next return asks again. Found by review, reproduced by a test that was red before the
+  fix.
+- A browser that refused the lock was announced as having let it go when the conversation ended,
+  so the last word about the screen named a release rather than the reason. Only a lock that was
+  actually held is let go now: a refusal keeps saying why, a page that never asked says nothing,
+  and a lock granted after the round ended is still released rather than leaked.
+
 ## Chapter 32 — Universal-3.6 Pro: thirty-two languages, and the ears get a name
 
 AssemblyAI's flagship streaming model is a drop-in: same socket, same parameters,

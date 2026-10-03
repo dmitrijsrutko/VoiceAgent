@@ -632,6 +632,17 @@ async def converse(agent: Agent, websocket: WebSocket, conversation: Conversatio
 
 CLIENT_WORD = re.compile(r"[^\w .:/()-]")
 
+SCREEN_WORDS = {
+    "held": "kept awake",
+    "dropped": "dropped",
+    "refused": "refused by the system",
+    "failed": "failed",
+    "unsupported": "not supported by this browser",
+}
+"""The page's screen lock, as the record words it. A word outside this table is
+dropped rather than written: the page is the one place these arrive from, and a
+record line is not the place to find out it was wrong."""
+
 
 def client_note(kind: str, payload: dict[str, object]) -> str:
     """The page's report as one line, each field cut short and stripped of
@@ -644,10 +655,16 @@ def client_note(kind: str, payload: dict[str, object]) -> str:
         return CLIENT_WORD.sub("", str(value))[:limit] if value is not None else ""
 
     if kind == "client":
+        screen = SCREEN_WORDS.get(field("awake").lower(), "")
         in_app = field("in_app")
         where = f" · inside {in_app}" if in_app and in_app != "None" else ""
         mobile = " · mobile" if payload.get("mobile") is True else ""
-        return f"client: {field('browser')} on {field('os')}{mobile}{where}"
+        # A report about the screen alone: the browser was written down when the
+        # socket opened, and saying it again would be noise.
+        if not (field("browser") or field("os")):
+            return f"screen: {screen}" if screen else "client: nothing reported"
+        held = f" · screen {screen}" if screen else ""
+        return f"client: {field('browser')} on {field('os')}{mobile}{where}{held}"
     return f"client error: {field('what')} · {field('name')} · {field('message', 160)}"
 
 

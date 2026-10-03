@@ -74,6 +74,8 @@ previous one. [CHANGELOG.md](CHANGELOG.md) has the reasoning and the numbers
 - **Fixes from live iPhone sessions.** Words with no voice behind them no longer cut the agent off, and a sentence the recognizer loses (voice heard, no words committed) is asked for again instead of dropped. The language a conversation is being spoken in is remembered **per conversation** — a language hint used to live on the recognizer, which is one instance shared by the whole server, so it reached the next conversation's first sentence — and is sent as a narrowed set first, a pin only once the same language has been heard twice.
 - **32 — Universal-3.6 Pro: thirty-two languages, and the ears get a name.** AssemblyAI's flagship streaming model replaces 3.5 Pro on the same socket, and the languages this project can hear go 18 → 32 (Russian among them). Every final turn now reports the language it was spoken in, so the conversation's two-tier language memory — until now Scribe's alone — steers AssemblyAI too, via `language_codes`. The start screen names both recognizers by **model** rather than by vendor: **AssemblyAI Universal-3.6 Pro Realtime · 32 languages** and **ElevenLabs Scribe v2 Realtime · 100 languages** (the vendor says "90+"; its published list is exactly 100, and the badge counts that list). Measured on the real endpoint, same audio: commit after the last audio frame 128–165 ms against 226–321 ms on 3.5 Pro.
 
+- **33 — The screen stays awake.** A phone locks its screen after a minute without a touch, and a locked screen ends the round: listening stopped 30 s in, and a socket that died with the freeze offered "start a new conversation". The page now holds a **screen wake lock** for exactly as long as a conversation runs — whatever role plays it, asked for in the start tap, let go at the end (for a judged round, not until its ruling is on screen), taken again when the page comes back — and the session record says what came of it, `screen: kept awake`. Where the platform refuses (iOS before 16.4, an in-app browser, low power mode) the page says which and names the setting, instead of letting the screen sleep in silence.
+
 ## Requirements
 
 - Python ≥ 3.12 and [uv](https://docs.astral.sh/uv/)
@@ -143,6 +145,7 @@ src/voice_agent/
     review.js             an ended or reloaded conversation redrawn from its kept frames (tested in node)
     floor.js              the floor strip (tested in node)
     timer.js, client.js   the countdown; the browser family reported (tested in node)
+    awake.js              the screen kept awake for the conversation (tested in node)
     verdict.js            the judge's ruling as a card (tested in node)
     player.js, karaoke.js, playback-worklet.js   playback and highlighting (tested in node)
     mic.js, capture-worklet.js, ui.js, protocol.js

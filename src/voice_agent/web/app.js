@@ -1,6 +1,7 @@
 // Wiring: the socket, the messages it carries, and the page's two controls.
 // Each module below owns one job; this file owns the state they share.
 
+import { createAwake, screenLine, screenNote, worthRecording } from "./awake.js";
 import { paintFloor, record as recordFloor } from "./floor.js";
 import { buildMic, micFailure } from "./mic.js";
 import { WARN_MS, countdown } from "./timer.js";
@@ -96,6 +97,27 @@ function micFailed(err) {
   report(clientError("microphone", err));
 }
 
+// The screen stays on for as long as the conversation: asked for in the start
+// tap, let go when the conversation ends. One telemetry line, reused rather
+// than appended, and one note the first time it cannot be held — a round that
+// ran with nobody in it has to be explainable from the record afterwards.
+let awakeLine = null;
+let screenSaid = false;
+const awake = createAwake({
+  onState(state, err) {
+    awakeLine ??= add("", "note telemetry");
+    awakeLine.textContent = screenLine(state);
+    // What the server cannot see: a phone that slept and a phone that was held
+    // look identical in a transcript.
+    if (worthRecording(state)) report(clientInfo({ awake: state }));
+    const said = screenNote(state, err);
+    if (said && !screenSaid) {
+      screenSaid = true;
+      add(said, "note");
+    }
+  },
+});
+
 function paintListening() { paint(listening, speaking); }
 
 // The time limit, counted from this connection like the server's own. Shown
@@ -139,6 +161,12 @@ function endConversation(why) {
   // here, or the agent talks on after the conversation is over.
   player.stop(() => {});
   if (bubble) endBubble();
+  // A screen held awake for a conversation nobody is in is battery burnt for
+  // nothing: the lock goes with the microphone and the voice — except during a
+  // judged round's ruling, which the user is watching for, and which
+  // `awaitRuling` lets go of. A socket that dropped has no ruling coming, so it
+  // goes here like everything else.
+  if (!(why === "ended" && judge && !ruled)) awake.release();
   status.textContent = why === "ended" ? "· ended" : "· disconnected";
   setEnabled(false);
   again = document.createElement("button");
@@ -442,6 +470,12 @@ const handlers = {
 // is shown as a panel above the way out, and the way out stays shut until the
 // ruling is in.
 const JUDGE_PATIENCE_MS = 10 * 60_000;  // then stop asking; a reload asks again
+// How long the screen is held for a ruling, once the round itself is over. The
+// user is watching this panel with nothing else to do, so the lock outlives
+// `ended` — but not for the whole patience: two minutes is four times the 30 s
+// the page expects (`verdict.js`) and about five times the slowest ruling on
+// record (25.9 s), and a judge quieter than that is not worth a lit screen.
+const RULING_HOLD_MS = 2 * 60_000;
 let judge = null;
 let announced = false;
 let panel = null;          // the wait, then the card: drawn once
@@ -466,6 +500,9 @@ async function awaitRuling() {
   const began = performance.now();
   const elapsed = () => (performance.now() - began) / 1000;
   const tick = setInterval(() => { panel.innerHTML = progress(judge.title, elapsed()); }, 250);
+  // The round is over and the screen is still held for this: whoever waits for
+  // a verdict is looking at it.
+  const hold = setTimeout(() => awake.release(), RULING_HOLD_MS);
   try {
     for (;;) {
       let response;
@@ -500,6 +537,11 @@ async function awaitRuling() {
     }
   } finally {
     clearInterval(tick);
+    clearTimeout(hold);
+    // However the wait ended — a ruling, none, or a judge too slow — the page
+    // is done with the conversation now, and the screen is its own again. A
+    // page that never asked (a review of an ended conversation) says nothing.
+    awake.release();
   }
 }
 
@@ -539,6 +581,9 @@ begin.onclick = async () => {
   // is the only moment the browser will allow audio to start. Everything else
   // here can happen a tick later; this cannot.
   const resumed = player.resume();
+  // The same tap, for the same reason: WebKit refuses a wake lock that was not
+  // asked for inside a gesture, and this is the only gesture there is.
+  awake.want();
   // The microphone is asked for in the same tick, not after awaiting the
   // resume: WebKit (every iPhone browser) counts an await as the end of the
   // tap, and refuses a request made after it with NotAllowedError. Asked here,
